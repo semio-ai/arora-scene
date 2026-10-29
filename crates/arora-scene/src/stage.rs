@@ -160,7 +160,9 @@ fn sky_for(environment: Environment, theme: Theme) -> SkyUniform {
             horizon: linear(Color::srgb_u8(0x12, 0x1a, 0x2e)),
             ground,
             stars: 1.0,
-            falloff: 1.5,
+            // A thin band: the blue stays near the horizon and most of the
+            // night is the zenith's near-black.
+            falloff: 4.0,
             ..default()
         },
     }

@@ -62,6 +62,12 @@ fn mountain(latitude: f32, longitude: f32) -> f32 {
     return smoothstep(0.495, 0.505, 0.75 * base + 0.18 * noise1 + 0.12 * noise2);
 }
 
+// How far the range is raised above the horizon, in radians. Unraised, its
+// valleys dip below the horizon and the sky meets the floor directly between
+// the peaks; raised this far, the lowest valley sits clear of it and the
+// range reads as a continuous wall of hills, as it does in Studio.
+const MOUNTAIN_LIFT: f32 = 0.2;
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let dir = normalize(in.world_position.xyz - view.world_position);
@@ -75,7 +81,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Studio's (x, y, z) is (x, -z, y) here. The mountains are the ground's
     // colour, so they read as the floor rising into hills, and they stand in
     // front of the stars.
-    let sky_over_hills = mountain(atan(dir.y), atan2(-dir.z, dir.x));
+    let sky_over_hills = mountain(atan(dir.y) - MOUNTAIN_LIFT, atan2(-dir.z, dir.x));
     colour = mix(sky.ground.rgb, colour, sky_over_hills);
     return vec4(colour, 1.0);
 }
