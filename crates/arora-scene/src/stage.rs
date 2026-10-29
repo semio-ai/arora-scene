@@ -2,7 +2,7 @@
 //! and how the frame is finished.
 //!
 //! A host makes two independent choices, each in a light and a dark variant:
-//! an [`Environment`] and a [`Lighting`] rig. **The environment never lights
+//! an [`Environment`] and a [`Lighting`] anchor. **The environment never lights
 //! the scene.** It is what the robot is seen against, not a source of light on
 //! it, so changing one never changes how the other reads.
 //!
@@ -12,28 +12,33 @@
 //! its own way, because an atmosphere's ground is lit by its sky and would only
 //! ever approximate the plain environment's colour.
 //!
+//! **Both lighting modes are the same lights.** A warm key, a cool fill and a
+//! faint ambient — Studio's camera-relative rig — differing only in what they
+//! are fixed to: the camera, so the side being looked at is the lit one, or
+//! the world, so the light stays put while the viewer moves round it. The
+//! world rig is frozen where the camera rig points from the scene's default
+//! view, so the two read identically until the camera moves.
+//!
 //! Every choice can change while the scene runs. [`Stage`] holds the current
 //! one and the scene follows it; in a window the keys listed by
 //! [`StageReadout`] change it.
 //!
 //! # Where the numbers come from
 //!
-//! The rigs are Studio's own, from `packages/scene`, and Studio is three.js
-//! with no tone mapping. Their intensities carry across through four facts
-//! rather than by eye:
+//! The rig is Studio's own, from `packages/scene`, and Studio is three.js with
+//! no tone mapping. Its intensities carry across through three facts rather
+//! than by eye:
 //!
 //! - The camera's [`Exposure`] makes Bevy's exposure factor exactly one
 //!   ([`UNIT_EV100`]). Bevy scales every light by that factor; three scales by
 //!   nothing.
 //! - A directional light's intensity is irradiance in both engines, and both
 //!   divide by π in the diffuse term, so it carries across unchanged.
-//! - A point light is candela in three and lumens in Bevy, so it gains 4π.
 //! - Ambient light goes through the diffuse 1/π in three and does not in Bevy,
 //!   so it loses π.
 //!
-//! Studio's world is Z-up — its camera's up is +Z and its grid is turned to lie
-//! in XY — while Bevy keeps glTF's Y-up, so Studio's positions pass through
-//! [`from_studio`].
+//! Camera space is the same in both engines — looking down -Z, Y up — so the
+//! rig's camera-local directions need no axis change.
 //!
 //! # Why the sky has its own camera
 //!
@@ -80,38 +85,32 @@ pub enum Environment {
     /// robot.
     #[default]
     Plain,
-    /// Bevy's atmospheric scattering. Day and night are the sun's elevation,
-    /// so the theme picks one rather than choosing between two skies.
+    /// Bevy's atmospheric scattering: day under a light theme, night under a
+    /// dark one, set by the sun's elevation rather than by two skies.
     Atmosphere,
 }
 
-/// What the lights are fixed to.
+/// What the rig is fixed to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum Lighting {
-    /// Fixed in the world, and shadowed. Studio's `static`.
+    /// Fixed in the world, so the light stays put while the viewer moves round
+    /// the content. The key casts shadows, which a fixed light can do sensibly.
     #[default]
     World,
-    /// A key and a fill fixed to the camera, so the side being looked at is the
-    /// lit one. Unshadowed, because a shadow that moves with the viewer reads
-    /// as the object moving. Studio's `studio`.
+    /// Fixed to the camera, so the side being looked at is the lit one.
+    /// Unshadowed, because a shadow that moves with the viewer reads as the
+    /// object moving.
     Camera,
 }
 
 /// The stage as it currently stands. Change it and the scene follows.
-#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stage {
     pub theme: Theme,
     pub environment: Environment,
     pub lighting: Lighting,
-    /// How much of the light Studio's environment used to put on the robot the
-    /// world rig carries instead, from none to all of it. See
-    /// [`former_environment_light`].
-    pub former_environment_fill: f32,
 }
-
-/// The steps [`Stage::former_environment_fill`] cycles through.
-const FILL_STEPS: [f32; 4] = [0.0, 0.25, 0.5, 1.0];
 
 /// The `ev100` at which Bevy's exposure factor, `2^-ev100 / 1.2`, is exactly
 /// one: `-log2(1.2)`.
@@ -131,11 +130,6 @@ const GROUND_DEPTH: f32 = -1.0;
 /// band is a fraction of a pixel from any height the orbit allows.
 pub const GROUND_REACH: f32 = 100_000.0;
 
-/// A Studio position, Z-up, as a Bevy one, Y-up.
-pub fn from_studio(p: Vec3) -> Vec3 {
-    Vec3::new(p.x, p.z, -p.y)
-}
-
 /// The ground colour — Studio's `groundColor`, which it also cleared to.
 fn ground(theme: Theme) -> Color {
     match theme {
@@ -144,55 +138,64 @@ fn ground(theme: Theme) -> Color {
     }
 }
 
-/// Studio's `skyColor`, which its old environment blended toward overhead.
-fn sky(theme: Theme) -> Color {
-    match theme {
-        Theme::Dark => Color::srgb_u8(0x11, 0x11, 0x11),
-        Theme::Light => Color::srgb_u8(0xbf, 0xde, 0xfc),
+/// One directional light of the rig: its colour, its illuminance, and where
+/// Studio places it in camera space.
+struct RigLamp {
+    colour: Color,
+    lux: f32,
+    from: Vec3,
+    /// Whether it casts shadows when fixed in the world.
+    shadows: bool,
+}
+
+/// Studio's camera-relative rig: a warm key above and to the left, a cool fill
+/// low and to the right, both aimed one unit ahead of the camera.
+fn rig() -> [RigLamp; 2] {
+    [
+        RigLamp {
+            colour: Color::srgb_u8(0xff, 0xf1, 0xdf),
+            lux: 2.0,
+            from: Vec3::new(-3.0, 4.0, 5.0),
+            shadows: true,
+        },
+        RigLamp {
+            colour: Color::srgb_u8(0xe3, 0xed, 0xff),
+            lux: 1.0,
+            from: Vec3::new(4.0, 1.0, 3.0),
+            shadows: false,
+        },
+    ]
+}
+
+/// The rig's ambient term, the same under either anchor.
+fn rig_ambient() -> AmbientLight {
+    AmbientLight {
+        color: Color::srgb_u8(0xf5, 0xf5, 0xff),
+        brightness: 0.35 / PI,
+        ..default()
     }
 }
 
-/// The light Studio's environment used to put on the robot under its world
-/// rig.
-///
-/// Studio lit every material from its environment cubemap as well as from the
-/// world rig's three lamps, so the lamps alone were tuned to be part of a
-/// whole. Against a dark background the cubemap was near black and the
-/// difference is slight; against a light one the lamps alone read too dark.
-/// Studio's camera-fixed rig already turned the environment's lighting off,
-/// which is why only the world rig can carry this.
-///
-/// The cubemap was the background sphere: ground colour below the horizon and,
-/// above it, the sky colour at half opacity over the ground. Averaged over the
-/// sphere that is a quarter sky and three quarters ground, and a uniform
-/// environment of radiance `L` puts `albedo * L` on a diffuse surface in three,
-/// which is what an ambient light of colour `L` does in Bevy. A uniform term
-/// lights every face alike, which is also why all of it reads washed out.
-fn former_environment_light(theme: Theme) -> LinearRgba {
-    let ground = LinearRgba::from(ground(theme));
-    let sky = LinearRgba::from(sky(theme));
-    ground * 0.75 + sky * 0.25
+/// A light at camera-space `from`, aimed at Studio's rig target one unit ahead
+/// of the camera. Only the rotation matters to a directional light: three aims
+/// it from a position at a target, and the direction between the two is what
+/// survives.
+fn aimed(from: Vec3) -> Transform {
+    Transform::IDENTITY.looking_to(Vec3::new(0.0, 0.0, -1.0) - from, Vec3::Y)
 }
 
-/// The world rig's point light, which is the one part of it the theme tints.
-fn point_colour(theme: Theme) -> Color {
-    match theme {
-        Theme::Dark => Color::srgb_u8(0x17, 0x49, 0x60),
-        Theme::Light => Color::srgb_u8(0xf2, 0xf7, 0x91),
-    }
+/// The camera's orientation at the scene's default view: the yaw and pitch the
+/// orbit starts from, composed as the orbit controller composes them.
+fn default_view(opts: &SceneOptions) -> Quat {
+    Quat::from_rotation_y(opts.angle) * Quat::from_rotation_x(-opts.pitch)
 }
 
-/// Where the world rig's key light sits in Studio, which also sets the sun's
-/// heading: the sky reads as lit from the side the robot is.
-const WORLD_KEY: Vec3 = Vec3::new(-5.0, 5.0, 15.0);
-
-/// The sun's elevation for a theme. A day sun is well clear of the horizon;
-/// a night sun is just under it, which leaves the deep blue of twilight rather
-/// than a black sky.
+/// The sun's elevation for a theme. A day sun is well clear of the horizon; a
+/// night sun is far enough below it that the twilight has gone too.
 fn sun_elevation(theme: Theme) -> f32 {
     match theme {
         Theme::Light => 35f32.to_radians(),
-        Theme::Dark => (-4f32).to_radians(),
+        Theme::Dark => (-20f32).to_radians(),
     }
 }
 
@@ -243,8 +246,14 @@ struct Sun;
 #[derive(Component)]
 pub struct Ground;
 
-/// Marks a light belonging to the current rig, so a change of rig can take it
-/// away.
+/// The world-fixed frame the rig hangs from under [`Lighting::World`]: the
+/// camera's orientation at the default view, so the rig starts where the
+/// camera rig would be and then stays.
+#[derive(Component)]
+struct RigAnchor;
+
+/// Marks a light belonging to the current rig, so a change of anchor can take
+/// it away.
 #[derive(Component)]
 struct RigLight;
 
@@ -267,17 +276,15 @@ impl Plugin for StagePlugin {
                 )
                     .chain(),
             )
-            .add_systems(
-                PostUpdate,
-                follow_main_camera.before(TransformSystems::Propagate),
-            );
+            .add_systems(PostUpdate, follow_main_lens);
     }
 }
 
 /// Builds everything the stage keeps for the whole run, whichever choices are
 /// current: the camera's finish, the sky camera and its sun, the atmosphere,
-/// the ground and the grid. What the choices change is applied separately, so
-/// a change at runtime takes the same path as the first frame.
+/// the ground, the grid and the world rig's anchor. What the choices change is
+/// applied separately, so a change at runtime takes the same path as the
+/// first frame.
 fn build_stage(
     mut commands: Commands,
     opts: Res<SceneOptions>,
@@ -310,6 +317,7 @@ fn build_stage(
         // the plain environment too, so switching never re-specialises the
         // camera's pipelines.
         Hdr,
+        rig_ambient(),
     ));
 
     commands.spawn(Atmosphere::earth(
@@ -325,6 +333,10 @@ fn build_stage(
         RenderLayers::layer(SKY_LAYER),
         Sun,
     ));
+    // A child of the main camera, so the transform hierarchy turns the two
+    // together. Copying the turn across instead lags the orbit by a frame
+    // whenever the copy happens to run first, and on a fast orbit that frame
+    // opens a band of the atmosphere's own ground between sky and floor.
     let mut sky = commands.spawn((
         Camera3d::default(),
         Camera {
@@ -339,11 +351,19 @@ fn build_stage(
         DebandDither::Disabled,
         Msaa::Off,
         RenderLayers::layer(SKY_LAYER),
+        Transform::IDENTITY,
+        ChildOf(main),
         SkyCamera,
     ));
     if let Some(target) = target {
         sky.insert(target);
     }
+
+    commands.spawn((
+        Transform::from_rotation(default_view(&opts)),
+        Visibility::default(),
+        RigAnchor,
+    ));
 
     // Unlit, so it is exactly the ground colour from every angle and under
     // every rig — the same colour the plain environment clears to. Drawn by
@@ -396,12 +416,10 @@ fn build_stage(
         theme: opts.theme,
         environment: opts.environment,
         lighting: opts.lighting,
-        former_environment_fill: opts.former_environment_fill,
     });
 }
 
-/// `E` environment, `L` lighting, `T` theme, `F` how much of the former
-/// environment's light the world rig carries.
+/// `E` environment, `L` lighting, `T` theme.
 fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
     if keys.just_pressed(KeyCode::KeyE) {
         stage.environment = match stage.environment {
@@ -420,13 +438,6 @@ fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
             Theme::Dark => Theme::Light,
             Theme::Light => Theme::Dark,
         };
-    }
-    if keys.just_pressed(KeyCode::KeyF) {
-        let next = FILL_STEPS
-            .iter()
-            .position(|step| *step > stage.former_environment_fill + 1e-3)
-            .unwrap_or(0);
-        stage.former_environment_fill = FILL_STEPS[next];
     }
 }
 
@@ -450,99 +461,49 @@ fn apply_environment(
     }
 }
 
-/// Replaces the rig with the one the stage names.
+/// Hangs the rig from the camera or from the world anchor, replacing whatever
+/// hung there before.
 fn apply_lighting(
     stage: Res<Stage>,
     opts: Res<SceneOptions>,
     mut commands: Commands,
     main: Query<Entity, (With<OrbitCamera>, Without<SkyCamera>)>,
+    anchor: Query<Entity, With<RigAnchor>>,
     old: Query<Entity, With<RigLight>>,
 ) {
-    let Ok(main) = main.single() else {
+    let parent = match stage.lighting {
+        Lighting::Camera => main.single(),
+        Lighting::World => anchor.single(),
+    };
+    let Ok(parent) = parent else {
         return;
     };
     for light in &old {
         commands.entity(light).despawn();
     }
 
-    match stage.lighting {
-        Lighting::World => {
-            let former = former_environment_light(stage.theme) * stage.former_environment_fill;
-            commands.entity(main).insert(AmbientLight {
-                color: (LinearRgba::WHITE * ((PI / 8.0) / PI) + former).into(),
-                brightness: 1.0,
-                ..default()
-            });
-            commands.spawn((
+    let fixed = stage.lighting == Lighting::World;
+    commands.entity(parent).with_children(|hanging| {
+        for lamp in rig() {
+            hanging.spawn((
                 DirectionalLight {
-                    illuminance: 2.0,
-                    shadow_maps_enabled: opts.shadows,
+                    color: lamp.colour,
+                    illuminance: lamp.lux,
+                    shadow_maps_enabled: fixed && lamp.shadows && opts.shadows,
                     ..default()
                 },
-                Transform::from_translation(from_studio(WORLD_KEY)).looking_at(Vec3::ZERO, Vec3::Y),
-                RigLight,
-            ));
-            commands.spawn((
-                PointLight {
-                    color: point_colour(stage.theme),
-                    intensity: 2.0 * 4.0 * PI,
-                    // Studio's is undecayed past any distance; Bevy culls at
-                    // the range, and this one sits fifteen metres up.
-                    range: 100.0,
-                    shadow_maps_enabled: opts.shadows,
-                    ..default()
-                },
-                Transform::from_translation(from_studio(Vec3::new(1.0, 0.0, 15.0))),
+                aimed(lamp.from),
                 RigLight,
             ));
         }
-        Lighting::Camera => {
-            commands.entity(main).insert(AmbientLight {
-                color: Color::srgb_u8(0xf5, 0xf5, 0xff),
-                brightness: 0.35 / PI,
-                ..default()
-            });
-            // Children of the camera, so the hierarchy carries them wherever it
-            // goes. A directional light is a direction, so only each one's
-            // rotation matters: three aims them from a position at a target,
-            // and the direction between the two is what survives.
-            commands.entity(main).with_children(|rig| {
-                rig.spawn((
-                    DirectionalLight {
-                        color: Color::srgb_u8(0xff, 0xf1, 0xdf),
-                        illuminance: 2.0,
-                        shadow_maps_enabled: false,
-                        ..default()
-                    },
-                    aimed(Vec3::new(-3.0, 4.0, 5.0)),
-                    RigLight,
-                ));
-                rig.spawn((
-                    DirectionalLight {
-                        color: Color::srgb_u8(0xe3, 0xed, 0xff),
-                        illuminance: 1.0,
-                        shadow_maps_enabled: false,
-                        ..default()
-                    },
-                    aimed(Vec3::new(4.0, 1.0, 3.0)),
-                    RigLight,
-                ));
-            });
-        }
-    }
-}
-
-/// A camera-local light at `from`, aimed at Studio's rig target one unit ahead
-/// of the camera. Camera space is the same in both engines — looking down -Z,
-/// Y up — so this needs no axis change.
-fn aimed(from: Vec3) -> Transform {
-    Transform::IDENTITY.looking_to(Vec3::new(0.0, 0.0, -1.0) - from, Vec3::Y)
+    });
 }
 
 /// Recolours what the theme touches: the ground, the grid, the sun's height
 /// and the atmosphere's idea of the ground beneath it.
 fn apply_theme(
     stage: Res<Stage>,
+    opts: Res<SceneOptions>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     grounds: Query<&MeshMaterial3d<StandardMaterial>, With<Ground>>,
     mut grids: Query<&mut InfiniteGridSettings, With<InfiniteGrid>>,
@@ -558,7 +519,11 @@ fn apply_theme(
         *settings = grid(stage.theme);
     }
 
-    let heading = from_studio(WORLD_KEY).with_y(0.0).normalize_or(Vec3::NEG_X);
+    // The sun shares the world rig key's heading, so the sky is brightest on
+    // the side the robot is lit from.
+    let key = rig()[0].from;
+    let toward_key = default_view(&opts) * (key - Vec3::new(0.0, 0.0, -1.0));
+    let heading = toward_key.with_y(0.0).normalize_or(Vec3::NEG_X);
     let elevation = sun_elevation(stage.theme);
     let toward_sun = heading * elevation.cos() + Vec3::Y * elevation.sin();
     for mut transform in &mut suns {
@@ -578,38 +543,24 @@ fn apply_theme(
 fn show_stage(stage: Res<Stage>, mut readouts: Query<&mut Text, With<StageReadout>>) {
     for mut text in &mut readouts {
         text.0 = format!(
-            "[E] environment: {:?}   [L] lighting: {:?}   [T] theme: {:?}   [F] former environment light: {:.0}%",
-            stage.environment,
-            stage.lighting,
-            stage.theme,
-            stage.former_environment_fill * 100.0,
+            "[E] environment: {:?}   [L] lighting: {:?}   [T] theme: {:?}",
+            stage.environment, stage.lighting, stage.theme,
         );
     }
 }
 
-/// The main camera's turn and lens, as the sky camera copies them.
-type MainView<'w, 's> = Query<
-    'w,
-    's,
-    (&'static Transform, &'static Projection),
-    (With<OrbitCamera>, Without<SkyCamera>),
->;
-
-/// Keeps the sky camera looking where the main one does, through the same lens.
-///
-/// Only the turn and the projection follow. The sky is seen from ground level
-/// wherever the orbit carries the main camera, and the projection has to be
-/// copied anyway, because fitting and zooming change it.
-fn follow_main_camera(
-    main: MainView,
-    mut sky: Query<(&mut Transform, &mut Projection), With<SkyCamera>>,
+/// Gives the sky camera the main camera's lens. Only the projection needs
+/// copying — the hierarchy already turns the two together — and it changes
+/// only when the camera is fitted, so a frame's lag here is never visible.
+fn follow_main_lens(
+    main: Query<&Projection, (With<OrbitCamera>, Without<SkyCamera>)>,
+    mut sky: Query<&mut Projection, With<SkyCamera>>,
 ) {
-    let Ok((main_transform, main_projection)) = main.single() else {
+    let Ok(lens) = main.single() else {
         return;
     };
-    for (mut transform, mut projection) in &mut sky {
-        transform.rotation = main_transform.rotation;
-        *projection = main_projection.clone();
+    for mut projection in &mut sky {
+        *projection = lens.clone();
     }
 }
 
@@ -619,8 +570,9 @@ mod tests {
 
     use super::*;
 
-    /// A world with the two cameras the stage dresses, and nothing rendering.
-    fn world(stage: Stage) -> (World, Entity, Entity) {
+    /// A world with the two cameras and the anchor the stage dresses, and
+    /// nothing rendering.
+    fn world(stage: Stage) -> (World, Entity, Entity, Entity) {
         let mut world = World::new();
         world.insert_resource(SceneOptions::default());
         world.insert_resource(stage);
@@ -634,7 +586,8 @@ mod tests {
                 SkyCamera,
             ))
             .id();
-        (world, main, sky)
+        let anchor = world.spawn((Transform::IDENTITY, RigAnchor)).id();
+        (world, main, sky, anchor)
     }
 
     fn stage(environment: Environment, lighting: Lighting, theme: Theme) -> Stage {
@@ -642,21 +595,24 @@ mod tests {
             theme,
             environment,
             lighting,
-            former_environment_fill: 0.0,
         }
     }
 
-    fn rig(world: &mut World) -> Vec<(Entity, Option<Entity>)> {
-        let mut query = world.query_filtered::<(Entity, Option<&ChildOf>), With<RigLight>>();
+    fn hung(world: &mut World) -> Vec<(Option<Entity>, DirectionalLight, Transform)> {
+        let mut query = world
+            .query_filtered::<(Option<&ChildOf>, &DirectionalLight, &Transform), With<RigLight>>();
         query
             .iter(world)
-            .map(|(entity, parent)| (entity, parent.map(ChildOf::parent)))
+            .map(|(parent, light, transform)| {
+                (parent.map(ChildOf::parent), *light, *transform)
+            })
             .collect()
     }
 
     #[test]
     fn each_environment_shows_the_ground_or_the_sky_and_switches_back() {
-        let (mut world, main, sky) = world(stage(Environment::Plain, Lighting::World, Theme::Dark));
+        let (mut world, main, sky, _) =
+            world(stage(Environment::Plain, Lighting::World, Theme::Dark));
         world.run_system_once(apply_environment).unwrap();
         assert!(
             matches!(world.get::<Camera>(main).unwrap().clear_color,
@@ -691,35 +647,24 @@ mod tests {
     /// A rig left behind by a switch keeps lighting the robot, so the count is
     /// asserted after every change rather than only the new lights' presence.
     #[test]
-    fn switching_rigs_replaces_the_old_one_entirely() {
-        let (mut world, main, _) = world(stage(Environment::Plain, Lighting::World, Theme::Dark));
+    fn switching_anchor_moves_the_whole_rig() {
+        let (mut world, main, _, anchor) =
+            world(stage(Environment::Plain, Lighting::World, Theme::Dark));
 
         world.run_system_once(apply_lighting).unwrap();
-        let world_rig = rig(&mut world);
-        assert_eq!(world_rig.len(), 2, "a key and a point light");
-        assert!(
-            world_rig.iter().all(|(_, parent)| parent.is_none()),
-            "a world rig stays where it was put",
-        );
+        let fixed = hung(&mut world);
+        assert_eq!(fixed.len(), 2, "a key and a fill");
+        assert!(fixed.iter().all(|(parent, ..)| *parent == Some(anchor)));
 
         world.resource_mut::<Stage>().lighting = Lighting::Camera;
         world.run_system_once(apply_lighting).unwrap();
-        let camera_rig = rig(&mut world);
-        assert_eq!(
-            camera_rig.len(),
-            2,
-            "the world rig is gone and a key and fill replace it"
-        );
-        assert!(
-            camera_rig.iter().all(|(_, parent)| *parent == Some(main)),
-            "a camera rig rides on the camera",
-        );
+        let riding = hung(&mut world);
+        assert_eq!(riding.len(), 2, "the world rig is gone, not added to");
+        assert!(riding.iter().all(|(parent, ..)| *parent == Some(main)));
 
         world.resource_mut::<Stage>().lighting = Lighting::World;
         world.run_system_once(apply_lighting).unwrap();
-        let again = rig(&mut world);
-        assert_eq!(again.len(), 2, "the camera's children are taken away too");
-        assert!(again.iter().all(|(_, parent)| parent.is_none()));
+        assert_eq!(hung(&mut world).len(), 2);
         assert!(
             world
                 .get::<Children>(main)
@@ -728,21 +673,31 @@ mod tests {
         );
     }
 
+    /// The two anchors hold the same lights: same colours, same strengths, same
+    /// directions relative to what they hang from. Only shadows differ.
     #[test]
-    fn the_former_environment_light_is_added_in_proportion() {
-        let ambient = |fill: f32| {
-            let (mut world, main, _) = world(Stage {
-                former_environment_fill: fill,
-                ..stage(Environment::Plain, Lighting::World, Theme::Light)
-            });
+    fn both_anchors_carry_the_same_lights() {
+        let lamps = |lighting| {
+            let (mut world, ..) = world(stage(Environment::Plain, lighting, Theme::Dark));
             world.run_system_once(apply_lighting).unwrap();
-            LinearRgba::from(world.get::<AmbientLight>(main).unwrap().color)
+            let mut lamps = hung(&mut world);
+            lamps.sort_by(|a, b| b.1.illuminance.total_cmp(&a.1.illuminance));
+            lamps
         };
-        let none = ambient(0.0);
-        let half = ambient(0.5);
-        let all = ambient(1.0);
-        let former = former_environment_light(Theme::Light);
-        assert!((half.red - none.red - 0.5 * former.red).abs() < 1e-5);
-        assert!((all.red - none.red - former.red).abs() < 1e-5);
+        let fixed = lamps(Lighting::World);
+        let riding = lamps(Lighting::Camera);
+        for ((_, world_lamp, world_turn), (_, camera_lamp, camera_turn)) in
+            fixed.iter().zip(&riding)
+        {
+            assert_eq!(world_lamp.color, camera_lamp.color);
+            assert_eq!(world_lamp.illuminance, camera_lamp.illuminance);
+            assert_eq!(world_turn.rotation, camera_turn.rotation);
+            assert!(
+                !camera_lamp.shadow_maps_enabled,
+                "nothing riding the camera casts"
+            );
+        }
+        assert!(fixed[0].1.shadow_maps_enabled, "the fixed key casts");
+        assert!(!fixed[1].1.shadow_maps_enabled, "the fill does not");
     }
 }

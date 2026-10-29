@@ -84,11 +84,8 @@ pub struct SceneOptions {
     pub theme: stage::Theme,
     /// What fills the frame above the horizon.
     pub environment: stage::Environment,
-    /// What the lights are fixed to.
+    /// What the rig is fixed to.
     pub lighting: stage::Lighting,
-    /// How much of the light Studio's environment used to put on the robot the
-    /// world rig carries instead, from none to all of it.
-    pub former_environment_fill: f32,
 }
 
 impl Default for SceneOptions {
@@ -108,7 +105,6 @@ impl Default for SceneOptions {
             theme: stage::Theme::default(),
             environment: stage::Environment::default(),
             lighting: stage::Lighting::default(),
-            former_environment_fill: 0.0,
         }
     }
 }

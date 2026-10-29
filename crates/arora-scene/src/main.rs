@@ -132,14 +132,9 @@ struct Cli {
     #[arg(long, value_enum, default_value_t)]
     environment: Environment,
 
-    /// What the lights are fixed to.
+    /// What the rig is fixed to.
     #[arg(long, value_enum, default_value_t)]
     lighting: Lighting,
-
-    /// How much of the light Studio's environment used to put on the robot the
-    /// world rig carries, from 0 to 1.
-    #[arg(long, default_value_t = 0.0)]
-    former_environment_fill: f32,
 }
 
 fn main() {
@@ -194,7 +189,6 @@ fn main() {
         theme: cli.theme,
         environment: cli.environment,
         lighting: cli.lighting,
-        former_environment_fill: cli.former_environment_fill,
     })
     .insert_resource(RobotSpec {
         glb: glb.clone(),
