@@ -93,6 +93,14 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     screen: bool,
 
+    /// Outline these elements, by the ids `RobotData` gives them. Repeatable.
+    #[arg(long = "select")]
+    select: Vec<String>,
+
+    /// Print the elements the robot declares and exit.
+    #[arg(long, default_value_t = false)]
+    list_elements: bool,
+
     /// Put a limited rotation gizmo on this joint, by name. Pass `list` to see
     /// which joints the robot declares and what limits they carry.
     #[arg(long)]
@@ -176,6 +184,28 @@ fn main() {
     // filesystem, and an editor loads its assets after startup. Making these
     // asset-driven loads is what would let either happen, and it is the same
     // change that lets a running scene gain and lose assets.
+    if cli.list_elements {
+        match std::fs::read(assets.join(&glb))
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes))
+        {
+            Ok(meta) => {
+                log::info!("{} elements:", meta.elements.len());
+                for element in &meta.elements {
+                    log::info!(
+                        "  {:38} {:10} node {}",
+                        element.id,
+                        element.kind,
+                        element.node_name
+                    );
+                }
+            }
+            Err(error) => log::error!("{error:#}"),
+        }
+        return;
+    }
+
+    arora_scene::mount_instances(&mut app, &assets, &glb, cli.select.clone());
     if cli.screen {
         arora_scene::mount_screen(&mut app, &assets, &glb);
     }

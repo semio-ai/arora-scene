@@ -25,7 +25,7 @@ serde_json = { workspace = true }
 log = { workspace = true }
 
 # The GLB extension parse, and the asset semantics above it.
-arora-visuals = { workspace = true }
+arora-visuals = { workspace = true, features = ["view"] }
 
 # Camera controls. A hand-rolled orbit gets the drag conventions wrong on some
 # devices and has no inertia, focus handling or zoom limits; this is the

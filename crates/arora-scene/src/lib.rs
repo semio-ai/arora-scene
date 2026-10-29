@@ -19,6 +19,7 @@
 //! Percentiles rather than an average: a mean hides the stalls that make a
 //! viewport feel bad, and the 99th is what a person notices.
 
+pub mod instance;
 pub mod ring;
 pub mod robot;
 
@@ -118,7 +119,19 @@ pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((PanOrbitCameraPlugin, JointRingPlugin))
+        app.add_plugins((
+            PanOrbitCameraPlugin,
+            JointRingPlugin,
+            arora_visuals::glow::GlowPlugin,
+        ))
+            .init_resource::<arora_visuals::Picks>()
+            .init_resource::<arora_visuals::glow::Selections>()
+            .init_resource::<instance::Selected>()
+            // Bevy's own mesh picking is not added: it casts base vertices,
+            // and a pick has to meet the mesh where a morph put it. The
+            // shared cast is reached through this observer instead, and the
+            // press that drives it arrives on the window entity.
+            .add_observer(arora_visuals::pick::on_press)
             .init_resource::<Frames>()
             .init_resource::<Census>()
             .init_resource::<Framing>()
@@ -211,8 +224,13 @@ const WARMUP_SECONDS: f32 = 2.0;
 /// do not draw into each other's views.
 const MOUNTED_LAYER: usize = 1;
 
+/// The scene's one camera.
+///
+/// One for the whole world, where a face renderer gives each of its instances
+/// its own: a robot scene is a single space that everything stands in, so the
+/// camera belongs to the scene rather than to anything in it.
 #[derive(Component)]
-struct OrbitCamera;
+pub struct OrbitCamera;
 
 /// One joint, its authored range, and the body it turns.
 ///
@@ -813,6 +831,53 @@ fn place_label(
             text_colour.0 = colour;
         }
     }
+}
+
+/// Makes every spawned robot an entity instance the shared layer can address.
+///
+/// Reads what the GLB declares before the app runs, for the same reason the
+/// other mounts do: a wasm host has no filesystem and an editor loads its
+/// assets after startup, so driving this from the asset's own load is what
+/// would let either happen.
+///
+/// `select` outlines those elements by their `RobotData` ids on every copy.
+pub fn mount_instances(app: &mut App, assets: &std::path::Path, robot_glb: &str, select: Vec<String>) {
+    let meta = match std::fs::read(assets.join(robot_glb))
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes))
+    {
+        Ok(meta) => meta,
+        Err(error) => {
+            log::error!("could not read what {robot_glb} declares: {error:#}");
+            return;
+        }
+    };
+    log::info!(
+        "{} declares {} elements and {} animatables",
+        robot_glb,
+        meta.elements.len(),
+        meta.animatables.len()
+    );
+    if !select.is_empty() {
+        let known: Vec<&str> = meta
+            .elements
+            .iter()
+            .filter(|e| select.contains(&e.id))
+            .map(|e| e.id.as_str())
+            .collect();
+        if known.len() < select.len() {
+            log::warn!(
+                "{} of {} selected ids are declared; pass --list-elements to see them",
+                known.len(),
+                select.len()
+            );
+        }
+    }
+    app.insert_resource(instance::RobotMeta(meta))
+        .insert_resource(instance::Selected(select))
+        // Registered by the mount rather than by the plugin, so the system
+        // exists only where the resources it needs do.
+        .add_systems(Update, instance::index_instances);
 }
 
 /// Builds the screen the robot declares and hands back the texture it shows.
