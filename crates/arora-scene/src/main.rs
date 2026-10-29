@@ -135,6 +135,10 @@ struct Cli {
     /// What the rig is fixed to.
     #[arg(long, value_enum, default_value_t)]
     lighting: Lighting,
+
+    /// Show sliders for tuning the current theme's floor and sky by eye.
+    #[arg(long, default_value_t = false)]
+    tune: bool,
 }
 
 fn main() {
@@ -224,6 +228,9 @@ fn main() {
     arora_scene::mount_instances(&mut app, &assets, &glb, cli.select.clone());
     if cli.screen {
         arora_scene::mount_screen(&mut app, &assets, &glb);
+    }
+    if cli.tune {
+        app.add_plugins(arora_scene::tune::TunePlugin);
     }
     if let Some(joint) = &cli.joint {
         arora_scene::mount_joint(&mut app, &assets, &glb, joint, cli.joint_value);

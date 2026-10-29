@@ -23,6 +23,7 @@ pub mod instance;
 pub mod ring;
 pub mod robot;
 pub mod stage;
+pub mod tune;
 
 use std::path::PathBuf;
 

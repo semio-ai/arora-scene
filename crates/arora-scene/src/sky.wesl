@@ -14,9 +14,9 @@ struct Sky {
     ground: vec4<f32>,
     // How strongly stars show, from none to full.
     stars: f32,
-    // How quickly the horizon colour gives way to the zenith's: higher keeps
-    // the horizon band thinner.
-    falloff: f32,
+    // The height of a unit direction at which the sky is halfway from the
+    // horizon colour to the zenith's.
+    midpoint: f32,
     _padding: vec2<f32>,
 }
 
@@ -74,7 +74,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if dir.y < 0.0 {
         return vec4(sky.ground.rgb, 1.0);
     }
-    let t = pow(dir.y, 1.0 / max(sky.falloff, 1e-3));
+    // An exponent chosen so that `t` is exactly one half at the midpoint.
+    let midpoint = clamp(sky.midpoint, 1e-4, 0.9999);
+    let t = pow(dir.y, log(0.5) / log(midpoint));
     var colour = mix(sky.horizon.rgb, sky.zenith.rgb, t);
     // Stars thin out toward the horizon, as haze would take them.
     colour += vec3(star_field(dir)) * sky.stars * smoothstep(0.0, 0.25, dir.y);

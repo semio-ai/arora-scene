@@ -122,11 +122,65 @@ const FLOOR_HEIGHT: f32 = -0.002;
 /// How far a full shadow darkens the floor.
 const FLOOR_SHADOW: f32 = 0.35;
 
-/// The ground colour — Studio's `groundColor`.
-fn ground(theme: Theme) -> Color {
-    match theme {
-        Theme::Dark => Color::srgb_u8(0x33, 0x33, 0x33),
-        Theme::Light => Color::srgb_u8(0xdd, 0xdd, 0xdd),
+/// What one theme is drawn in. Live, so a host — or the tuning panel — can
+/// change any of it and the scene follows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// The floor, the mountains, and the plain environment top to bottom.
+    pub ground: Color,
+    pub zenith: Color,
+    pub horizon: Color,
+    /// How high above the horizon, in radians, the sky is halfway from the
+    /// horizon colour to the zenith's. Lower keeps the horizon colour to a
+    /// thinner band.
+    pub midpoint: f32,
+    /// How strongly stars show, from none to full.
+    pub stars: f32,
+}
+
+/// The look of each theme.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub dark: Look,
+    pub light: Look,
+}
+
+impl Palette {
+    pub fn look(&self, theme: Theme) -> &Look {
+        match theme {
+            Theme::Dark => &self.dark,
+            Theme::Light => &self.light,
+        }
+    }
+
+    pub fn look_mut(&mut self, theme: Theme) -> &mut Look {
+        match theme {
+            Theme::Dark => &mut self.dark,
+            Theme::Light => &mut self.light,
+        }
+    }
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            // A thin band of blue along the hills, and most of the night the
+            // zenith's near-black.
+            dark: Look {
+                ground: Color::srgb_u8(0x33, 0x33, 0x33),
+                zenith: Color::srgb_u8(0x03, 0x05, 0x0c),
+                horizon: Color::srgb_u8(0x12, 0x1a, 0x2e),
+                midpoint: 0.0626,
+                stars: 1.0,
+            },
+            light: Look {
+                ground: Color::srgb_u8(0xdd, 0xdd, 0xdd),
+                zenith: Color::srgb_u8(0x4f, 0x86, 0xd6),
+                horizon: Color::srgb_u8(0xd9, 0xec, 0xf7),
+                midpoint: 0.2527,
+                stars: 0.0,
+            },
+        }
     }
 }
 
@@ -134,35 +188,26 @@ fn linear(colour: Color) -> Vec4 {
     LinearRgba::from(colour).to_vec4()
 }
 
-/// The dome's colours for a stage. Plain is the ground colour throughout, so
-/// the dome is invisible against the clear and the floor.
-fn sky_for(environment: Environment, theme: Theme) -> SkyUniform {
-    let ground = linear(ground(theme));
-    match (environment, theme) {
-        (Environment::Plain, _) => SkyUniform {
+/// The dome's colours for an environment. Plain is the ground colour
+/// throughout, so the dome is invisible against the clear and the floor.
+fn sky_for(environment: Environment, look: &Look) -> SkyUniform {
+    let ground = linear(look.ground);
+    match environment {
+        Environment::Plain => SkyUniform {
             zenith: ground,
             horizon: ground,
             ground,
-            stars: 0.0,
-            falloff: 1.0,
+            midpoint: 0.5,
             ..default()
         },
-        (Environment::Sky, Theme::Light) => SkyUniform {
-            zenith: linear(Color::srgb_u8(0x4f, 0x86, 0xd6)),
-            horizon: linear(Color::srgb_u8(0xd9, 0xec, 0xf7)),
+        Environment::Sky => SkyUniform {
+            zenith: linear(look.zenith),
+            horizon: linear(look.horizon),
             ground,
-            stars: 0.0,
-            falloff: 2.0,
-            ..default()
-        },
-        (Environment::Sky, Theme::Dark) => SkyUniform {
-            zenith: linear(Color::srgb_u8(0x03, 0x05, 0x0c)),
-            horizon: linear(Color::srgb_u8(0x12, 0x1a, 0x2e)),
-            ground,
-            stars: 1.0,
-            // A thin band: the blue stays near the horizon and most of the
-            // night is the zenith's near-black.
-            falloff: 4.0,
+            stars: look.stars,
+            // The shader compares against the height of the view direction,
+            // which is the sine of its elevation.
+            midpoint: look.midpoint.sin(),
             ..default()
         },
     }
@@ -258,8 +303,9 @@ pub struct SkyUniform {
     pub ground: Vec4,
     /// How strongly stars show, from none to full.
     pub stars: f32,
-    /// How quickly the horizon colour gives way to the zenith's.
-    pub falloff: f32,
+    /// The height of a unit direction — the sine of its elevation — at which
+    /// the sky is halfway from the horizon colour to the zenith's.
+    pub midpoint: f32,
     pub _padding: Vec2,
 }
 
@@ -342,12 +388,14 @@ impl Plugin for StagePlugin {
             MaterialPlugin::<SkyMaterial>::default(),
             MaterialPlugin::<FloorMaterial>::default(),
         ))
+        .init_resource::<Palette>()
         .add_systems(Startup, build_stage.after(crate::setup))
         .add_systems(
             Update,
             (
                 stage_keys,
-                (apply_look, apply_lighting, show_stage).run_if(resource_changed::<Stage>),
+                apply_look.run_if(resource_changed::<Stage>.or_else(resource_changed::<Palette>)),
+                (apply_lighting, show_stage).run_if(resource_changed::<Stage>),
             )
                 .chain(),
         );
@@ -480,6 +528,7 @@ fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
 #[allow(clippy::too_many_arguments)]
 fn apply_look(
     stage: Res<Stage>,
+    palette: Res<Palette>,
     mut cameras: Query<&mut Camera, With<OrbitCamera>>,
     mut skies: ResMut<Assets<SkyMaterial>>,
     domes: Query<&MeshMaterial3d<SkyMaterial>, With<Dome>>,
@@ -487,20 +536,21 @@ fn apply_look(
     floor: Query<&MeshMaterial3d<FloorMaterial>, With<Floor>>,
     mut grids: Query<&mut InfiniteGridSettings, With<InfiniteGrid>>,
 ) {
+    let look = palette.look(stage.theme);
     // Behind the dome, so only ever seen at its seams; the ground colour is
     // what every seam should show.
     for mut camera in &mut cameras {
-        camera.clear_color = ClearColorConfig::Custom(ground(stage.theme));
+        camera.clear_color = ClearColorConfig::Custom(look.ground);
     }
     for handle in &domes {
         if let Some(mut material) = skies.get_mut(&handle.0) {
-            material.sky = sky_for(stage.environment, stage.theme);
+            material.sky = sky_for(stage.environment, look);
         }
     }
     for handle in &floor {
         if let Some(mut material) = floors.get_mut(&handle.0) {
             material.surface = FloorUniform {
-                colour: linear(ground(stage.theme)),
+                colour: linear(look.ground),
                 shadow: FLOOR_SHADOW,
                 ..default()
             };
@@ -568,6 +618,7 @@ mod tests {
     fn world(stage: Stage) -> (World, Entity, Entity) {
         let mut world = World::new();
         world.insert_resource(SceneOptions::default());
+        world.insert_resource(Palette::default());
         world.insert_resource(stage);
         let main = world.spawn((Camera::default(), OrbitCamera)).id();
         let anchor = world.spawn((Transform::IDENTITY, RigAnchor)).id();
@@ -638,9 +689,10 @@ mod tests {
             for theme in [Theme::Dark, Theme::Light] {
                 let (mut world, main, _) = world(stage(environment, Lighting::World, theme));
                 world.run_system_once(apply_look).unwrap();
-                let expected = linear(ground(theme));
+                let ground = Palette::default().look(theme).ground;
+                let expected = linear(ground);
                 assert!(matches!(world.get::<Camera>(main).unwrap().clear_color,
-                    ClearColorConfig::Custom(colour) if colour == ground(theme)));
+                    ClearColorConfig::Custom(colour) if colour == ground));
                 assert_eq!(
                     dome(&mut world).ground,
                     expected,
