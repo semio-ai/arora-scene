@@ -1,3 +1,5 @@
 /target
 .DS_Store
 /fixtures
+# A local [patch] pointing at a sibling checkout is one machine's business.
+/.cargo/

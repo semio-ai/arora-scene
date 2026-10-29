@@ -216,6 +216,7 @@ dependencies = [
 [[package]]
 name = "arora-visuals"
 version = "0.0.0"
+source = "git+https://github.com/semio-ai/arora-visuals?branch=main#9cd432377dfe400163718b13d15837c4eede27a8"
 dependencies = [
  "anyhow",
  "bevy_math",

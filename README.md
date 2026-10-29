@@ -12,17 +12,38 @@ nothing.
 
 ## Running it
 
+No robot ships with this repo. Point it at a Semio robot GLB of your own:
+
 ```
-cargo run -- --assets <dir> --joint tilt_joint --ring-active --screen
+cargo run -- path/to/robot.glb --joint tilt_joint --ring-active --screen
 ```
 
+The path is taken relative to where you run the command, and the file's own
+directory becomes the asset root. That resolution happens in the binary, on
+purpose: **Bevy resolves a relative asset root against the crate directory
+under `cargo run` and against the executable's directory otherwise, never
+against the working directory** — so a path handed straight to Bevy would mean
+three different things depending on how the program was started.
+
 `--joint list` prints the joints a robot declares and the limits they carry.
-`--offscreen` is the only trustworthy timing mode — a windowed run measures the
+`--offscreen` is the only trustworthy timing mode: a windowed run measures the
 display rather than the renderer, and `--uncapped` does nothing on macOS,
 because wgpu ignores `AutoNoVsync` there.
 
-The fixture robot is not in the repo; point `--assets` at a directory holding a
-Semio robot GLB.
+## Building against a local `arora-visuals`
+
+The dependency is a git URL, so an ordinary `cargo build` fetches whatever
+`main` currently is. While both repos are moving together that is rarely what
+you want, and the two cannot be wired by a relative path in `Cargo.toml`
+without encoding where one machine keeps its checkouts.
+
+Put the override in this repo's own `.cargo/config.toml`, which is not
+tracked:
+
+```toml
+[patch."https://github.com/semio-ai/arora-visuals"]
+arora-visuals = { path = "/absolute/path/to/arora-visuals/crates/arora-visuals" }
+```
 
 ## The screen is a seam, not a feature
 

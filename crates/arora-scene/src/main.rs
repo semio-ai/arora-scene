@@ -5,22 +5,45 @@
 //! desktop process can do — resolving assets from a directory and writing a
 //! PNG to disk. A wasm host replaces exactly this file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
-use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
+
+/// Splits a path to an asset into the root Bevy resolves under and the name
+/// within it.
+///
+/// Bevy has one asset root per app and every load is a name relative to it, so
+/// a path typed on a command line has to be taken apart to be usable at all.
+///
+/// It is made absolute first, which is not tidiness. **Bevy resolves a
+/// relative asset root against the crate directory under `cargo run` and
+/// against the executable's directory otherwise — never against the working
+/// directory the path was typed in.** A relative path would therefore mean
+/// something different in each of those, and in two of the three it would mean
+/// nothing. Resolving it here also turns a missing file into an error naming
+/// the path, rather than an asset load that quietly never completes.
+fn asset_root_and_name(path: &Path) -> anyhow::Result<(PathBuf, String)> {
+    let full = path.canonicalize().map_err(|error| {
+        anyhow::anyhow!("cannot read {}: {error}", path.display())
+    })?;
+    let name = full
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} names no file", path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let root = full
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no directory", path.display()))?
+        .to_path_buf();
+    Ok((root, name))
+}
 
 #[derive(clap::Parser)]
 struct Cli {
-    /// The robot to load.
-    #[arg(long, default_value = "Quori_2_RevB.glb")]
-    glb: String,
-
-    /// Where assets are resolved from. A relative path is rooted at the crate
-    /// directory, not the workspace, so absolute is usually what you want.
-    #[arg(long, default_value = "fixtures")]
-    assets: PathBuf,
+    /// The robot GLB to render.
+    robot: PathBuf,
 
     /// Stop after this many seconds and report. Zero runs until closed.
     #[arg(long, default_value_t = 0.0)]
@@ -97,6 +120,14 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = <Cli as clap::Parser>::parse();
 
+    let (assets, glb) = match asset_root_and_name(&cli.robot) {
+        Ok(split) => split,
+        Err(error) => {
+            log::error!("{error:#}");
+            std::process::exit(2);
+        }
+    };
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -114,7 +145,7 @@ fn main() {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: cli.assets.to_string_lossy().into_owned(),
+                file_path: assets.to_string_lossy().into_owned(),
                 ..default()
             })
             .build()
@@ -136,7 +167,7 @@ fn main() {
         uncapped: cli.uncapped,
     })
     .insert_resource(RobotSpec {
-        glb: cli.glb.clone(),
+        glb: glb.clone(),
         copies: cli.copies,
     });
 
@@ -146,10 +177,10 @@ fn main() {
     // asset-driven loads is what would let either happen, and it is the same
     // change that lets a running scene gain and lose assets.
     if cli.screen {
-        arora_scene::mount_screen(&mut app, &cli.assets, &cli.glb);
+        arora_scene::mount_screen(&mut app, &assets, &glb);
     }
     if let Some(joint) = &cli.joint {
-        arora_scene::mount_joint(&mut app, &cli.assets, &cli.glb, joint, cli.joint_value);
+        arora_scene::mount_joint(&mut app, &assets, &glb, joint, cli.joint_value);
     }
     app.run();
 }

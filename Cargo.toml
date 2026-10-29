@@ -13,14 +13,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 
-# The shared layer. A path dependency while both repos are being brought up
-# together; it becomes a git dependency on the published repo once the surface
-# this consumes has stopped moving weekly.
+# The shared layer, by URL rather than by path: a path would encode where one
+# machine happens to keep its checkouts, and would not resolve on any other.
+# `Cargo.lock` pins the exact commit, so a build is reproducible even though
+# the branch moves.
 #
-# Whatever form it takes, its Bevy minor and the one below must agree. Bevy's
-# derives produce concrete types, so a skew is a wall of trait errors rather
-# than a version warning.
-arora-visuals = { path = "../arora-visuals/crates/arora-visuals" }
+# To build against a local checkout instead — which is most of the time while
+# both repos are moving together — put a `[patch]` in this repo's own
+# `.cargo/config.toml`, which is deliberately not tracked. The README has the
+# snippet.
+#
+# Its Bevy minor and the one below must agree. Bevy's derives produce concrete
+# types, so a skew is a wall of trait errors rather than a version warning.
+arora-visuals = { git = "https://github.com/semio-ai/arora-visuals", branch = "main" }
 
 bevy = { version = "0.19", default-features = false }
 
