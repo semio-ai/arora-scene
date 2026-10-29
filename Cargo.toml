@@ -1,0 +1,30 @@
+[workspace]
+members = ["crates/arora-scene"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/semio-ai/arora-scene"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+
+# The shared layer. A path dependency while both repos are being brought up
+# together; it becomes a git dependency on the published repo once the surface
+# this consumes has stopped moving weekly.
+#
+# Whatever form it takes, its Bevy minor and the one below must agree. Bevy's
+# derives produce concrete types, so a skew is a wall of trait errors rather
+# than a version warning.
+arora-visuals = { path = "../arora-visuals/crates/arora-visuals" }
+
+bevy = { version = "0.19", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

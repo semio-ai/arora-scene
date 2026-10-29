@@ -1,0 +1,57 @@
+[package]
+name = "arora-scene"
+version = "0.0.0"
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "A Semio robot scene in Bevy: the robot reading of RobotData, joints and their limit-aware controls, and the screen another renderer draws into."
+
+[features]
+default = ["cli"]
+# The desktop command line: flag parsing, a window, and the two things only a
+# desktop process can do — resolving assets from a directory and writing a PNG
+# to disk. A wasm or editor host replaces exactly this, and takes the library.
+cli = ["dep:clap", "dep:env_logger"]
+
+[[bin]]
+name = "arora-scene"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+# The GLB extension parse, and the asset semantics above it.
+arora-visuals = { workspace = true }
+
+# Camera controls. A hand-rolled orbit gets the drag conventions wrong on some
+# devices and has no inertia, focus handling or zoom limits; this is the
+# ecosystem's answer and tracks Bevy's releases.
+bevy_panorbit_camera = { version = "0.35", default-features = false }
+
+# The 3d stack: glTF loading, PBR (which carries shadows), the core pipeline,
+# windowing, and mesh picking. Composed rather than taking the `3d` collection,
+# which pulls `default_platform` — gamepads, clipboard, fonts, x11/wayland.
+bevy = { workspace = true, features = [
+  "default_app",
+  "3d_bevy_render",
+  "scene",
+  "png",
+  "bevy_winit",
+  "std",
+  "multi_threaded",
+  "picking",
+  "mesh_picking",
+  # For a control's label. `default_font` ships a face with the binary, so no
+  # font asset has to sit beside the robot.
+  "bevy_ui",
+  "bevy_ui_render",
+  "bevy_text",
+  "default_font",
+] }
+
+clap = { version = "4", features = ["derive"], optional = true }
+env_logger = { version = "0.11", optional = true }
