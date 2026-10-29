@@ -22,6 +22,7 @@
 pub mod instance;
 pub mod ring;
 pub mod robot;
+pub mod stage;
 
 use std::path::PathBuf;
 
@@ -76,6 +77,16 @@ pub struct SceneOptions {
     /// only reports this; applying it is the host's, since it is a property of
     /// the window and a wasm host has no say in it.
     pub uncapped: bool,
+    /// Light or dark, which both the environment and the rig follow.
+    pub theme: stage::Theme,
+    /// What fills the frame behind the robot.
+    pub environment: stage::Environment,
+    /// How the robot is lit.
+    pub lighting: stage::Lighting,
+    /// Under the static rig, also light the robot with what Studio's
+    /// environment used to put on it. Off is the rig's lamps alone, which
+    /// Studio tuned to share the work with that environment.
+    pub former_environment_light: bool,
 }
 
 impl Default for SceneOptions {
@@ -92,6 +103,10 @@ impl Default for SceneOptions {
             seconds: 0.0,
             screenshot: None,
             uncapped: false,
+            theme: stage::Theme::default(),
+            environment: stage::Environment::default(),
+            lighting: stage::Lighting::default(),
+            former_environment_light: false,
         }
     }
 }
@@ -122,6 +137,7 @@ impl Plugin for ScenePlugin {
         app.add_plugins((
             PanOrbitCameraPlugin,
             JointRingPlugin,
+            stage::StagePlugin,
             arora_visuals::glow::GlowPlugin,
         ))
             .init_resource::<arora_visuals::Picks>()
@@ -1011,14 +1027,9 @@ pub fn setup(
     }
 
     // Placed properly once the model's bounds are known; see `take_census`.
+    // Lit and finished by `stage`, which reads what the host chose.
     let mut camera = commands.spawn((
         Camera3d::default(),
-        // Ambient light rides the camera in 0.19 rather than being a resource.
-        AmbientLight {
-            color: Color::WHITE,
-            brightness: 220.0,
-            ..default()
-        },
         // three.js OrbitControls' bindings, which is what the scene's users
         // already have in their hands: left orbits, right pans. The joint
         // gizmo shares the left button and takes priority when the press
@@ -1050,17 +1061,6 @@ pub fn setup(
         camera.insert(RenderTarget::Image(target.clone().into()));
         commands.insert_resource(OffscreenView(target));
     }
-
-    // A directional light is a direction, not a position, so this one needs no
-    // fitting — only its shadow cascades do, once the scale is known.
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 8_000.0,
-            shadow_maps_enabled: opts.shadows,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
 }
 
 /// Points the camera controller at the model, once its bounds are known.

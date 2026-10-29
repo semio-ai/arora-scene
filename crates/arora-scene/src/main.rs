@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use arora_scene::stage::{Environment, Lighting, Theme};
 use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
@@ -122,6 +123,23 @@ struct Cli {
     /// Render into an offscreen target and leave the window empty.
     #[arg(long, default_value_t = false)]
     offscreen: bool,
+
+    /// Light or dark.
+    #[arg(long, value_enum, default_value_t)]
+    theme: Theme,
+
+    /// What fills the frame behind the robot.
+    #[arg(long, value_enum, default_value_t)]
+    environment: Environment,
+
+    /// How the robot is lit.
+    #[arg(long, value_enum, default_value_t)]
+    lighting: Lighting,
+
+    /// Under static lighting, add the light Studio's environment used to put
+    /// on the robot.
+    #[arg(long, default_value_t = false)]
+    former_environment_light: bool,
 }
 
 fn main() {
@@ -173,6 +191,10 @@ fn main() {
         seconds: cli.seconds,
         screenshot: cli.screenshot.clone(),
         uncapped: cli.uncapped,
+        theme: cli.theme,
+        environment: cli.environment,
+        lighting: cli.lighting,
+        former_environment_light: cli.former_environment_light,
     })
     .insert_resource(RobotSpec {
         glb: glb.clone(),
