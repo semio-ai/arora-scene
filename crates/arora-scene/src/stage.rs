@@ -8,16 +8,23 @@
 //!
 //! **Both environments share one ground.** Below the horizon is the theme's
 //! ground colour whichever environment is showing; they differ only above it.
-//! That ground is a real surface rather than something each environment draws
-//! its own way, because an atmosphere's ground is lit by its sky and would only
-//! ever approximate the plain environment's colour.
+//! The floor is that colour wherever it is lit, and darkens only where a
+//! shadow falls, so a robot stands on it rather than floating over a grid.
+//!
+//! **The sky is a gradient, not a simulation.** Day is a blue gradient over a
+//! pale horizon, night a deep blue one with stars. The sun never moves, so a
+//! physically scattered sky would spend a second camera, lookup textures and a
+//! light of its own to arrive at a fixed picture — and that picture is only
+//! ever as close to the intended one as the physics allows. A gradient is the
+//! intended picture directly, at the cost of one dome.
 //!
 //! **Both lighting modes are the same lights.** A warm key, a cool fill and a
 //! faint ambient — Studio's camera-relative rig — differing only in what they
 //! are fixed to: the camera, so the side being looked at is the lit one, or
 //! the world, so the light stays put while the viewer moves round it. The
 //! world rig is frozen where the camera rig points from the scene's default
-//! view, so the two read identically until the camera moves.
+//! view, so the two read identically until the camera moves. The key casts
+//! shadows under either.
 //!
 //! Every choice can change while the scene runs. [`Stage`] holds the current
 //! one and the scene follows it; in a window the keys listed by
@@ -39,32 +46,19 @@
 //!
 //! Camera space is the same in both engines — looking down -Z, Y up — so the
 //! rig's camera-local directions need no axis change.
-//!
-//! # Why the sky has its own camera
-//!
-//! Bevy's atmosphere scatters *every* directional light in a view, weighted by
-//! its brightness. On the main camera that makes every lamp in the rig a second
-//! sun: a camera-fixed key light would swing the sky round whenever the camera
-//! orbits, and the sun that colours the sky would light the robot from below
-//! once it set. Render layers cannot split these, because a light hidden from a
-//! view is hidden from both its shading and its sky.
-//!
-//! So the sky is drawn by a camera of its own, beneath the main one, whose view
-//! holds the sun and nothing else. The main camera holds the robot and the
-//! rig, and draws over the sky without clearing it. This is the arrangement
-//! Bevy's own `IndependentSkybox` uses, for a related reason.
 
 use std::f32::consts::PI;
 
 use bevy::anti_alias::smaa::Smaa;
-use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{Exposure, Hdr, RenderTarget};
+use bevy::asset::{embedded_asset, embedded_path, AssetPath};
+use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::dev_tools::infinite_grid::{InfiniteGrid, InfiniteGridPlugin, InfiniteGridSettings};
-use bevy::light::atmosphere::ScatteringMedium;
-use bevy::light::{Atmosphere, NotShadowCaster};
-use bevy::pbr::AtmosphereSettings;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
 
 use crate::{OrbitCamera, SceneOptions};
 
@@ -85,9 +79,8 @@ pub enum Environment {
     /// robot.
     #[default]
     Plain,
-    /// Bevy's atmospheric scattering: day under a light theme, night under a
-    /// dark one, set by the sun's elevation rather than by two skies.
-    Atmosphere,
+    /// A day sky under a light theme, a night sky with stars under a dark one.
+    Sky,
 }
 
 /// What the rig is fixed to.
@@ -95,12 +88,10 @@ pub enum Environment {
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum Lighting {
     /// Fixed in the world, so the light stays put while the viewer moves round
-    /// the content. The key casts shadows, which a fixed light can do sensibly.
+    /// the content.
     #[default]
     World,
     /// Fixed to the camera, so the side being looked at is the lit one.
-    /// Unshadowed, because a shadow that moves with the viewer reads as the
-    /// object moving.
     Camera,
 }
 
@@ -116,25 +107,62 @@ pub struct Stage {
 /// one: `-log2(1.2)`.
 pub const UNIT_EV100: f32 = -0.263_034_4;
 
-/// The layer only the sun and the sky camera share.
-const SKY_LAYER: usize = 31;
-
-/// How far below the grid the shared ground sits. Far enough that no robot's
-/// feet reach it — the ground is unlit and flat, so its depth is invisible —
-/// while the grid still draws at zero.
-const GROUND_DEPTH: f32 = -1.0;
-
-/// How far the ground extends, and how far the main camera must see to reach
-/// its edge. A flat plane meets the horizon only at infinity, so whatever lies
-/// past its edge shows as a band just under the horizon; at this distance the
-/// band is a fraction of a pixel from any height the orbit allows.
+/// How far the main camera must see: past the floor's edge and out to the sky
+/// dome. A flat floor meets the horizon only at infinity, so at a shorter reach
+/// a band of whatever lies beyond would show beneath the horizon.
 pub const GROUND_REACH: f32 = 100_000.0;
 
-/// The ground colour — Studio's `groundColor`, which it also cleared to.
+/// The sky dome's radius, inside the camera's reach so it is never clipped.
+const DOME_RADIUS: f32 = GROUND_REACH * 0.5;
+
+/// The floor's height. A hair under the grid, which draws at zero, so the two
+/// never fight over the same depth.
+const FLOOR_HEIGHT: f32 = -0.002;
+
+/// How far a full shadow darkens the floor.
+const FLOOR_SHADOW: f32 = 0.35;
+
+/// The ground colour — Studio's `groundColor`.
 fn ground(theme: Theme) -> Color {
     match theme {
         Theme::Dark => Color::srgb_u8(0x33, 0x33, 0x33),
         Theme::Light => Color::srgb_u8(0xdd, 0xdd, 0xdd),
+    }
+}
+
+fn linear(colour: Color) -> Vec4 {
+    LinearRgba::from(colour).to_vec4()
+}
+
+/// The dome's colours for a stage. Plain is the ground colour throughout, so
+/// the dome is invisible against the clear and the floor.
+fn sky_for(environment: Environment, theme: Theme) -> SkyUniform {
+    let ground = linear(ground(theme));
+    match (environment, theme) {
+        (Environment::Plain, _) => SkyUniform {
+            zenith: ground,
+            horizon: ground,
+            ground,
+            stars: 0.0,
+            falloff: 1.0,
+            ..default()
+        },
+        (Environment::Sky, Theme::Light) => SkyUniform {
+            zenith: linear(Color::srgb_u8(0x4f, 0x86, 0xd6)),
+            horizon: linear(Color::srgb_u8(0xd9, 0xec, 0xf7)),
+            ground,
+            stars: 0.0,
+            falloff: 2.0,
+            ..default()
+        },
+        (Environment::Sky, Theme::Dark) => SkyUniform {
+            zenith: linear(Color::srgb_u8(0x03, 0x05, 0x0c)),
+            horizon: linear(Color::srgb_u8(0x12, 0x1a, 0x2e)),
+            ground,
+            stars: 1.0,
+            falloff: 1.5,
+            ..default()
+        },
     }
 }
 
@@ -144,12 +172,13 @@ struct RigLamp {
     colour: Color,
     lux: f32,
     from: Vec3,
-    /// Whether it casts shadows when fixed in the world.
+    /// Whether it casts shadows.
     shadows: bool,
 }
 
 /// Studio's camera-relative rig: a warm key above and to the left, a cool fill
-/// low and to the right, both aimed one unit ahead of the camera.
+/// low and to the right, both aimed one unit ahead of the camera. Only the key
+/// casts: one shadow reads as the scene's light, two read as staging.
 fn rig() -> [RigLamp; 2] {
     [
         RigLamp {
@@ -190,19 +219,6 @@ fn default_view(opts: &SceneOptions) -> Quat {
     Quat::from_rotation_y(opts.angle) * Quat::from_rotation_x(-opts.pitch)
 }
 
-/// The sun's elevation for a theme. A day sun is well clear of the horizon; a
-/// night sun is far enough below it that the twilight has gone too.
-fn sun_elevation(theme: Theme) -> f32 {
-    match theme {
-        Theme::Light => 35f32.to_radians(),
-        Theme::Dark => (-20f32).to_radians(),
-    }
-}
-
-/// How bright the sky's sun is. It lights nothing but the sky, so this sets
-/// how the sky reads against the robot rather than anything physical.
-const SUN_LUX: f32 = 8.0;
-
 /// The ground grid, in Studio's colours: one-metre cells and ten-metre
 /// sections.
 ///
@@ -233,18 +249,68 @@ fn grid(theme: Theme) -> InfiniteGridSettings {
     }
 }
 
-/// Marks the camera that draws only the sky.
-#[derive(Component)]
-pub struct SkyCamera;
+#[derive(ShaderType, Clone, Debug, Default)]
+pub struct SkyUniform {
+    pub zenith: Vec4,
+    pub horizon: Vec4,
+    pub ground: Vec4,
+    /// How strongly stars show, from none to full.
+    pub stars: f32,
+    /// How quickly the horizon colour gives way to the zenith's.
+    pub falloff: f32,
+    pub _padding: Vec2,
+}
 
-/// Marks the light that colours the sky and lights nothing else.
-#[derive(Component)]
-struct Sun;
+/// The sky dome's material; see `sky.wesl`.
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug, Default)]
+pub struct SkyMaterial {
+    #[uniform(0)]
+    pub sky: SkyUniform,
+}
 
-/// Marks the shared ground, which framing and the scene's census leave out:
-/// it is the stage, not the thing on it.
+impl Material for SkyMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Path(
+            AssetPath::from_path_buf(embedded_path!("sky.wesl")).with_source("embedded"),
+        )
+    }
+}
+
+#[derive(ShaderType, Clone, Debug, Default)]
+pub struct FloorUniform {
+    pub colour: Vec4,
+    /// How far a full shadow darkens the floor.
+    pub shadow: f32,
+    pub _padding: Vec3,
+}
+
+/// The floor's material; see `floor.wesl`.
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug, Default)]
+pub struct FloorMaterial {
+    #[uniform(0)]
+    pub surface: FloorUniform,
+}
+
+impl Material for FloorMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Path(
+            AssetPath::from_path_buf(embedded_path!("floor.wesl")).with_source("embedded"),
+        )
+    }
+}
+
+/// Marks a mesh that is part of the stage rather than the content on it, which
+/// framing and the scene's census leave out.
 #[derive(Component)]
-pub struct Ground;
+pub struct StageMesh;
+
+/// Marks the sky dome.
+#[derive(Component)]
+struct Dome;
+
+/// Marks the floor.
+#[derive(Component)]
+struct Floor;
 
 /// The world-fixed frame the rig hangs from under [`Lighting::World`]: the
 /// camera's orientation at the default view, so the rig starts where the
@@ -265,42 +331,44 @@ pub struct StagePlugin;
 
 impl Plugin for StagePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(InfiniteGridPlugin)
-            .add_systems(Startup, build_stage.after(crate::setup))
-            .add_systems(
-                Update,
-                (
-                    stage_keys,
-                    (apply_environment, apply_lighting, apply_theme, show_stage)
-                        .run_if(resource_changed::<Stage>),
-                )
-                    .chain(),
+        // Carried in the binary rather than loaded from the asset root, which
+        // here is wherever the robot happens to live.
+        embedded_asset!(app, "sky.wesl");
+        embedded_asset!(app, "floor.wesl");
+        app.add_plugins((
+            InfiniteGridPlugin,
+            MaterialPlugin::<SkyMaterial>::default(),
+            MaterialPlugin::<FloorMaterial>::default(),
+        ))
+        .add_systems(Startup, build_stage.after(crate::setup))
+        .add_systems(
+            Update,
+            (
+                stage_keys,
+                (apply_look, apply_lighting, show_stage).run_if(resource_changed::<Stage>),
             )
-            .add_systems(PostUpdate, follow_main_lens);
+                .chain(),
+        );
     }
 }
 
 /// Builds everything the stage keeps for the whole run, whichever choices are
-/// current: the camera's finish, the sky camera and its sun, the atmosphere,
-/// the ground, the grid and the world rig's anchor. What the choices change is
-/// applied separately, so a change at runtime takes the same path as the
-/// first frame.
+/// current: the camera's finish, the sky dome, the floor, the grid and the
+/// world rig's anchor. What the choices change is applied separately, so a
+/// change at runtime takes the same path as the first frame.
 fn build_stage(
     mut commands: Commands,
     opts: Res<SceneOptions>,
-    mut cameras: Query<(Entity, &mut Camera, Option<&RenderTarget>), With<OrbitCamera>>,
-    mut media: ResMut<Assets<ScatteringMedium>>,
+    cameras: Query<Entity, With<OrbitCamera>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut skies: ResMut<Assets<SkyMaterial>>,
+    mut floors: ResMut<Assets<FloorMaterial>>,
 ) {
-    let Ok((main, mut camera, target)) = cameras.single_mut() else {
+    let Ok(main) = cameras.single() else {
         log::error!("no scene camera to dress");
         return;
     };
-    let target = target.cloned();
 
-    // Above the sky camera, so it draws over whatever the sky put down.
-    camera.order = 1;
     commands.entity(main).insert((
         Exposure { ev100: UNIT_EV100 },
         // Studio sets no tone mapping, so three's default — none — is the
@@ -312,52 +380,39 @@ fn build_stage(
         // or the other: stacking them blurs edges SMAA has already resolved.
         Msaa::Off,
         Smaa::default(),
-        // Shared with the sky camera, so the two write one target texture and
-        // the upper can draw over the lower rather than replace it. Kept on in
-        // the plain environment too, so switching never re-specialises the
-        // camera's pipelines.
-        Hdr,
         rig_ambient(),
     ));
 
-    commands.spawn(Atmosphere::earth(
-        media.add(ScatteringMedium::earth(256, 256)),
-    ));
+    // Riding the camera, so it surrounds the camera wherever the orbit takes
+    // it. Turned inside out, because it is only ever seen from within.
+    let dome = Mesh::from(Sphere::new(DOME_RADIUS))
+        .with_inverted_winding()
+        .expect("a sphere is an indexed triangle list");
     commands.spawn((
-        DirectionalLight {
-            illuminance: SUN_LUX,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::IDENTITY,
-        RenderLayers::layer(SKY_LAYER),
-        Sun,
-    ));
-    // A child of the main camera, so the transform hierarchy turns the two
-    // together. Copying the turn across instead lags the orbit by a frame
-    // whenever the copy happens to run first, and on a fast orbit that frame
-    // opens a band of the atmosphere's own ground between sky and floor.
-    let mut sky = commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: 0,
-            is_active: false,
-            ..default()
-        },
-        Hdr,
-        AtmosphereSettings::default(),
-        Exposure { ev100: UNIT_EV100 },
-        Tonemapping::None,
-        DebandDither::Disabled,
-        Msaa::Off,
-        RenderLayers::layer(SKY_LAYER),
+        Mesh3d(meshes.add(dome)),
+        MeshMaterial3d(skies.add(SkyMaterial::default())),
         Transform::IDENTITY,
         ChildOf(main),
-        SkyCamera,
+        NotShadowCaster,
+        NotShadowReceiver,
+        StageMesh,
+        Dome,
     ));
-    if let Some(target) = target {
-        sky.insert(target);
-    }
+
+    commands.spawn((
+        Mesh3d(
+            meshes.add(
+                Plane3d::default()
+                    .mesh()
+                    .size(2.0 * DOME_RADIUS, 2.0 * DOME_RADIUS),
+            ),
+        ),
+        MeshMaterial3d(floors.add(FloorMaterial::default())),
+        Transform::from_xyz(0.0, FLOOR_HEIGHT, 0.0),
+        NotShadowCaster,
+        StageMesh,
+        Floor,
+    ));
 
     commands.spawn((
         Transform::from_rotation(default_view(&opts)),
@@ -365,29 +420,6 @@ fn build_stage(
         RigAnchor,
     ));
 
-    // Unlit, so it is exactly the ground colour from every angle and under
-    // every rig — the same colour the plain environment clears to. Drawn by
-    // the main camera rather than the sky camera: in the sky camera's view the
-    // atmosphere would haze it with distance, and it would match nothing.
-    commands.spawn((
-        Mesh3d(
-            meshes.add(
-                Plane3d::default()
-                    .mesh()
-                    .size(2.0 * GROUND_REACH, 2.0 * GROUND_REACH),
-            ),
-        ),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: ground(opts.theme),
-            unlit: true,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, GROUND_DEPTH, 0.0),
-        NotShadowCaster,
-        Ground,
-    ));
-
-    // On the main camera's layer, so the sky camera beneath never draws it.
     commands.spawn((InfiniteGrid, grid(opts.theme)));
 
     // A capture wants the scene alone; a window wants to know what it is
@@ -423,8 +455,8 @@ fn build_stage(
 fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
     if keys.just_pressed(KeyCode::KeyE) {
         stage.environment = match stage.environment {
-            Environment::Plain => Environment::Atmosphere,
-            Environment::Atmosphere => Environment::Plain,
+            Environment::Plain => Environment::Sky,
+            Environment::Sky => Environment::Plain,
         };
     }
     if keys.just_pressed(KeyCode::KeyL) {
@@ -441,23 +473,39 @@ fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
     }
 }
 
-/// Shows the sky or the plain ground colour above the horizon.
-fn apply_environment(
+/// Colours everything the environment and theme touch: the clear, the dome,
+/// the floor and the grid.
+#[allow(clippy::too_many_arguments)]
+fn apply_look(
     stage: Res<Stage>,
-    mut main: Query<&mut Camera, (With<OrbitCamera>, Without<SkyCamera>)>,
-    mut sky: Query<&mut Camera, With<SkyCamera>>,
+    mut cameras: Query<&mut Camera, With<OrbitCamera>>,
+    mut skies: ResMut<Assets<SkyMaterial>>,
+    domes: Query<&MeshMaterial3d<SkyMaterial>, With<Dome>>,
+    mut floors: ResMut<Assets<FloorMaterial>>,
+    floor: Query<&MeshMaterial3d<FloorMaterial>, With<Floor>>,
+    mut grids: Query<&mut InfiniteGridSettings, With<InfiniteGrid>>,
 ) {
-    let plain = stage.environment == Environment::Plain;
-    for mut camera in &mut main {
-        camera.clear_color = if plain {
-            ClearColorConfig::Custom(ground(stage.theme))
-        } else {
-            // The sky beneath has already filled the target.
-            ClearColorConfig::None
-        };
+    // Behind the dome, so only ever seen at its seams; the ground colour is
+    // what every seam should show.
+    for mut camera in &mut cameras {
+        camera.clear_color = ClearColorConfig::Custom(ground(stage.theme));
     }
-    for mut camera in &mut sky {
-        camera.is_active = !plain;
+    for handle in &domes {
+        if let Some(mut material) = skies.get_mut(&handle.0) {
+            material.sky = sky_for(stage.environment, stage.theme);
+        }
+    }
+    for handle in &floor {
+        if let Some(mut material) = floors.get_mut(&handle.0) {
+            material.surface = FloorUniform {
+                colour: linear(ground(stage.theme)),
+                shadow: FLOOR_SHADOW,
+                ..default()
+            };
+        }
+    }
+    for mut settings in &mut grids {
+        *settings = grid(stage.theme);
     }
 }
 
@@ -467,7 +515,7 @@ fn apply_lighting(
     stage: Res<Stage>,
     opts: Res<SceneOptions>,
     mut commands: Commands,
-    main: Query<Entity, (With<OrbitCamera>, Without<SkyCamera>)>,
+    main: Query<Entity, With<OrbitCamera>>,
     anchor: Query<Entity, With<RigAnchor>>,
     old: Query<Entity, With<RigLight>>,
 ) {
@@ -482,14 +530,13 @@ fn apply_lighting(
         commands.entity(light).despawn();
     }
 
-    let fixed = stage.lighting == Lighting::World;
     commands.entity(parent).with_children(|hanging| {
         for lamp in rig() {
             hanging.spawn((
                 DirectionalLight {
                     color: lamp.colour,
                     illuminance: lamp.lux,
-                    shadow_maps_enabled: fixed && lamp.shadows && opts.shadows,
+                    shadow_maps_enabled: lamp.shadows && opts.shadows,
                     ..default()
                 },
                 aimed(lamp.from),
@@ -497,47 +544,6 @@ fn apply_lighting(
             ));
         }
     });
-}
-
-/// Recolours what the theme touches: the ground, the grid, the sun's height
-/// and the atmosphere's idea of the ground beneath it.
-fn apply_theme(
-    stage: Res<Stage>,
-    opts: Res<SceneOptions>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    grounds: Query<&MeshMaterial3d<StandardMaterial>, With<Ground>>,
-    mut grids: Query<&mut InfiniteGridSettings, With<InfiniteGrid>>,
-    mut suns: Query<&mut Transform, With<Sun>>,
-    mut atmospheres: Query<&mut Atmosphere>,
-) {
-    for handle in &grounds {
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.base_color = ground(stage.theme);
-        }
-    }
-    for mut settings in &mut grids {
-        *settings = grid(stage.theme);
-    }
-
-    // The sun shares the world rig key's heading, so the sky is brightest on
-    // the side the robot is lit from.
-    let key = rig()[0].from;
-    let toward_key = default_view(&opts) * (key - Vec3::new(0.0, 0.0, -1.0));
-    let heading = toward_key.with_y(0.0).normalize_or(Vec3::NEG_X);
-    let elevation = sun_elevation(stage.theme);
-    let toward_sun = heading * elevation.cos() + Vec3::Y * elevation.sin();
-    for mut transform in &mut suns {
-        *transform = Transform::IDENTITY.looking_to(-toward_sun, Vec3::Y);
-    }
-
-    // The visible ground is the shared surface, but the atmosphere still
-    // bounces light off a ground of its own when it scatters. Giving it the
-    // same colour keeps the horizon from tinting toward a planet that is not
-    // there.
-    let albedo = LinearRgba::from(ground(stage.theme));
-    for mut atmosphere in &mut atmospheres {
-        atmosphere.ground_albedo = Vec3::new(albedo.red, albedo.green, albedo.blue);
-    }
 }
 
 fn show_stage(stage: Res<Stage>, mut readouts: Query<&mut Text, With<StageReadout>>) {
@@ -549,45 +555,30 @@ fn show_stage(stage: Res<Stage>, mut readouts: Query<&mut Text, With<StageReadou
     }
 }
 
-/// Gives the sky camera the main camera's lens. Only the projection needs
-/// copying — the hierarchy already turns the two together — and it changes
-/// only when the camera is fitted, so a frame's lag here is never visible.
-fn follow_main_lens(
-    main: Query<&Projection, (With<OrbitCamera>, Without<SkyCamera>)>,
-    mut sky: Query<&mut Projection, With<SkyCamera>>,
-) {
-    let Ok(lens) = main.single() else {
-        return;
-    };
-    for mut projection in &mut sky {
-        *projection = lens.clone();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
 
-    /// A world with the two cameras and the anchor the stage dresses, and
-    /// nothing rendering.
-    fn world(stage: Stage) -> (World, Entity, Entity, Entity) {
+    /// A world holding what the stage dresses — the camera, the dome, the
+    /// floor and the anchor — with nothing rendering.
+    fn world(stage: Stage) -> (World, Entity, Entity) {
         let mut world = World::new();
         world.insert_resource(SceneOptions::default());
         world.insert_resource(stage);
         let main = world.spawn((Camera::default(), OrbitCamera)).id();
-        let sky = world
-            .spawn((
-                Camera {
-                    is_active: false,
-                    ..default()
-                },
-                SkyCamera,
-            ))
-            .id();
         let anchor = world.spawn((Transform::IDENTITY, RigAnchor)).id();
-        (world, main, sky, anchor)
+
+        let mut skies = Assets::<SkyMaterial>::default();
+        let sky = skies.add(SkyMaterial::default());
+        let mut floors = Assets::<FloorMaterial>::default();
+        let floor = floors.add(FloorMaterial::default());
+        world.insert_resource(skies);
+        world.insert_resource(floors);
+        world.spawn((MeshMaterial3d(sky), Dome));
+        world.spawn((MeshMaterial3d(floor), Floor));
+        (world, main, anchor)
     }
 
     fn stage(environment: Environment, lighting: Lighting, theme: Theme) -> Stage {
@@ -598,57 +589,95 @@ mod tests {
         }
     }
 
+    fn dome(world: &mut World) -> SkyUniform {
+        let handle = world
+            .query_filtered::<&MeshMaterial3d<SkyMaterial>, With<Dome>>()
+            .single(world)
+            .unwrap()
+            .0
+            .clone();
+        world
+            .resource::<Assets<SkyMaterial>>()
+            .get(&handle)
+            .unwrap()
+            .sky
+            .clone()
+    }
+
+    fn floor(world: &mut World) -> FloorUniform {
+        let handle = world
+            .query_filtered::<&MeshMaterial3d<FloorMaterial>, With<Floor>>()
+            .single(world)
+            .unwrap()
+            .0
+            .clone();
+        world
+            .resource::<Assets<FloorMaterial>>()
+            .get(&handle)
+            .unwrap()
+            .surface
+            .clone()
+    }
+
     fn hung(world: &mut World) -> Vec<(Option<Entity>, DirectionalLight, Transform)> {
         let mut query = world
             .query_filtered::<(Option<&ChildOf>, &DirectionalLight, &Transform), With<RigLight>>();
         query
             .iter(world)
-            .map(|(parent, light, transform)| {
-                (parent.map(ChildOf::parent), *light, *transform)
-            })
+            .map(|(parent, light, transform)| (parent.map(ChildOf::parent), *light, *transform))
             .collect()
     }
 
+    /// Below the horizon every view shows the same ground, whatever is above
+    /// it: the clear, the dome's lower half and the floor all agree.
     #[test]
-    fn each_environment_shows_the_ground_or_the_sky_and_switches_back() {
-        let (mut world, main, sky, _) =
-            world(stage(Environment::Plain, Lighting::World, Theme::Dark));
-        world.run_system_once(apply_environment).unwrap();
-        assert!(
-            matches!(world.get::<Camera>(main).unwrap().clear_color,
-                ClearColorConfig::Custom(colour) if colour == ground(Theme::Dark)),
-            "plain clears to the ground colour",
-        );
-        assert!(
-            !world.get::<Camera>(sky).unwrap().is_active,
-            "no sky under plain"
-        );
+    fn every_look_shares_one_ground() {
+        for environment in [Environment::Plain, Environment::Sky] {
+            for theme in [Theme::Dark, Theme::Light] {
+                let (mut world, main, _) = world(stage(environment, Lighting::World, theme));
+                world.run_system_once(apply_look).unwrap();
+                let expected = linear(ground(theme));
+                assert!(matches!(world.get::<Camera>(main).unwrap().clear_color,
+                    ClearColorConfig::Custom(colour) if colour == ground(theme)));
+                assert_eq!(
+                    dome(&mut world).ground,
+                    expected,
+                    "{environment:?} {theme:?}"
+                );
+                assert_eq!(
+                    floor(&mut world).colour,
+                    expected,
+                    "{environment:?} {theme:?}"
+                );
+            }
+        }
+    }
 
-        world.resource_mut::<Stage>().environment = Environment::Atmosphere;
-        world.run_system_once(apply_environment).unwrap();
-        assert!(
-            matches!(
-                world.get::<Camera>(main).unwrap().clear_color,
-                ClearColorConfig::None
-            ),
-            "over a sky the main camera must not clear what the sky drew",
-        );
-        assert!(world.get::<Camera>(sky).unwrap().is_active);
+    #[test]
+    fn plain_is_the_ground_all_the_way_up_and_only_night_has_stars() {
+        let look = |environment, theme| {
+            let (mut world, ..) = world(stage(environment, Lighting::World, theme));
+            world.run_system_once(apply_look).unwrap();
+            dome(&mut world)
+        };
+        let plain = look(Environment::Plain, Theme::Light);
+        assert_eq!(plain.zenith, plain.ground);
+        assert_eq!(plain.horizon, plain.ground);
+        assert_eq!(plain.stars, 0.0);
 
-        let mut back = world.resource_mut::<Stage>();
-        back.environment = Environment::Plain;
-        back.theme = Theme::Light;
-        world.run_system_once(apply_environment).unwrap();
-        assert!(matches!(world.get::<Camera>(main).unwrap().clear_color,
-            ClearColorConfig::Custom(colour) if colour == ground(Theme::Light)));
-        assert!(!world.get::<Camera>(sky).unwrap().is_active);
+        let day = look(Environment::Sky, Theme::Light);
+        assert_ne!(day.zenith, day.ground);
+        assert_eq!(day.stars, 0.0, "no stars by day");
+
+        let night = look(Environment::Sky, Theme::Dark);
+        assert!(night.stars > 0.0);
     }
 
     /// A rig left behind by a switch keeps lighting the robot, so the count is
     /// asserted after every change rather than only the new lights' presence.
     #[test]
     fn switching_anchor_moves_the_whole_rig() {
-        let (mut world, main, _, anchor) =
+        let (mut world, main, anchor) =
             world(stage(Environment::Plain, Lighting::World, Theme::Dark));
 
         world.run_system_once(apply_lighting).unwrap();
@@ -664,17 +693,17 @@ mod tests {
 
         world.resource_mut::<Stage>().lighting = Lighting::World;
         world.run_system_once(apply_lighting).unwrap();
-        assert_eq!(hung(&mut world).len(), 2);
+        let back = hung(&mut world);
+        assert_eq!(back.len(), 2);
         assert!(
-            world
-                .get::<Children>(main)
-                .is_none_or(|children| children.is_empty()),
+            back.iter().all(|(parent, ..)| *parent == Some(anchor)),
             "nothing is left hanging off the camera",
         );
     }
 
     /// The two anchors hold the same lights: same colours, same strengths, same
-    /// directions relative to what they hang from. Only shadows differ.
+    /// directions relative to what they hang from, and the key casts under
+    /// both.
     #[test]
     fn both_anchors_carry_the_same_lights() {
         let lamps = |lighting| {
@@ -691,13 +720,13 @@ mod tests {
         {
             assert_eq!(world_lamp.color, camera_lamp.color);
             assert_eq!(world_lamp.illuminance, camera_lamp.illuminance);
-            assert_eq!(world_turn.rotation, camera_turn.rotation);
-            assert!(
-                !camera_lamp.shadow_maps_enabled,
-                "nothing riding the camera casts"
+            assert_eq!(
+                world_lamp.shadow_maps_enabled,
+                camera_lamp.shadow_maps_enabled
             );
+            assert_eq!(world_turn.rotation, camera_turn.rotation);
         }
-        assert!(fixed[0].1.shadow_maps_enabled, "the fixed key casts");
+        assert!(fixed[0].1.shadow_maps_enabled, "the key casts");
         assert!(!fixed[1].1.shadow_maps_enabled, "the fill does not");
     }
 }

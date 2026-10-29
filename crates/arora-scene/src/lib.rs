@@ -1119,7 +1119,7 @@ fn fit_orbit(
     }
 }
 
-/// The meshes a census counts: everything but the stage's ground.
+/// The meshes a census counts: everything but the stage.
 type CensusMeshes<'w, 's> = Query<
     'w,
     's,
@@ -1129,15 +1129,15 @@ type CensusMeshes<'w, 's> = Query<
         Option<&'static Aabb>,
         Option<&'static RenderLayers>,
     ),
-    Without<stage::Ground>,
+    Without<stage::StageMesh>,
 >;
 
-/// The meshes whose visibility is counted: everything but the stage's ground.
+/// The meshes whose visibility is counted: everything but the stage.
 type VisibleMeshes<'w, 's> = Query<
     'w,
     's,
     (&'static ViewVisibility, Option<&'static RenderLayers>),
-    (With<Mesh3d>, Without<stage::Ground>),
+    (With<Mesh3d>, Without<stage::StageMesh>),
 >;
 
 /// Counts what the glTF actually brought in, and measures where it sits.
