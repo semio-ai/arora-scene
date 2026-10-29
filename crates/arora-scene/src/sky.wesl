@@ -66,7 +66,7 @@ fn mountain(latitude: f32, longitude: f32) -> f32 {
 // valleys dip below the horizon and the sky meets the floor directly between
 // the peaks; raised this far, the lowest valley sits clear of it and the
 // range reads as a continuous wall of hills, as it does in Studio.
-const MOUNTAIN_LIFT: f32 = 0.2;
+const MOUNTAIN_LIFT: f32 = 0.1;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
