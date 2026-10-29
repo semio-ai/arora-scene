@@ -27,7 +27,7 @@ log = "0.4"
 # types, so a skew is a wall of trait errors rather than a version warning.
 arora-visuals = { git = "https://github.com/semio-ai/arora-visuals", branch = "main" }
 
-bevy = { version = "0.19", default-features = false }
+bevy = { version = "0.20", default-features = false }
 
 [profile.release]
 opt-level = "s"
