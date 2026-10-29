@@ -77,16 +77,18 @@ pub struct SceneOptions {
     /// only reports this; applying it is the host's, since it is a property of
     /// the window and a wasm host has no say in it.
     pub uncapped: bool,
+    /// Where the stage starts. A running scene changes it through
+    /// [`stage::Stage`]; these only set the first frame.
+    ///
     /// Light or dark, which both the environment and the rig follow.
     pub theme: stage::Theme,
-    /// What fills the frame behind the robot.
+    /// What fills the frame above the horizon.
     pub environment: stage::Environment,
-    /// How the robot is lit.
+    /// What the lights are fixed to.
     pub lighting: stage::Lighting,
-    /// Under the static rig, also light the robot with what Studio's
-    /// environment used to put on it. Off is the rig's lamps alone, which
-    /// Studio tuned to share the work with that environment.
-    pub former_environment_light: bool,
+    /// How much of the light Studio's environment used to put on the robot the
+    /// world rig carries instead, from none to all of it.
+    pub former_environment_fill: f32,
 }
 
 impl Default for SceneOptions {
@@ -106,7 +108,7 @@ impl Default for SceneOptions {
             theme: stage::Theme::default(),
             environment: stage::Environment::default(),
             lighting: stage::Lighting::default(),
-            former_environment_light: false,
+            former_environment_fill: 0.0,
         }
     }
 }
@@ -1102,10 +1104,12 @@ fn fit_orbit(
             orbit.force_update = true;
 
             // The default near/far pair assumes a metre-scale world; a model in
-            // millimetres would sit entirely behind the far plane.
+            // millimetres would sit entirely behind the far plane. The far
+            // plane also has to reach the stage's ground most of the way to the
+            // horizon, or a band of whatever lies beyond shows beneath it.
             *projection = Projection::Perspective(PerspectiveProjection {
                 near: framing.radius * 0.01,
-                far: framing.radius * 40.0,
+                far: (framing.radius * 40.0).max(stage::GROUND_REACH),
                 ..default()
             });
         }
@@ -1119,6 +1123,27 @@ fn fit_orbit(
     }
 }
 
+/// The meshes a census counts: everything but the stage's ground.
+type CensusMeshes<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Mesh3d,
+        &'static GlobalTransform,
+        Option<&'static Aabb>,
+        Option<&'static RenderLayers>,
+    ),
+    Without<stage::Ground>,
+>;
+
+/// The meshes whose visibility is counted: everything but the stage's ground.
+type VisibleMeshes<'w, 's> = Query<
+    'w,
+    's,
+    (&'static ViewVisibility, Option<&'static RenderLayers>),
+    (With<Mesh3d>, Without<stage::Ground>),
+>;
+
 /// Counts what the glTF actually brought in, and measures where it sits.
 ///
 /// Waits out the first half-second: transform propagation and bounds
@@ -1128,12 +1153,7 @@ fn take_census(
     frames: Res<Frames>,
     mut census: ResMut<Census>,
     mut framing: ResMut<Framing>,
-    meshes: Query<(
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Aabb>,
-        Option<&RenderLayers>,
-    )>,
+    meshes: CensusMeshes,
     materials: Query<&MeshMaterial3d<StandardMaterial>>,
     assets: Res<Assets<Mesh>>,
 ) {
@@ -1240,7 +1260,7 @@ fn split_materials(
 /// to "is the camera looking at the robot".
 fn count_visible(
     mut census: ResMut<Census>,
-    meshes: Query<(&ViewVisibility, Option<&RenderLayers>), With<Mesh3d>>,
+    meshes: VisibleMeshes,
 ) {
     let visible = meshes
         .iter()
