@@ -95,8 +95,6 @@ Three rules hold the model together:
   read the GLB from disk up front, which is why they are the host's to call.
   Making these asset-driven is what lets a running scene gain, swap and lose
   assets — and it is the same change either way.
-- **The selection outline is not built.** Bevy's transform gizmos do not cover
-  it, and a mask-and-dilate pass is custom work.
 
 ## Licence
 

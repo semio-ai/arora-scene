@@ -49,7 +49,7 @@ pub struct SpawnedScene<'w, 's> {
 pub fn index_instances(
     meta: Res<RobotMeta>,
     selected: Res<Selected>,
-    mut selections: ResMut<arora_visuals::glow::Selections>,
+    mut selections: ResMut<arora_visuals::select::Selections>,
     camera: Query<Entity, With<OrbitCamera>>,
     roots: Query<Entity, (With<WorldAssetRoot>, Without<EntityInstance>)>,
     scene: SpawnedScene,

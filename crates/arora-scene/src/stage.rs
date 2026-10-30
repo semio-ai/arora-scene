@@ -59,6 +59,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
+use arora_visuals::outline::OutlineView;
+
 use crate::{OrbitCamera, SceneOptions};
 
 /// Light or dark, as the host's own theme is.
@@ -427,6 +429,8 @@ fn build_stage(
         Tonemapping::None,
         DebandDither::Disabled,
         rig_ambient(),
+        // Studio's selection outline: one white line around what is selected.
+        OutlineView::default(),
     ));
 
     // Riding the camera, so it surrounds the camera wherever the orbit takes

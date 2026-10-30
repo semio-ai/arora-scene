@@ -34,6 +34,7 @@ use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use arora_visuals::outline::OutlineOverlay;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use ring::{
     JointBarMaterial, JointRingMaterial, JointRingPlugin, JointRingUniform, DEPTH_IN_FRONT,
@@ -137,10 +138,10 @@ impl Plugin for ScenePlugin {
             PanOrbitCameraPlugin,
             JointRingPlugin,
             stage::StagePlugin,
-            arora_visuals::glow::GlowPlugin,
+            arora_visuals::outline::OutlinePlugin,
         ))
             .init_resource::<arora_visuals::Picks>()
-            .init_resource::<arora_visuals::glow::Selections>()
+            .init_resource::<arora_visuals::select::Selections>()
             .init_resource::<instance::Selected>()
             // Bevy's own mesh picking is not added: it casts base vertices,
             // and a pick has to meet the mesh where a morph put it. The
@@ -1130,7 +1131,7 @@ type CensusMeshes<'w, 's> = Query<
         Option<&'static Aabb>,
         Option<&'static RenderLayers>,
     ),
-    Without<stage::StageMesh>,
+    (Without<stage::StageMesh>, Without<OutlineOverlay>),
 >;
 
 /// The meshes whose visibility is counted: everything but the stage.
@@ -1138,7 +1139,11 @@ type VisibleMeshes<'w, 's> = Query<
     'w,
     's,
     (&'static ViewVisibility, Option<&'static RenderLayers>),
-    (With<Mesh3d>, Without<stage::StageMesh>),
+    (
+        With<Mesh3d>,
+        Without<stage::StageMesh>,
+        Without<OutlineOverlay>,
+    ),
 >;
 
 /// Counts what the glTF actually brought in, and measures where it sits.
