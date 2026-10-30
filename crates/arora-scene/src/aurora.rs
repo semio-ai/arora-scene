@@ -77,9 +77,9 @@ impl Default for Aurora {
             speed: 0.001,
             altitude: 400.0,
             edge_fade: 1.0,
-            colour_scale: 700.0,
-            colour_speed: 0.05,
-            colour_lift: 0.25,
+            colour_scale: 2000.0,
+            colour_speed: 0.175,
+            colour_lift: 0.15,
             colours: [
                 Color::srgb_u8(0x14, 0xe8, 0x1e),
                 Color::srgb_u8(0xd0, 0x2a, 0x5c),
