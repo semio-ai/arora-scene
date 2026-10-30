@@ -43,6 +43,11 @@ pub struct Aurora {
     pub speed: f32,
     /// How high the curtains' lower edges hang, in metres.
     pub altitude: f32,
+    /// How far a curtain fades where it is seen edge-on, from not at all to
+    /// fully. A sheet with no thickness, drawn additively, piles up where it
+    /// turns edge-on and then stops dead, which reads as a hard line; a real
+    /// curtain's brightness falls away there over its thickness.
+    pub edge_fade: f32,
 }
 
 impl Default for Aurora {
@@ -52,6 +57,7 @@ impl Default for Aurora {
             wave: 60.0,
             speed: 0.001,
             altitude: 400.0,
+            edge_fade: 0.5,
         }
     }
 }
@@ -165,7 +171,8 @@ pub struct AuroraUniform {
     pub low: Vec4,
     pub high: Vec4,
     pub brightness: f32,
-    pub _padding: Vec3,
+    pub edge_fade: f32,
+    pub _padding: Vec2,
 }
 
 /// A curtain's material; see `aurora.wesl`.
@@ -304,6 +311,7 @@ fn tint(
                 low: LinearRgba::from(shape.low).to_vec4(),
                 high: LinearRgba::from(shape.high).to_vec4(),
                 brightness: aurora.brightness * shape.weight,
+                edge_fade: aurora.edge_fade,
                 ..default()
             };
         }
@@ -335,6 +343,7 @@ fn wave(
             continue;
         };
         let mut positions = Vec::with_capacity((SEGMENTS + 1) * 2);
+        let mut normals = Vec::with_capacity((SEGMENTS + 1) * 2);
         for i in 0..=SEGMENTS {
             let along = i as f32 / SEGMENTS as f32;
             let ahead = shape.from + (shape.to - shape.from) * along;
@@ -351,6 +360,19 @@ fn wave(
             positions.push(bottom.to_array());
             positions.push(top.to_array());
         }
+        // Each column's normal is across the sheet, from the run of the lower
+        // edge through it and the rise of the column. Taken per vertex rather
+        // than per triangle, so the edge fade turns smoothly along the ribbon
+        // instead of stepping at every segment.
+        for i in 0..=SEGMENTS {
+            let bottom = |j: usize| Vec3::from(positions[j * 2]);
+            let run = bottom(i.min(SEGMENTS - 1) + 1) - bottom(i.saturating_sub(1));
+            let rise = Vec3::from(positions[i * 2 + 1]) - bottom(i);
+            let normal = run.cross(rise).normalize_or(right).to_array();
+            normals.push(normal);
+            normals.push(normal);
+        }
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     }
 }

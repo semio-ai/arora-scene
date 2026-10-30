@@ -38,6 +38,8 @@ enum Knob {
     AuroraSpeed,
     /// In metres.
     AuroraAltitude,
+    /// From none to full.
+    AuroraEdgeFade,
 }
 
 impl Knob {
@@ -52,6 +54,7 @@ impl Knob {
             Knob::AuroraWave => "aurora wave (m)",
             Knob::AuroraSpeed => "aurora speed (cycles/s)",
             Knob::AuroraAltitude => "aurora altitude (m)",
+            Knob::AuroraEdgeFade => "aurora edge-on fade",
         }
     }
 
@@ -64,6 +67,7 @@ impl Knob {
             Knob::AuroraWave => (0.0, 300.0, 1.0),
             Knob::AuroraSpeed => (0.0, 0.05, 0.0005),
             Knob::AuroraAltitude => (100.0, 2000.0, 10.0),
+            Knob::AuroraEdgeFade => (0.0, 1.0, 0.01),
         }
     }
 
@@ -75,6 +79,7 @@ impl Knob {
             Knob::AuroraWave => aurora.wave,
             Knob::AuroraSpeed => aurora.speed,
             Knob::AuroraAltitude => aurora.altitude,
+            Knob::AuroraEdgeFade => aurora.edge_fade,
             Knob::Floor => (look.ground.to_srgba().red * 255.0).round(),
             Knob::Midpoint => look.midpoint.to_degrees(),
             Knob::HorizonRed => (horizon.red * 255.0).round(),
@@ -91,6 +96,7 @@ impl Knob {
             Knob::AuroraWave => aurora.wave = value,
             Knob::AuroraSpeed => aurora.speed = value,
             Knob::AuroraAltitude => aurora.altitude = value,
+            Knob::AuroraEdgeFade => aurora.edge_fade = value,
             Knob::Floor => {
                 let grey = value / 255.0;
                 look.ground = Color::srgb(grey, grey, grey);
@@ -109,7 +115,7 @@ impl Knob {
     }
 }
 
-const KNOBS: [Knob; 9] = [
+const KNOBS: [Knob; 10] = [
     Knob::Floor,
     Knob::Midpoint,
     Knob::HorizonRed,
@@ -119,6 +125,7 @@ const KNOBS: [Knob; 9] = [
     Knob::AuroraWave,
     Knob::AuroraSpeed,
     Knob::AuroraAltitude,
+    Knob::AuroraEdgeFade,
 ];
 
 const TRACK: Color = Color::srgb(0.18, 0.18, 0.2);
@@ -340,7 +347,7 @@ fn print_values(
     for mut text in &mut readouts {
         text.0 = format!(
             "floor {}\nmidpoint {:.1} deg\nhorizon {}\nzenith {}\n\
-             aurora brightness {:.2}, wave {:.0} m, speed {:.3}/s, altitude {:.0} m",
+             aurora brightness {:.2}, wave {:.0} m, speed {:.4}/s, altitude {:.0} m, edge fade {:.2}",
             hex(look.ground),
             look.midpoint.to_degrees(),
             hex(look.horizon),
@@ -349,6 +356,7 @@ fn print_values(
             aurora.wave,
             aurora.speed,
             aurora.altitude,
+            aurora.edge_fade,
         );
     }
 }

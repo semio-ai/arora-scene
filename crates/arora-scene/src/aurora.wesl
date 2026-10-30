@@ -14,7 +14,9 @@ struct Aurora {
     low: vec4<f32>,
     high: vec4<f32>,
     brightness: f32,
-    _padding: vec3<f32>,
+    // How far the curtain fades where it is seen edge-on; see `Aurora`.
+    edge_fade: f32,
+    _padding: vec2<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> aurora: Aurora;
@@ -49,6 +51,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // The curtain hangs far nearer than the sky dome, so depth alone would put
     // it in front of the hills; it is hidden behind them by their silhouette.
     let dir = normalize(in.world_position.xyz - view.world_position);
-    let strength = aurora.brightness * lower_edge * fade_upward * ends * rays * above_hills(dir);
+    // Facing is one looking straight through the sheet and nought along it.
+    // Fading toward edge-on softens the line where a fold turns away, which
+    // a sheet with no thickness would otherwise end on abruptly.
+    let facing = abs(dot(normalize(in.world_normal), dir));
+    let edge = mix(1.0, smoothstep(0.0, 0.6, facing), aurora.edge_fade);
+    let strength = aurora.brightness * lower_edge * fade_upward * ends * rays * edge
+        * above_hills(dir);
     return vec4(colour * strength, strength);
 }
