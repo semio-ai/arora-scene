@@ -275,6 +275,14 @@ fn default_view(opts: &SceneOptions) -> Quat {
 /// read as ordinary sections. Studio also draws sections thicker than cells
 /// (1.5 against 1); Bevy's grid has one line width for both, so the two tiers
 /// are told apart by colour alone.
+///
+/// **The grid fades out well before the horizon.** Toward the horizon its
+/// lines converge faster than a pixel can resolve them, and they alias into a
+/// band that shimmers and shows a jagged edge as the camera moves. Studio's
+/// grid avoids this with a steep fade — a 100 metre distance raised to the
+/// third power — but Bevy's fades linearly, so it reaches the same look with a
+/// shorter distance, and with a stronger fade where the view grazes the floor,
+/// which is where the aliasing comes from.
 fn grid(theme: Theme) -> InfiniteGridSettings {
     let (minor, major) = match theme {
         Theme::Dark => (
@@ -291,7 +299,8 @@ fn grid(theme: Theme) -> InfiniteGridSettings {
         z_axis_color: major,
         minor_line_color: minor,
         major_line_color: major,
-        fadeout_distance: 100.0,
+        fadeout_distance: 40.0,
+        dot_fadeout_strength: 0.5,
         scale: 1.0,
         major_line_interval: 10,
         ..default()
