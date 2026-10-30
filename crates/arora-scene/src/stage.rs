@@ -52,7 +52,6 @@ use std::f32::consts::PI;
 use bevy::asset::{embedded_asset, embedded_path, AssetPath};
 use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::dev_tools::infinite_grid::{InfiniteGrid, InfiniteGridPlugin, InfiniteGridSettings};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
@@ -116,9 +115,8 @@ pub const GROUND_REACH: f32 = 100_000.0;
 /// The sky dome's radius, inside the camera's reach so it is never clipped.
 const DOME_RADIUS: f32 = GROUND_REACH * 0.5;
 
-/// The floor's height. A hair under the grid, which draws at zero, so the two
-/// never fight over the same depth.
-const FLOOR_HEIGHT: f32 = -0.002;
+/// The floor's height: zero, where Studio's grid lies.
+const FLOOR_HEIGHT: f32 = 0.0;
 
 /// How far a full shadow darkens the floor.
 const FLOOR_SHADOW: f32 = 0.35;
@@ -268,22 +266,10 @@ fn default_view(opts: &SceneOptions) -> Quat {
     Quat::from_rotation_y(opts.angle) * Quat::from_rotation_x(-opts.pitch)
 }
 
-/// The ground grid, in Studio's colours: one-metre cells and ten-metre
-/// sections.
-///
-/// Studio's grid draws no axis lines, so they take the section colour here and
-/// read as ordinary sections. Studio also draws sections thicker than cells
-/// (1.5 against 1); Bevy's grid has one line width for both, so the two tiers
-/// are told apart by colour alone.
-///
-/// **The grid fades out well before the horizon.** Toward the horizon its
-/// lines converge faster than a pixel can resolve them, and they alias into a
-/// band that shimmers and shows a jagged edge as the camera moves. Studio's
-/// grid avoids this with a steep fade — a 100 metre distance raised to the
-/// third power — but Bevy's fades linearly, so it reaches the same look with a
-/// shorter distance, and with a stronger fade where the view grazes the floor,
-/// which is where the aliasing comes from.
-fn grid(theme: Theme) -> InfiniteGridSettings {
+/// The floor for a theme: its ground colour, Studio's grid drawn into it —
+/// one-metre cells and ten-metre sections, 1 and 1.5 pixels wide, fading
+/// over 100 metres raised to the third power — and how dark a shadow falls.
+fn floor_for(theme: Theme, look: &Look) -> FloorUniform {
     let (minor, major) = match theme {
         Theme::Dark => (
             Color::srgb_u8(0xa0, 0xa0, 0xa0),
@@ -294,15 +280,18 @@ fn grid(theme: Theme) -> InfiniteGridSettings {
             Color::srgb_u8(0x28, 0x2c, 0x34),
         ),
     };
-    InfiniteGridSettings {
-        x_axis_color: major,
-        z_axis_color: major,
-        minor_line_color: minor,
-        major_line_color: major,
-        fadeout_distance: 40.0,
-        dot_fadeout_strength: 0.5,
-        scale: 1.0,
-        major_line_interval: 10,
+    FloorUniform {
+        colour: linear(look.ground),
+        minor_colour: linear(minor),
+        major_colour: linear(major),
+        shadow: FLOOR_SHADOW,
+        cell: 1.0,
+        section: 10.0,
+        minor_width: 1.0,
+        major_width: 1.5,
+        fade_distance: 100.0,
+        fade_strength: 3.0,
+        ..default()
     }
 }
 
@@ -337,9 +326,20 @@ impl Material for SkyMaterial {
 #[derive(ShaderType, Clone, Debug, Default)]
 pub struct FloorUniform {
     pub colour: Vec4,
+    pub minor_colour: Vec4,
+    pub major_colour: Vec4,
     /// How far a full shadow darkens the floor.
     pub shadow: f32,
-    pub _padding: Vec3,
+    /// Minor and major line spacing, in metres.
+    pub cell: f32,
+    pub section: f32,
+    /// Line widths, in pixels.
+    pub minor_width: f32,
+    pub major_width: f32,
+    /// The grid fades as `(1 - distance / fade_distance) ^ fade_strength`.
+    pub fade_distance: f32,
+    pub fade_strength: f32,
+    pub _padding: f32,
 }
 
 /// The floor's material; see `floor.wesl`.
@@ -394,7 +394,6 @@ impl Plugin for StagePlugin {
         embedded_asset!(app, "sky.wesl");
         embedded_asset!(app, "floor.wesl");
         app.add_plugins((
-            InfiniteGridPlugin,
             MaterialPlugin::<SkyMaterial>::default(),
             MaterialPlugin::<FloorMaterial>::default(),
         ))
@@ -413,8 +412,8 @@ impl Plugin for StagePlugin {
 }
 
 /// Builds everything the stage keeps for the whole run, whichever choices are
-/// current: the camera's finish, the sky dome, the floor, the grid and the
-/// world rig's anchor. What the choices change is applied separately, so a
+/// current: the camera's finish, the sky dome, the floor and the world rig's
+/// anchor. What the choices change is applied separately, so a
 /// change at runtime takes the same path as the first frame.
 fn build_stage(
     mut commands: Commands,
@@ -482,8 +481,6 @@ fn build_stage(
         RigAnchor,
     ));
 
-    commands.spawn((InfiniteGrid, grid(opts.theme)));
-
     // A capture wants the scene alone; a window wants to know what it is
     // looking at and how to change it.
     if !opts.offscreen && opts.screenshot.is_none() {
@@ -535,8 +532,8 @@ fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
     }
 }
 
-/// Colours everything the environment and theme touch: the clear, the dome,
-/// the floor and the grid.
+/// Colours everything the environment and theme touch: the clear, the dome
+/// and the floor with its grid.
 #[allow(clippy::too_many_arguments)]
 fn apply_look(
     stage: Res<Stage>,
@@ -546,7 +543,6 @@ fn apply_look(
     domes: Query<&MeshMaterial3d<SkyMaterial>, With<Dome>>,
     mut floors: ResMut<Assets<FloorMaterial>>,
     floor: Query<&MeshMaterial3d<FloorMaterial>, With<Floor>>,
-    mut grids: Query<&mut InfiniteGridSettings, With<InfiniteGrid>>,
 ) {
     let look = palette.look(stage.theme);
     // Behind the dome, so only ever seen at its seams; the ground colour is
@@ -561,15 +557,8 @@ fn apply_look(
     }
     for handle in &floor {
         if let Some(mut material) = floors.get_mut(&handle.0) {
-            material.surface = FloorUniform {
-                colour: linear(look.ground),
-                shadow: FLOOR_SHADOW,
-                ..default()
-            };
+            material.surface = floor_for(stage.theme, look);
         }
-    }
-    for mut settings in &mut grids {
-        *settings = grid(stage.theme);
     }
 }
 

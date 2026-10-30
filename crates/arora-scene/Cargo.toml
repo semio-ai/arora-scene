@@ -51,10 +51,6 @@ bevy = { workspace = true, features = [
   "bevy_ui_render",
   "bevy_text",
   "default_font",
-  # The infinite ground grid lives in dev tools. It is an ordinary feature, not
-  # gated on debug builds, so an editor shipping it is a deliberate choice.
-  "bevy_dev_tools",
-  "render_dev_tools",
   # The tuning panel's sliders, and the pointer reaching them.
   "bevy_ui_widgets",
   "ui_picking",
