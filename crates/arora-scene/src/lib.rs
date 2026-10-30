@@ -1178,12 +1178,24 @@ pub struct OrbitHold {
 /// Holds the orbit still while anything else has the pointer. A gizmo's
 /// handle under the pointer counts as well as one in hand, so the press that
 /// takes it does not also start a turn of the view.
+///
+/// Who has the pointer is settled when a button goes down and kept until
+/// every button is up. A turn of the view that passes over a handle or the
+/// panel is the view's to finish, and a drag that leaves them stays theirs.
 pub(crate) fn hold_orbit(
     hold: Res<OrbitHold>,
     gizmos: Res<GizmoPointer>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut settled: Local<Option<bool>>,
     mut orbits: Query<&mut PanOrbitCamera>,
 ) {
-    let held = hold.joint || hold.panel || gizmos.engaged();
+    let claimed = hold.joint || hold.panel || gizmos.engaged();
+    let held = if buttons.get_pressed().next().is_some() {
+        *settled.get_or_insert(claimed)
+    } else {
+        *settled = None;
+        claimed
+    };
     for mut orbit in &mut orbits {
         if orbit.enabled == held {
             orbit.enabled = !held;
