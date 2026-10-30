@@ -22,9 +22,8 @@ use crate::OrbitCamera;
 /// What a slider controls.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 enum Knob {
-    /// The ground's grey level, `#000000` to `#333333`: from black up to the
-    /// dark theme's current ground, so a run starts with the thumb on the
-    /// colour in use.
+    /// The ground's grey level, `#000000` to `#333333`: black up to Studio's
+    /// own dark ground, the range a dark theme's floor is worth trying in.
     Floor,
     /// The gradient's midpoint, in degrees above the horizon.
     Midpoint,

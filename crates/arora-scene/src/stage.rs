@@ -164,13 +164,14 @@ impl Palette {
 impl Default for Palette {
     fn default() -> Self {
         Self {
-            // A thin band of blue along the hills, and most of the night the
-            // zenith's near-black.
+            // A near-black ground with the hills as a dark silhouette, a thin
+            // grey glow along them, and the rest of the night the zenith's
+            // near-black. Set by eye with the tuning panel.
             dark: Look {
-                ground: Color::srgb_u8(0x33, 0x33, 0x33),
+                ground: Color::srgb_u8(0x17, 0x17, 0x17),
                 zenith: Color::srgb_u8(0x03, 0x05, 0x0c),
-                horizon: Color::srgb_u8(0x12, 0x1a, 0x2e),
-                midpoint: 0.0626,
+                horizon: Color::srgb_u8(0x55, 0x55, 0x55),
+                midpoint: 0.017_453_3,
                 stars: 1.0,
             },
             light: Look {
