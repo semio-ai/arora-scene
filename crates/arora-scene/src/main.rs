@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use arora_scene::stage::{Environment, Lighting, Theme};
 use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
-use arora_visuals::select::Selection;
+use arora_visuals::select::{Highlight, Selection};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 
@@ -155,7 +155,10 @@ fn parse_selection(arg: &str) -> Result<Selection, String> {
     let colour = Srgba::hex(hex).map_err(|error| format!("{hex} is not a colour: {error}"))?;
     Ok(Selection {
         element: element.to_string(),
-        colour: Some(colour.into()),
+        highlight: Some(Highlight {
+            colour: Some(colour.into()),
+            ..default()
+        }),
     })
 }
 
