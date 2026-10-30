@@ -21,7 +21,6 @@
 
 pub mod aurora;
 pub mod instance;
-pub mod ring;
 pub mod robot;
 pub mod stage;
 pub mod toggles;
@@ -38,16 +37,14 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
+use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::transform_gizmo::{
-    GizmoPart, GizmoPointer, GizmoSpace, TransformGizmo, TransformGizmoPlugin,
-    TransformGizmoSystems, TransformMode, TransformModes,
+    GizmoHandle, GizmoPart, GizmoPointer, GizmoSize, GizmoSpace, TransformGizmo,
+    TransformGizmoPlugin, TransformGizmoSystems, TransformMode, TransformModes,
 };
 use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
-use ring::{
-    JointBarMaterial, JointRingMaterial, JointRingPlugin, JointRingUniform, DEPTH_IN_FRONT,
-};
 
 /// How the scene draws, independent of how a host chose it.
 ///
@@ -155,7 +152,7 @@ impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             PanOrbitCameraPlugin,
-            JointRingPlugin,
+            arora_visuals::joint_gizmo::JointGizmoPlugin,
             stage::StagePlugin,
             aurora::AuroraPlugin,
             arora_visuals::outline::OutlinePlugin,
@@ -169,7 +166,6 @@ impl Plugin for ScenePlugin {
             Update,
             hold_orbit
                 .after(TransformGizmoSystems)
-                .after(drive_joint)
                 .before(PanOrbitCameraSystemSet),
         )
         .init_resource::<arora_visuals::Picks>()
@@ -281,33 +277,15 @@ const MOUNTED_LAYER: usize = 1;
 #[derive(Component)]
 pub struct OrbitCamera;
 
-/// One joint, its authored range, and the body it turns.
-///
-/// The gizmo exists to answer what a limited rotator costs in Bevy. Studio
-/// gets one from drei's `PivotControls`, which brings the ring, the hover and
-/// annotation states, the drag maths and `rotationLimits` with it; Bevy has no
-/// equivalent, so each of those is drawn or written here.
+/// The joint chosen for a gizmo, until its body is found and the gizmo put
+/// on it; the gizmo itself is `arora_visuals`' `JointGizmo`.
 #[derive(Resource)]
-struct JointGizmo {
+struct WantedJoint {
     joint: robot::Joint,
-    /// The body this turns, once the scene has spawned and been found.
-    body: Option<Entity>,
-    /// The body's pose before any of this touched it.
-    rest: Transform,
-    value: f32,
-    dragging: bool,
-    hovered: bool,
-    /// The range as the ring draws it, measured from one end.
-    range: ring::VisualRange,
-    /// The two tori: thin while idle, thick and shaded while in hand.
-    idle: Option<Entity>,
-    active: Option<Entity>,
+    /// A value asked for from outside, applied once through the gizmo's own
+    /// clamp. Lets a headless run show a limit holding.
+    asked: Option<f32>,
 }
-
-/// A value asked for from outside, applied once through the same clamp a drag
-/// takes. Lets a headless run show a limit holding.
-#[derive(Resource, Default)]
-struct AskedFor(Option<f32>);
 
 /// The screen the robot declared, and the texture a face is drawing into.
 #[derive(Resource)]
@@ -376,407 +354,93 @@ pub fn mount_joint(
         joint.max,
         joint.default
     );
-    app.insert_resource(JointGizmo {
-        value: joint.default,
-        range: ring::VisualRange::of(joint.min, joint.max),
+    app.insert_resource(WantedJoint {
         joint,
-        body: None,
-        rest: Transform::IDENTITY,
-        dragging: false,
-        hovered: false,
-        idle: None,
-        active: None,
+        asked: joint_value,
     })
-    .insert_resource(AskedFor(joint_value))
     .add_systems(Startup, spawn_label)
     .add_systems(
         Update,
-        // Before the camera reads the same button, so a press that grabs the
-        // ring has already taken the camera out of the running.
-        (bind_joint, drive_joint, draw_joint, drive_bar, place_label)
-            .chain()
-            .before(PanOrbitCameraSystemSet),
+        (
+            attach_joint,
+            hold_in_hand.after(arora_visuals::transform_gizmo::TransformGizmoSystems),
+            place_label,
+        )
+            .chain(),
     );
 }
 
-/// Finds the body the joint turns, once the scene has spawned.
+/// Puts the joint gizmo on the body the joint moves, once the scene has
+/// spawned.
 ///
 /// The robot's glTF nodes carry no names, so Bevy names them `GltfNode{index}`
 /// — and that index is the only thing tying `RobotData` to a spawned entity.
-#[allow(clippy::too_many_arguments)]
-fn bind_joint(
-    mut gizmo: ResMut<JointGizmo>,
+fn attach_joint(
+    wanted: Res<WantedJoint>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut plain: ResMut<Assets<StandardMaterial>>,
-    mut rings: ResMut<Assets<JointRingMaterial>>,
-    mut bars: ResMut<Assets<JointBarMaterial>>,
-    names: Query<(Entity, &Name, &Transform, &GlobalTransform)>,
+    names: Query<(Entity, &Name)>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+    gizmos: Query<(), With<JointGizmo>>,
     frames: Res<Frames>,
 ) {
-    if gizmo.body.is_some() || frames.elapsed < 0.5 {
+    if !gizmos.is_empty() || frames.elapsed < 0.5 {
         return;
     }
-    let wanted = format!("GltfNode{}", gizmo.joint.child_node);
-    let Some((entity, _, transform, global)) =
-        names.iter().find(|(_, name, _, _)| name.as_str() == wanted)
-    else {
+    let joint = &wanted.joint;
+    let node = format!("GltfNode{}", joint.child_node);
+    let (Some((body, _)), Some(camera)) = (
+        names.iter().find(|(_, name)| name.as_str() == node),
+        cameras.iter().next(),
+    ) else {
         return;
     };
-    gizmo.rest = *transform;
-    gizmo.body = Some(entity);
-    let range = gizmo.range;
-    let colour = gizmo.joint.color;
-    let uniform = JointRingUniform {
-        min: range.min,
-        max: range.max,
-        current: range.value(gizmo.value),
-        color: colour.to_vec4(),
-        background: Srgba::hex("333333").expect("literal").to_vec4(),
-        ..default()
-    };
-    // Thin while idle, thick once in hand — the swap is the hover, as it is in
-    // Studio's `axis-rotator` and `axis-slider` alike.
-    let idle_material = plain.add(StandardMaterial {
-        base_color: Color::from(colour).with_alpha(0.5),
-        unlit: true,
-        alpha_mode: AlphaMode::Blend,
-        depth_bias: DEPTH_IN_FRONT,
-        ..default()
-    });
-    let angular = gizmo.joint.kind.is_angular();
-
-    let (idle_mesh, active_mesh) = if angular {
-        (
-            meshes.add(Torus {
-                minor_radius: HANDLE_RADIUS * 0.02,
-                major_radius: HANDLE_RADIUS,
-            }),
-            meshes.add(Torus {
-                minor_radius: HANDLE_RADIUS * 0.1,
-                major_radius: HANDLE_RADIUS,
-            }),
-        )
+    let motion = if joint.kind.is_angular() {
+        JointMotion::Turn
     } else {
-        // A bar as long as the joint's travel, so its size states the range
-        // the way the ring's arc does.
-        let travel = (range.max - range.min).max(1e-3);
-        let width = HANDLE_RADIUS;
-        (
-            meshes.add(Cuboid::new(width * 0.04, travel, width * 0.04)),
-            meshes.add(Cuboid::new(width * 0.18, travel, width * 0.18)),
-        )
+        JointMotion::Slide
     };
-
-    gizmo.idle = Some(
-        commands
-            .spawn((Mesh3d(idle_mesh), MeshMaterial3d(idle_material)))
-            .id(),
-    );
-    gizmo.active = Some(if angular {
-        commands
-            .spawn((
-                Mesh3d(active_mesh),
-                MeshMaterial3d(rings.add(JointRingMaterial { ring: uniform })),
-                Visibility::Hidden,
-            ))
-            .id()
-    } else {
-        commands
-            .spawn((
-                Mesh3d(active_mesh),
-                MeshMaterial3d(bars.add(JointBarMaterial { bar: uniform })),
-                Visibility::Hidden,
-            ))
-            .id()
-    });
-    log::info!(
-        "{:?} drives {wanted}; axis {:.2?} locally, {:.2?} in the world",
-        gizmo.joint.name,
-        gizmo.joint.axis,
-        (global.rotation() * gizmo.joint.axis).normalize_or(Vec3::Y),
-    );
-}
-
-/// The plane the joint turns in, in world space.
-///
-/// The authored axis is expressed in the joint's own frame, so it has to be
-/// carried out by the joint's world rotation before anything in world space —
-/// the ring, the pointer ray — can be measured against it.
-/// The circle a joint turns through: where it is centred, the axis it turns
-/// about, and two perpendicular directions spanning its plane.
-///
-/// One basis, stated once. Bevy's gizmo primitives disagree about which plane
-/// they draw in — `circle` uses XY about +Z, while `arc_3d` starts at +X and
-/// sweeps about +Y through XZ — so anything deriving its own frame from those
-/// conventions draws a ring and its arc at right angles.
-struct JointPlane {
-    centre: Vec3,
-    axis: Vec3,
-    u: Vec3,
-    v: Vec3,
-}
-
-impl JointPlane {
-    /// Orients a torus mesh so its own angle runs the way this plane measures
-    /// angles, starting from `origin`.
-    ///
-    /// Two corrections live here. The mesh's up is the plane's axis
-    /// **negated**, because a torus winds the opposite way about its own axis
-    /// from the way this basis measures — without that the ring fills against
-    /// the drag. A torus is symmetric about its plane, so flipping its up
-    /// changes the winding and nothing about how it looks. And the zero is
-    /// turned to `origin`, so the span the shader draws lands on the
-    /// directions the joint can actually reach rather than starting wherever
-    /// `u` happened to fall.
-    fn for_torus(&self, origin: f32) -> Quat {
-        let start = self.u * origin.cos() + self.v * origin.sin();
-        Quat::from_mat3(&Mat3::from_cols(start, -self.axis, self.axis.cross(start)))
-    }
-}
-
-fn joint_plane(joint: &robot::Joint, body: &GlobalTransform) -> JointPlane {
-    // Read from the body the joint turns, not from the joint node parsed out
-    // of the glTF. The turn is applied in the body's own frame, so the axis
-    // rides that frame out into the world, and the pivot is the body's own
-    // origin. Taking both live also means the ring follows whatever the joints
-    // above it are doing, which a pose parsed once at load cannot.
-    let (_, rotation, centre) = body.to_scale_rotation_translation();
-    let axis = (rotation * joint.axis).normalize_or(Vec3::Y);
-    let u = axis.any_orthonormal_vector();
-    JointPlane {
-        centre,
+    let axis = Dir3::new(joint.axis).unwrap_or(Dir3::Y);
+    let mut gizmo = JointGizmo::new(
+        body,
+        camera,
+        motion,
         axis,
-        u,
-        v: axis.cross(u),
+        joint.min,
+        joint.max,
+        joint.default,
+        joint.color.into(),
+    );
+    if let Some(asked) = wanted.asked {
+        let held = if gizmo.is_limited() {
+            asked.clamp(joint.min, joint.max)
+        } else {
+            asked
+        };
+        if (held - asked).abs() > 1e-4 {
+            log::info!("{:?} asked for {asked:.3}, held at {held:.3}", joint.name);
+        }
+        gizmo.value = held;
     }
+    log::info!(
+        "{:?} drives {node}; axis {:.2?} in its own frame",
+        joint.name,
+        joint.axis,
+    );
+    commands.spawn(gizmo);
 }
 
-/// Where a pointer ray meets the joint's plane: the angle about the axis, and
-/// how far out from the centre it landed.
-fn angle_under_pointer(
-    joint: &robot::Joint,
-    body: &GlobalTransform,
-    camera: &Camera,
-    camera_at: &GlobalTransform,
-    cursor: Vec2,
-) -> Option<(f32, f32)> {
-    let Ok(ray) = camera.viewport_to_world(camera_at, cursor) else {
-        return None;
-    };
-    let plane = joint_plane(joint, body);
-    let (centre, axis) = (plane.centre, plane.axis);
-
-    // A ray parallel to the plane never meets it, and one nearly parallel
-    // meets it so far away that the angle is noise.
-    let slope = axis.dot(*ray.direction);
-    if slope.abs() < 1e-3 {
-        return None;
-    }
-    let distance = (centre - ray.origin).dot(axis) / slope;
-    if distance <= 0.0 {
-        return None;
-    }
-    let offset = ray.origin + *ray.direction * distance - centre;
-    Some((
-        f32::atan2(offset.dot(plane.v), offset.dot(plane.u)),
-        offset.length(),
-    ))
-}
-
-const HANDLE_RADIUS: f32 = 0.12;
-
-/// Whether a hit on the joint's plane counts as being on the ring.
-///
-/// A band rather than the tube's own surface, because the plane a ray is
-/// tested against reaches across the whole scene: without this a click
-/// anywhere would take hold of the joint. Studio does the same thing with a
-/// fatter invisible torus in front of the visible one.
-fn near_ring(distance: f32) -> bool {
-    (HANDLE_RADIUS * 0.45..=HANDLE_RADIUS * 1.7).contains(&distance)
-}
-
-/// Drags the joint within its limits, and writes the result onto the body.
-///
-/// This is a real rotator rather than a pointer-delta: the cursor ray is
-/// projected onto the plane the joint turns in and read as an angle, so the
-/// handle stays under the pointer whatever the camera is doing. Grabbing
-/// records the offset between the pointer's angle and the joint's value, so
-/// the handle does not jump to the cursor on the first frame.
-#[allow(clippy::too_many_arguments)]
-fn drive_joint(
+/// Holds the joint control in hand when the options ask, since a headless
+/// capture has no pointer to hover it with.
+fn hold_in_hand(
     opts: Res<SceneOptions>,
-    mut gizmo: ResMut<JointGizmo>,
-    mut asked: ResMut<AskedFor>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
-    mut hold: ResMut<OrbitHold>,
-    mut grab: Local<Option<f32>>,
-    mut bodies: Query<(&mut Transform, &GlobalTransform)>,
+    gizmos: Query<Entity, With<JointGizmo>>,
+    mut pointer: ResMut<GizmoPointer>,
 ) {
-    let Some(body) = gizmo.body else {
+    if !opts.ring_active || pointer.hovered.is_some() || pointer.dragging.is_some() {
         return;
-    };
-
-    let Ok(body_at) = bodies.get(body).map(|(_, at)| *at) else {
-        return;
-    };
-    let pointer = windows
-        .iter()
-        .find_map(|window| window.cursor_position())
-        .zip(cameras.iter().next())
-        .and_then(|(cursor, (camera, camera_at))| {
-            angle_under_pointer(&gizmo.joint, &body_at, camera, camera_at, cursor)
-        });
-
-    // Near the ring is what "hovered" means, and it is the same test a press
-    // has to pass — so what lights up under the pointer is exactly what a
-    // click would take hold of.
-    gizmo.hovered = opts.ring_active || pointer.is_some_and(|(_, distance)| near_ring(distance));
-
-    if !buttons.pressed(MouseButton::Left) {
-        *grab = None;
-    } else if grab.is_none() {
-        // Only a press landing near the ring takes hold of it. Without this a
-        // click anywhere grabs the joint, because the plane the ray is tested
-        // against extends across the whole scene.
-        if let Some((angle, distance)) = pointer {
-            if near_ring(distance) {
-                *grab = Some(angle - gizmo.value);
-            }
-        }
     }
-    gizmo.dragging = grab.is_some();
-
-    let wanted = match (asked.0.take(), *grab, pointer) {
-        (Some(value), _, _) => Some(value),
-        (None, Some(offset), Some((angle, _))) => Some(angle - offset),
-        _ => None,
-    };
-    if let Some(wanted) = wanted {
-        // The authored range is the whole point: a joint driven past its limit
-        // is not a pose the robot can hold.
-        gizmo.value = if gizmo.joint.is_limited() {
-            wanted.clamp(gizmo.joint.min, gizmo.joint.max)
-        } else {
-            wanted
-        };
-        if (wanted - gizmo.value).abs() > 1e-4 {
-            log::info!(
-                "{:?} asked for {wanted:.3}, held at {:.3}",
-                gizmo.joint.name,
-                gizmo.value
-            );
-        }
-    }
-
-    // The ring and the camera share the left button, so whichever the press
-    // landed on keeps it for the whole drag. Without this the model spins
-    // while the joint turns.
-    hold.joint = grab.is_some();
-
-    let Ok((mut transform, _)) = bodies.get_mut(body) else {
-        return;
-    };
-    // Radians about the axis, or metres along it. Reading a joint's value as
-    // the wrong one of those is silent — the body just moves wrongly — which is
-    // why the kind decides here rather than being assumed.
-    let moved = gizmo.value - gizmo.joint.default;
-    *transform = if gizmo.joint.kind.is_angular() {
-        Transform {
-            rotation: gizmo.rest.rotation * Quat::from_axis_angle(gizmo.joint.axis, moved),
-            ..gizmo.rest
-        }
-    } else {
-        Transform {
-            translation: gizmo.rest.translation + gizmo.rest.rotation * gizmo.joint.axis * moved,
-            ..gizmo.rest
-        }
-    };
-}
-
-/// Sits the rings on the joint's plane and tells the shader where the joint
-/// stands.
-///
-/// Bevy's torus is built around +Y, so the plane's axis becomes the mesh's up.
-/// The shader reads its angle from the mesh's own winding, which starts at +X
-/// — the same direction this basis calls zero — so the two agree without an
-/// offset.
-fn draw_joint(
-    gizmo: Res<JointGizmo>,
-    bodies: Query<&GlobalTransform>,
-    mut rings: ResMut<Assets<JointRingMaterial>>,
-    mut parts: Query<(&mut Transform, &mut Visibility)>,
-    handles: Query<&MeshMaterial3d<JointRingMaterial>>,
-) {
-    let Some(body) = gizmo.body.and_then(|body| bodies.get(body).ok()) else {
-        return;
-    };
-    let plane = joint_plane(&gizmo.joint, body);
-    let placement = if gizmo.joint.kind.is_angular() {
-        // A turning joint pivots where it stands, so the ring sits on it.
-        Transform {
-            translation: plane.centre,
-            rotation: plane.for_torus(gizmo.range.origin),
-            scale: Vec3::ONE,
-        }
-    } else {
-        // A sliding one carries its body away, so the bar has to stay put
-        // while the body travels along it — anchored to the middle of the
-        // travel rather than to wherever the body currently is.
-        let middle = (gizmo.joint.min + gizmo.joint.max) * 0.5;
-        Transform {
-            // Offset clear of the link. A ring is wider than the thing it
-            // turns and so reads from outside it; a bar laid on the axis sits
-            // inside the housing it slides, where no depth bias will save it.
-            translation: plane.centre
-                + plane.axis * (middle - gizmo.value)
-                + plane.u * HANDLE_RADIUS,
-            rotation: Quat::from_rotation_arc(Vec3::Y, plane.axis),
-            scale: Vec3::ONE,
-        }
-    };
-    let in_hand = gizmo.hovered || gizmo.dragging;
-
-    for (part, shown) in [(gizmo.idle, !in_hand), (gizmo.active, in_hand)] {
-        let Some(part) = part else { continue };
-        let Ok((mut transform, mut visibility)) = parts.get_mut(part) else {
-            continue;
-        };
-        *transform = placement;
-        *visibility = if shown {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-    }
-
-    // The travelled span runs from the range's start to where the joint is, so
-    // the shader wants the value in the same wrapped space as the limits.
-    let Some(active) = gizmo.active else {
-        return;
-    };
-    let Ok(handle) = handles.get(active) else {
-        return;
-    };
-    // `get_mut` hands back a change-detection guard, not a plain reference.
-    if let Some(mut material) = rings.get_mut(&handle.0) {
-        material.ring.current = gizmo.range.value(gizmo.value);
-    }
-}
-
-/// The sliding joint's bar, kept current the same way its ring counterpart is.
-fn drive_bar(
-    gizmo: Res<JointGizmo>,
-    mut bars: ResMut<Assets<JointBarMaterial>>,
-    handles: Query<&MeshMaterial3d<JointBarMaterial>>,
-) {
-    let Some(handle) = gizmo.active.and_then(|part| handles.get(part).ok()) else {
-        return;
-    };
-    if let Some(mut material) = bars.get_mut(&handle.0) {
-        material.bar.current = gizmo.range.value(gizmo.value);
+    if let Some(gizmo) = gizmos.iter().next() {
+        pointer.hovered = Some((gizmo, GizmoHandle::Joint));
     }
 }
 
@@ -823,7 +487,8 @@ fn spawn_label(mut commands: Commands) {
 }
 
 fn place_label(
-    gizmo: Res<JointGizmo>,
+    wanted: Res<WantedJoint>,
+    gizmos: Query<&JointGizmo>,
     bodies: Query<&GlobalTransform>,
     cameras: Query<(Entity, &Camera, &GlobalTransform), With<OrbitCamera>>,
     mut labels: LabelQuery,
@@ -842,11 +507,11 @@ fn place_label(
     if !targeted {
         commands.entity(label).insert(UiTargetCamera(camera_entity));
     }
-    let Some(anchor) = gizmo
-        .body
-        .and_then(|body| bodies.get(body).ok())
-        .map(|body| body.translation())
-    else {
+    let Some(gizmo) = gizmos.iter().next() else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let Ok(anchor) = bodies.get(gizmo.target).map(|body| body.translation()) else {
         return;
     };
     let Ok(screen) = camera.world_to_viewport(camera_at, anchor) else {
@@ -855,25 +520,33 @@ fn place_label(
     };
     *visibility = Visibility::Inherited;
     // Clear of the ring rather than over it, so the handle stays legible. The
-    // ring's own screen size is what decides how far clear that is.
-    let edge = camera
-        .world_to_viewport(camera_at, anchor + camera_at.right() * HANDLE_RADIUS)
-        .map(|edge| (edge.x - screen.x).abs())
-        .unwrap_or(40.0);
-    node.left = Val::Px(screen.x + edge + 14.0);
+    // ring's own screen size is what decides how far clear that is: its
+    // radius is the gizmo's unit times the transform gizmo's ring's.
+    let radius = match gizmo.size {
+        GizmoSize::World(metres) => camera
+            .world_to_viewport(
+                camera_at,
+                anchor + camera_at.right() * metres * arora_visuals::transform_gizmo::RING_RADIUS,
+            )
+            .map(|edge| (edge.x - screen.x).abs())
+            .unwrap_or(40.0),
+        GizmoSize::Pixels(pixels) => pixels * arora_visuals::transform_gizmo::RING_RADIUS,
+    };
+    node.left = Val::Px(screen.x + radius + 14.0);
     node.top = Val::Px(screen.y - 10.0);
 
-    let colour: Color = gizmo.joint.color.into();
+    let joint = &wanted.joint;
+    let colour: Color = joint.color.into();
     for child in children.iter() {
         if let Ok((mut text, mut text_colour)) = texts.get_mut(child) {
             // Bevy's bundled fallback font carries ASCII only, so a degree
             // sign renders as tofu. A real build ships a font and can use one.
-            text.0 = if gizmo.joint.kind.is_angular() {
-                format!("{}   {:.1} deg", gizmo.joint.name, gizmo.value.to_degrees())
+            text.0 = if joint.kind.is_angular() {
+                format!("{}   {:.1} deg", joint.name, gizmo.value.to_degrees())
             } else {
                 // A sliding joint's value is a distance; reporting it in
                 // degrees is the same category error as rotating it.
-                format!("{}   {:.0} mm", gizmo.joint.name, gizmo.value * 1000.0)
+                format!("{}   {:.0} mm", joint.name, gizmo.value * 1000.0)
             };
             text_colour.0 = colour;
         }
@@ -1165,14 +838,13 @@ fn fit_orbit(
 
 /// What is holding the orbit still.
 ///
-/// The orbit shares the left button with the joint ring, the tuning panel
-/// and the transform gizmo. Each says here whether it has the pointer, and
-/// [`hold_orbit`] alone switches the orbit: with two writers of the switch,
-/// each would undo the other's hold every frame.
+/// The orbit shares the left button with the gizmos, the tuning panel and
+/// the toggles. The panels say here whether they have the pointer, the
+/// gizmos say so through [`GizmoPointer`], and [`hold_orbit`] alone switches
+/// the orbit: with two writers of the switch, each would undo the other's
+/// hold every frame.
 #[derive(Resource, Default)]
 pub struct OrbitHold {
-    /// A joint ring is in hand.
-    pub joint: bool,
     /// The pointer is on the tuning panel, or a slider is in hand.
     pub panel: bool,
     /// The pointer is on the toggles.
@@ -1193,7 +865,7 @@ pub(crate) fn hold_orbit(
     mut settled: Local<Option<bool>>,
     mut orbits: Query<&mut PanOrbitCamera>,
 ) {
-    let claimed = hold.joint || hold.panel || hold.toggles || gizmos.engaged();
+    let claimed = hold.panel || hold.toggles || gizmos.engaged();
     let held = if buttons.get_pressed().next().is_some() {
         *settled.get_or_insert(claimed)
     } else {
