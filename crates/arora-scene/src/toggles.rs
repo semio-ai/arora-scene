@@ -12,6 +12,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 
+use arora_visuals::joint_gizmo::JointGizmo;
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformGizmo, TransformMode};
 
 use crate::stage::{Environment, Lighting, Stage, Theme};
@@ -20,6 +21,11 @@ use crate::{OrbitCamera, OrbitHold, SceneOptions};
 /// The gizmo mode chosen on the panel; a key held overrides it while held.
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
 pub struct GizmoChoice(pub Option<TransformMode>);
+
+/// Whether the gizmos stand at a sample offset, to show that each can be
+/// placed and turned relative to what it targets.
+#[derive(Resource, Default, Clone, Copy, PartialEq)]
+struct Shifted(bool);
 
 /// One choice on the panel.
 #[derive(Component, Clone, Copy, PartialEq)]
@@ -32,6 +38,7 @@ enum Choice {
     /// combination can be tried.
     Offer(TransformMode),
     Space(GizmoSpace),
+    Shifted(bool),
 }
 
 impl Choice {
@@ -51,6 +58,8 @@ impl Choice {
             },
             Choice::Space(GizmoSpace::World) => "world",
             Choice::Space(GizmoSpace::Local) => "local",
+            Choice::Shifted(false) => "none",
+            Choice::Shifted(true) => "shifted",
         }
     }
 }
@@ -71,10 +80,15 @@ pub struct TogglesPlugin;
 impl Plugin for TogglesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GizmoChoice>()
+            .init_resource::<Shifted>()
             .add_systems(PostStartup, build_panel)
             .add_systems(
                 Update,
-                (show_choices, hold_for_panel.before(crate::hold_orbit)),
+                (
+                    show_choices,
+                    place_gizmos,
+                    hold_for_panel.before(crate::hold_orbit),
+                ),
             );
     }
 }
@@ -82,6 +96,7 @@ impl Plugin for TogglesPlugin {
 fn build_panel(
     mut commands: Commands,
     opts: Res<SceneOptions>,
+    joint: Option<Res<crate::WantedJoint>>,
     cameras: Query<Entity, With<OrbitCamera>>,
 ) {
     if opts.offscreen || opts.screenshot.is_some() {
@@ -126,6 +141,13 @@ fn build_panel(
                 Choice::Space(GizmoSpace::World),
                 Choice::Space(GizmoSpace::Local),
             ],
+        ));
+    }
+
+    if opts.gizmo.is_some() || joint.is_some() {
+        rows.push((
+            "gizmo offset",
+            vec![Choice::Shifted(false), Choice::Shifted(true)],
         ));
     }
 
@@ -195,6 +217,7 @@ fn choose(
     choices: Query<&Choice>,
     mut stage: ResMut<Stage>,
     mut picked: ResMut<GizmoChoice>,
+    mut shifted: ResMut<Shifted>,
     mut gizmos: Query<&mut TransformGizmo>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
@@ -224,12 +247,53 @@ fn choose(
                 gizmo.space = space;
             }
         }
+        Choice::Shifted(on) => shifted.0 = on,
+    }
+}
+
+/// Stands every gizmo at the offset the panel chose, including one spawned
+/// after the choice was made.
+///
+/// The sample moves each gizmo off its target and turns it: the transform
+/// gizmo out to one side and turned about the vertical, a joint's ring or bar
+/// further from its axis and spun round it, so a ring's range turns with it.
+fn place_gizmos(
+    shifted: Res<Shifted>,
+    mut gizmos: Query<&mut TransformGizmo>,
+    mut joints: Query<&mut JointGizmo>,
+) {
+    for mut gizmo in &mut gizmos {
+        let wanted = if shifted.0 {
+            Transform::from_xyz(0.35, 0.0, 0.0).with_rotation(Quat::from_rotation_y(0.6))
+        } else {
+            Transform::IDENTITY
+        };
+        if gizmo.offset != wanted {
+            gizmo.offset = wanted;
+        }
+    }
+    for mut joint in &mut joints {
+        let resting = JointGizmo::default_offset(joint.motion, joint.axis);
+        let wanted = if shifted.0 {
+            let outward = joint.axis.any_orthonormal_vector();
+            Transform {
+                translation: resting.translation + outward * 0.1,
+                rotation: Quat::from_axis_angle(*joint.axis, 0.8),
+                ..resting
+            }
+        } else {
+            resting
+        };
+        if joint.offset != wanted {
+            joint.offset = wanted;
+        }
     }
 }
 
 /// Lights the current choice in each row, and the one under the pointer.
 fn show_choices(
     stage: Res<Stage>,
+    shifted: Res<Shifted>,
     gizmos: Query<&TransformGizmo>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
 ) {
@@ -242,6 +306,7 @@ fn show_choices(
             Choice::Mode(mode) => gizmo.is_some_and(|gizmo| gizmo.only == mode),
             Choice::Offer(mode) => gizmo.is_some_and(|gizmo| gizmo.modes.has(mode)),
             Choice::Space(space) => gizmo.is_some_and(|gizmo| gizmo.space == space),
+            Choice::Shifted(on) => shifted.0 == on,
         };
         let colour = if current {
             LIT

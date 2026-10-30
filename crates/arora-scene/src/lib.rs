@@ -280,7 +280,7 @@ pub struct OrbitCamera;
 /// The joint chosen for a gizmo, until its body is found and the gizmo put
 /// on it; the gizmo itself is `arora_visuals`' `JointGizmo`.
 #[derive(Resource)]
-struct WantedJoint {
+pub(crate) struct WantedJoint {
     joint: robot::Joint,
     /// A value asked for from outside, applied once through the gizmo's own
     /// clamp. Lets a headless run show a limit holding.
