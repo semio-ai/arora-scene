@@ -48,6 +48,10 @@ pub struct Aurora {
     /// turns edge-on and then stops dead, which reads as a hard line; a real
     /// curtain's brightness falls away there over its thickness.
     pub edge_fade: f32,
+    /// The curtains' colours from the lower edge up, as a gradient through
+    /// all three: what Studio calls `auroraColor1` to `auroraColor3`, and
+    /// what an app replaces to put its own brand in the sky.
+    pub colours: [Color; 3],
 }
 
 impl Default for Aurora {
@@ -58,6 +62,11 @@ impl Default for Aurora {
             speed: 0.001,
             altitude: 400.0,
             edge_fade: 1.0,
+            colours: [
+                Color::srgb_u8(0x14, 0xe8, 0x1e),
+                Color::srgb_u8(0xd0, 0x2a, 0x5c),
+                Color::srgb_u8(0xb0, 0x30, 0x90),
+            ],
         }
     }
 }
@@ -83,16 +92,15 @@ struct Curtain {
     bends: f32,
     /// Its own offset in the wave, so the curtains do not move in step.
     phase: f32,
-    low: Color,
-    high: Color,
+    /// How far up the gradient of [`Aurora::colours`] its top reaches, from
+    /// the first colour to the last. Curtains that stop at the middle colour
+    /// beside ones that go on to the last keep the sky from being one tint.
+    reach: f32,
     /// Its share of the brightness.
     weight: f32,
 }
 
 fn shapes() -> [Curtain; 5] {
-    let green = Color::srgb_u8(0x14, 0xe8, 0x1e);
-    let red = Color::srgb_u8(0xd0, 0x2a, 0x5c);
-    let magenta = Color::srgb_u8(0xb0, 0x30, 0x90);
     [
         Curtain {
             offset: -1100.0,
@@ -103,8 +111,7 @@ fn shapes() -> [Curtain; 5] {
             bend: 300.0,
             bends: 1.4,
             phase: 0.0,
-            low: green,
-            high: red,
+            reach: 0.5,
             weight: 0.7,
         },
         Curtain {
@@ -116,8 +123,7 @@ fn shapes() -> [Curtain; 5] {
             bend: 420.0,
             bends: 2.2,
             phase: 2.1,
-            low: green,
-            high: magenta,
+            reach: 1.0,
             weight: 1.0,
         },
         Curtain {
@@ -129,8 +135,7 @@ fn shapes() -> [Curtain; 5] {
             bend: 280.0,
             bends: 1.1,
             phase: 4.0,
-            low: green,
-            high: red,
+            reach: 0.5,
             weight: 0.8,
         },
         Curtain {
@@ -142,8 +147,7 @@ fn shapes() -> [Curtain; 5] {
             bend: 380.0,
             bends: 1.9,
             phase: 5.3,
-            low: green,
-            high: magenta,
+            reach: 1.0,
             weight: 0.9,
         },
         Curtain {
@@ -155,8 +159,7 @@ fn shapes() -> [Curtain; 5] {
             bend: 320.0,
             bends: 1.6,
             phase: 1.2,
-            low: green,
-            high: red,
+            reach: 0.5,
             weight: 0.6,
         },
     ]
@@ -168,11 +171,11 @@ const SEGMENTS: usize = 240;
 
 #[derive(ShaderType, Clone, Debug, Default)]
 pub struct AuroraUniform {
-    pub low: Vec4,
-    pub high: Vec4,
+    pub colours: [Vec4; 3],
     pub brightness: f32,
     pub edge_fade: f32,
-    pub _padding: Vec2,
+    pub reach: f32,
+    pub _padding: f32,
 }
 
 /// A curtain's material; see `aurora.wesl`.
@@ -308,8 +311,10 @@ fn tint(
         let shape = &shapes[curtain.0];
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.aurora = AuroraUniform {
-                low: LinearRgba::from(shape.low).to_vec4(),
-                high: LinearRgba::from(shape.high).to_vec4(),
+                colours: aurora
+                    .colours
+                    .map(|colour| LinearRgba::from(colour).to_vec4()),
+                reach: shape.reach,
                 brightness: aurora.brightness * shape.weight,
                 edge_fade: aurora.edge_fade,
                 ..default()

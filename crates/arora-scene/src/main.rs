@@ -27,9 +27,9 @@ use bevy::window::PresentMode;
 /// nothing. Resolving it here also turns a missing file into an error naming
 /// the path, rather than an asset load that quietly never completes.
 fn asset_root_and_name(path: &Path) -> anyhow::Result<(PathBuf, String)> {
-    let full = path.canonicalize().map_err(|error| {
-        anyhow::anyhow!("cannot read {}: {error}", path.display())
-    })?;
+    let full = path
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
     let name = full
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("{} names no file", path.display()))?
@@ -145,6 +145,25 @@ struct Cli {
     /// Show sliders for tuning the current theme's floor and sky by eye.
     #[arg(long, default_value_t = false)]
     tune: bool,
+
+    /// The aurora's three colours from its lower edge up, as
+    /// `#rrggbb,#rrggbb,#rrggbb`.
+    #[arg(long, value_parser = parse_colours)]
+    aurora_colours: Option<[Color; 3]>,
+}
+
+fn parse_colours(arg: &str) -> Result<[Color; 3], String> {
+    let colours = arg
+        .split(',')
+        .map(|hex| {
+            Srgba::hex(hex.trim())
+                .map(Color::from)
+                .map_err(|error| format!("{hex} is not a colour: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    colours
+        .try_into()
+        .map_err(|found: Vec<Color>| format!("expected three colours, found {}", found.len()))
 }
 
 /// `ID` or `ID=#rrggbb`.
@@ -220,6 +239,12 @@ fn main() {
         glb: glb.clone(),
         copies: cli.copies,
     });
+    if let Some(colours) = cli.aurora_colours {
+        app.insert_resource(arora_scene::aurora::Aurora {
+            colours,
+            ..default()
+        });
+    }
 
     // Both read the GLB from disk before the app runs, which is why they are
     // the CLI's to call rather than the scene's to do: a wasm host has no

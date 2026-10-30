@@ -10,13 +10,14 @@ import bevy_pbr::render::{forward_io::VertexOutput, mesh_view_bindings::{globals
 import super::horizon::above_hills;
 
 struct Aurora {
-    // The colour at the curtain's lower edge, and at its top.
-    low: vec4<f32>,
-    high: vec4<f32>,
+    // The gradient from the lower edge up; see `Aurora::colours`.
+    colours: array<vec4<f32>, 3>,
     brightness: f32,
     // How far the curtain fades where it is seen edge-on; see `Aurora`.
     edge_fade: f32,
-    _padding: vec2<f32>,
+    // How far up the gradient this curtain's top reaches, from 0 to 1.
+    reach: f32,
+    _padding: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> aurora: Aurora;
@@ -45,9 +46,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let ends = smoothstep(0.0, 0.35, along) * smoothstep(1.0, 0.65, along);
     let rays = 0.45 + 0.55 * noise(along * 140.0 + time * 0.35) * noise(along * 31.0 - time * 0.15);
 
-    // Green holds through the lower third, as it does in a real curtain, and
-    // gives way to the upper colour above it.
-    let colour = mix(aurora.low.rgb, aurora.high.rgb, smoothstep(0.25, 0.7, up));
+    // The first colour holds through the lower third, as green does in a real
+    // curtain, and gives way up the rest of the gradient as far as this
+    // curtain reaches.
+    let g = smoothstep(0.25, 0.7, up) * aurora.reach * 2.0;
+    let colour = select(
+        mix(aurora.colours[1].rgb, aurora.colours[2].rgb, g - 1.0),
+        mix(aurora.colours[0].rgb, aurora.colours[1].rgb, g),
+        g < 1.0,
+    );
     // The curtain hangs far nearer than the sky dome, so depth alone would put
     // it in front of the hills; it is hidden behind them by their silhouette.
     let dir = normalize(in.world_position.xyz - view.world_position);
