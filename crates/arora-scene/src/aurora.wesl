@@ -5,6 +5,10 @@
 // and out along its length so it has no ends; and it is
 // broken into vertical rays that drift slowly along it. Drawn additively, so
 // curtains crossing each other brighten rather than hide one another.
+//
+// Colour is a separate channel from that brightness: a slowly changing field
+// of noise over the world picks where on the three-colour gradient each point
+// falls, so curtains differ from one another and from moment to moment.
 
 import bevy_pbr::render::{forward_io::VertexOutput, mesh_view_bindings::{globals, view}};
 import super::horizon::above_hills;
@@ -15,9 +19,12 @@ struct Aurora {
     brightness: f32,
     // How far the curtain fades where it is seen edge-on; see `Aurora`.
     edge_fade: f32,
-    // How far up the gradient this curtain's top reaches, from 0 to 1.
-    reach: f32,
-    _padding: f32,
+    // The colour field's patch size in metres, its rate of change, and how
+    // far it leans up the gradient toward a curtain's top; see `Aurora`.
+    colour_scale: f32,
+    colour_speed: f32,
+    colour_lift: f32,
+    _padding: vec3<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> aurora: Aurora;
@@ -30,6 +37,42 @@ fn noise(x: f32) -> f32 {
     let i = floor(x);
     let f = fract(x);
     return mix(hash(i), hash(i + 1.0), smoothstep(0.0, 1.0, f));
+}
+
+fn hash3(p: vec3<f32>) -> f32 {
+    let q = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+    let r = q * 17.0;
+    return fract(r.x * r.y * r.z * (r.x + r.y + r.z));
+}
+
+// Value noise over space, from nought to one.
+fn noise3(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let x00 = mix(hash3(i), hash3(i + vec3(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(hash3(i + vec3(0.0, 1.0, 0.0)), hash3(i + vec3(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(hash3(i + vec3(0.0, 0.0, 1.0)), hash3(i + vec3(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(hash3(i + vec3(0.0, 1.0, 1.0)), hash3(i + vec3(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+// Noise over space that changes in time: two unrelated fields, blended from
+// one into the next over each unit of `t`. It changes in place rather than
+// sliding, as an aurora's colour shifts without its curtains moving.
+fn evolving(p: vec3<f32>, t: f32) -> f32 {
+    let k = floor(t);
+    let shift = vec3(17.31, 5.73, 11.13);
+    let a = noise3(p + shift * k);
+    let b = noise3(p + shift * (k + 1.0));
+    return mix(a, b, smoothstep(0.0, 1.0, fract(t)));
+}
+
+// The three colours as a gradient over `g` from nought to one, each taking a
+// broad span of it so that the field shows all three rather than the middle.
+fn gradient(g: f32) -> vec3<f32> {
+    let low = mix(aurora.colours[0].rgb, aurora.colours[1].rgb, smoothstep(0.3, 0.5, g));
+    return mix(low, aurora.colours[2].rgb, smoothstep(0.55, 0.75, g));
 }
 
 @fragment
@@ -46,15 +89,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let ends = smoothstep(0.0, 0.35, along) * smoothstep(1.0, 0.65, along);
     let rays = 0.45 + 0.55 * noise(along * 140.0 + time * 0.35) * noise(along * 31.0 - time * 0.15);
 
-    // The first colour holds through the lower third, as green does in a real
-    // curtain, and gives way up the rest of the gradient as far as this
-    // curtain reaches.
-    let g = smoothstep(0.25, 0.7, up) * aurora.reach * 2.0;
-    let colour = select(
-        mix(aurora.colours[1].rgb, aurora.colours[2].rgb, g - 1.0),
-        mix(aurora.colours[0].rgb, aurora.colours[1].rgb, g),
-        g < 1.0,
-    );
+    let p = in.world_position.xyz / max(aurora.colour_scale, 1.0);
+    let t = time * aurora.colour_speed;
+    let field = 0.65 * evolving(p, t) + 0.35 * evolving(p * 2.3 + vec3(7.1), t * 1.3);
+    let colour = gradient(field + aurora.colour_lift * (up - 0.3));
     // The curtain hangs far nearer than the sky dome, so depth alone would put
     // it in front of the hills; it is hidden behind them by their silhouette.
     let dir = normalize(in.world_position.xyz - view.world_position);
