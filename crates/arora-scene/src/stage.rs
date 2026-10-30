@@ -303,7 +303,6 @@ fn grid(theme: Theme) -> InfiniteGridSettings {
         dot_fadeout_strength: 0.5,
         scale: 1.0,
         major_line_interval: 10,
-        ..default()
     }
 }
 
@@ -438,8 +437,12 @@ fn build_stage(
         Tonemapping::None,
         DebandDither::Disabled,
         rig_ambient(),
-        // Studio's selection outline: one white line around what is selected.
-        OutlineView::default(),
+        // Studio's selection outline: one line around what is selected, white
+        // unless the selection brings a colour of its own.
+        OutlineView {
+            fill: opts.outline_fill,
+            ..default()
+        },
     ));
 
     // Riding the camera, so it surrounds the camera wherever the orbit takes

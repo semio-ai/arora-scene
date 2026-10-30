@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use arora_scene::stage::{Environment, Lighting, Theme};
 use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
+use arora_visuals::select::Selection;
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 
@@ -94,9 +95,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     screen: bool,
 
-    /// Outline these elements, by the ids `RobotData` gives them. Repeatable.
-    #[arg(long = "select")]
-    select: Vec<String>,
+    /// Outline these elements, by the ids `RobotData` gives them, each
+    /// optionally in a colour of its own: `ID` or `ID=#rrggbb`. Repeatable.
+    #[arg(long = "select", value_parser = parse_selection)]
+    select: Vec<Selection>,
 
     /// Print the elements the robot declares and exit.
     #[arg(long, default_value_t = false)]
@@ -136,9 +138,25 @@ struct Cli {
     #[arg(long, value_enum, default_value_t)]
     lighting: Lighting,
 
+    /// How strongly a selection is filled with its outline colour, from 0 to 1.
+    #[arg(long, default_value_t = 0.0)]
+    outline_fill: f32,
+
     /// Show sliders for tuning the current theme's floor and sky by eye.
     #[arg(long, default_value_t = false)]
     tune: bool,
+}
+
+/// `ID` or `ID=#rrggbb`.
+fn parse_selection(arg: &str) -> Result<Selection, String> {
+    let Some((element, hex)) = arg.split_once('=') else {
+        return Ok(Selection::of(arg));
+    };
+    let colour = Srgba::hex(hex).map_err(|error| format!("{hex} is not a colour: {error}"))?;
+    Ok(Selection {
+        element: element.to_string(),
+        colour: Some(colour.into()),
+    })
 }
 
 fn main() {
@@ -193,6 +211,7 @@ fn main() {
         theme: cli.theme,
         environment: cli.environment,
         lighting: cli.lighting,
+        outline_fill: cli.outline_fill,
     })
     .insert_resource(RobotSpec {
         glb: glb.clone(),

@@ -29,9 +29,10 @@ use crate::OrbitCamera;
 #[derive(Resource)]
 pub struct RobotMeta(pub AssetMeta);
 
-/// The elements a run outlines, by their `RobotData` ids.
+/// The elements a run outlines, by their `RobotData` ids, each with the colour
+/// it asks to be shown in, if any.
 #[derive(Resource, Default)]
-pub struct Selected(pub Vec<String>);
+pub struct Selected(pub Vec<arora_visuals::select::Selection>);
 
 /// The spawned scene, as the join reads it.
 #[derive(SystemParam)]

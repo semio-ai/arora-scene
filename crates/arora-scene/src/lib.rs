@@ -88,6 +88,9 @@ pub struct SceneOptions {
     pub environment: stage::Environment,
     /// What the rig is fixed to.
     pub lighting: stage::Lighting,
+    /// How strongly a selection is filled with its outline colour, from not
+    /// at all to solid.
+    pub outline_fill: f32,
 }
 
 impl Default for SceneOptions {
@@ -107,6 +110,7 @@ impl Default for SceneOptions {
             theme: stage::Theme::default(),
             environment: stage::Environment::default(),
             lighting: stage::Lighting::default(),
+            outline_fill: 0.0,
         }
     }
 }
@@ -857,7 +861,12 @@ fn place_label(
 /// would let either happen.
 ///
 /// `select` outlines those elements by their `RobotData` ids on every copy.
-pub fn mount_instances(app: &mut App, assets: &std::path::Path, robot_glb: &str, select: Vec<String>) {
+pub fn mount_instances(
+    app: &mut App,
+    assets: &std::path::Path,
+    robot_glb: &str,
+    select: Vec<arora_visuals::select::Selection>,
+) {
     let meta = match std::fs::read(assets.join(robot_glb))
         .map_err(anyhow::Error::from)
         .and_then(|bytes| arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes))
@@ -878,7 +887,7 @@ pub fn mount_instances(app: &mut App, assets: &std::path::Path, robot_glb: &str,
         let known: Vec<&str> = meta
             .elements
             .iter()
-            .filter(|e| select.contains(&e.id))
+            .filter(|e| select.iter().any(|selection| selection.element == e.id))
             .map(|e| e.id.as_str())
             .collect();
         if known.len() < select.len() {
