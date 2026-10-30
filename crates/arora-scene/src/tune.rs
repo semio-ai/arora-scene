@@ -14,11 +14,10 @@ use bevy::ui_widgets::{
     Slider, SliderDragState, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick,
     ValueChange,
 };
-use bevy_panorbit_camera::PanOrbitCamera;
 
 use crate::aurora::Aurora;
 use crate::stage::{Look, Palette, Stage};
-use crate::OrbitCamera;
+use crate::{OrbitCamera, OrbitHold};
 
 /// What a slider controls.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +178,7 @@ impl Plugin for TunePlugin {
                             .or_else(resource_changed::<Stage>)
                             .or_else(resource_changed::<Aurora>),
                     ),
-                    hold_camera,
+                    hold_camera.before(crate::hold_orbit),
                 ),
             );
     }
@@ -390,12 +389,7 @@ fn print_values(
 fn hold_camera(
     panels: Query<&Hovered, With<TunePanel>>,
     drags: Query<&SliderDragState, With<Knob>>,
-    mut orbits: Query<&mut PanOrbitCamera>,
+    mut hold: ResMut<OrbitHold>,
 ) {
-    let busy = panels.iter().any(|hovered| hovered.0) || drags.iter().any(|drag| drag.dragging);
-    for mut orbit in &mut orbits {
-        if orbit.enabled == busy {
-            orbit.enabled = !busy;
-        }
-    }
+    hold.panel = panels.iter().any(|hovered| hovered.0) || drags.iter().any(|drag| drag.dragging);
 }

@@ -38,6 +38,10 @@ use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use arora_visuals::outline::OutlineOverlay;
+use arora_visuals::transform_gizmo::{
+    GizmoPart, GizmoPointer, GizmoSpace, TransformGizmo, TransformGizmoPlugin,
+    TransformGizmoSystems, TransformMode, TransformModes,
+};
 use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use ring::{
@@ -95,6 +99,10 @@ pub struct SceneOptions {
     /// How strongly a selection is filled with its outline colour, from not
     /// at all to solid.
     pub outline_fill: f32,
+    /// Put a transform gizmo on the first instance, offering these modes.
+    pub gizmo: Option<TransformModes>,
+    /// Whose axes that gizmo moves and turns along.
+    pub gizmo_space: GizmoSpace,
 }
 
 impl Default for SceneOptions {
@@ -115,6 +123,8 @@ impl Default for SceneOptions {
             environment: stage::Environment::default(),
             lighting: stage::Lighting::default(),
             outline_fill: 0.0,
+            gizmo: None,
+            gizmo_space: GizmoSpace::World,
         }
     }
 }
@@ -149,7 +159,17 @@ impl Plugin for ScenePlugin {
             aurora::AuroraPlugin,
             arora_visuals::outline::OutlinePlugin,
             arora_visuals::view_gizmo::ViewGizmoPlugin,
+            TransformGizmoPlugin,
         ))
+        .init_resource::<OrbitHold>()
+        .add_systems(Update, (attach_gizmo, choose_gizmo_mode))
+        .add_systems(
+            Update,
+            hold_orbit
+                .after(TransformGizmoSystems)
+                .after(drive_joint)
+                .before(PanOrbitCameraSystemSet),
+        )
         .init_resource::<arora_visuals::Picks>()
         .init_resource::<arora_visuals::select::Selections>()
         .init_resource::<instance::Selected>()
@@ -588,7 +608,8 @@ fn drive_joint(
     mut asked: ResMut<AskedFor>,
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
-    mut cameras: Query<(&Camera, &GlobalTransform, &mut PanOrbitCamera), With<OrbitCamera>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    mut hold: ResMut<OrbitHold>,
     mut grab: Local<Option<f32>>,
     mut bodies: Query<(&mut Transform, &GlobalTransform)>,
 ) {
@@ -603,7 +624,7 @@ fn drive_joint(
         .iter()
         .find_map(|window| window.cursor_position())
         .zip(cameras.iter().next())
-        .and_then(|(cursor, (camera, camera_at, _))| {
+        .and_then(|(cursor, (camera, camera_at))| {
             angle_under_pointer(&gizmo.joint, &body_at, camera, camera_at, cursor)
         });
 
@@ -651,9 +672,7 @@ fn drive_joint(
     // The ring and the camera share the left button, so whichever the press
     // landed on keeps it for the whole drag. Without this the model spins
     // while the joint turns.
-    for (_, _, mut orbit) in &mut cameras {
-        orbit.enabled = grab.is_none();
-    }
+    hold.joint = grab.is_some();
 
     let Ok((mut transform, _)) = bodies.get_mut(body) else {
         return;
@@ -1142,6 +1161,83 @@ fn fit_orbit(
     }
 }
 
+/// What is holding the orbit still.
+///
+/// The orbit shares the left button with the joint ring, the tuning panel
+/// and the transform gizmo. Each says here whether it has the pointer, and
+/// [`hold_orbit`] alone switches the orbit: with two writers of the switch,
+/// each would undo the other's hold every frame.
+#[derive(Resource, Default)]
+pub struct OrbitHold {
+    /// A joint ring is in hand.
+    pub joint: bool,
+    /// The pointer is on the tuning panel, or a slider is in hand.
+    pub panel: bool,
+}
+
+/// Holds the orbit still while anything else has the pointer. A gizmo's
+/// handle under the pointer counts as well as one in hand, so the press that
+/// takes it does not also start a turn of the view.
+pub(crate) fn hold_orbit(
+    hold: Res<OrbitHold>,
+    gizmos: Res<GizmoPointer>,
+    mut orbits: Query<&mut PanOrbitCamera>,
+) {
+    let held = hold.joint || hold.panel || gizmos.engaged();
+    for mut orbit in &mut orbits {
+        if orbit.enabled == held {
+            orbit.enabled = !held;
+        }
+    }
+}
+
+/// Puts a transform gizmo on the first instance once there is one, when the
+/// options ask for it.
+fn attach_gizmo(
+    opts: Res<SceneOptions>,
+    mut commands: Commands,
+    instances: Query<Entity, With<arora_visuals::EntityInstance>>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+    gizmos: Query<(), With<TransformGizmo>>,
+) {
+    let Some(modes) = opts.gizmo else {
+        return;
+    };
+    if !gizmos.is_empty() {
+        return;
+    }
+    let (Some(target), Some(camera)) = (instances.iter().next(), cameras.iter().next()) else {
+        return;
+    };
+    commands.spawn(TransformGizmo {
+        modes,
+        space: opts.gizmo_space,
+        // Labelled as the view gizmo is, for Studio's Z-up world, so the two
+        // agree on which way each axis points.
+        axes: TransformGizmo::Z_UP,
+        ..TransformGizmo::new(target, camera)
+    });
+}
+
+/// While M, R or S is held, the gizmo shows only its moving, turning or
+/// scaling handles.
+fn choose_gizmo_mode(keys: Res<ButtonInput<KeyCode>>, mut gizmos: Query<&mut TransformGizmo>) {
+    let only = if keys.pressed(KeyCode::KeyM) {
+        Some(TransformMode::Translate)
+    } else if keys.pressed(KeyCode::KeyR) {
+        Some(TransformMode::Rotate)
+    } else if keys.pressed(KeyCode::KeyS) {
+        Some(TransformMode::Scale)
+    } else {
+        None
+    };
+    for mut gizmo in &mut gizmos {
+        if gizmo.only != only {
+            gizmo.only = only;
+        }
+    }
+}
+
 /// Turns the orbit toward a view the view gizmo asked for: the camera moves
 /// round its focus to the side the request names, at the orbit's own
 /// smoothing.
@@ -1173,7 +1269,11 @@ type CensusMeshes<'w, 's> = Query<
         Option<&'static Aabb>,
         Option<&'static RenderLayers>,
     ),
-    (Without<stage::StageMesh>, Without<OutlineOverlay>),
+    (
+        Without<stage::StageMesh>,
+        Without<OutlineOverlay>,
+        Without<GizmoPart>,
+    ),
 >;
 
 /// The meshes whose visibility is counted: everything but the stage.
@@ -1185,6 +1285,7 @@ type VisibleMeshes<'w, 's> = Query<
         With<Mesh3d>,
         Without<stage::StageMesh>,
         Without<OutlineOverlay>,
+        Without<GizmoPart>,
     ),
 >;
 

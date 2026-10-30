@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use arora_scene::stage::{Environment, Lighting, Theme};
 use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::select::{Highlight, Selection};
+use arora_visuals::transform_gizmo::{GizmoSpace, TransformModes};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 
@@ -146,10 +147,41 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     tune: bool,
 
+    /// Put a transform gizmo on the robot, offering these modes: `all`, or any
+    /// of `move`, `turn` and `scale` joined by commas. Hold M, R or S to show
+    /// only one.
+    #[arg(long, value_parser = parse_modes)]
+    gizmo: Option<TransformModes>,
+
+    /// Move and turn the gizmo along the robot's own axes rather than the
+    /// world's.
+    #[arg(long, default_value_t = false)]
+    gizmo_local: bool,
+
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
     #[arg(long, value_parser = parse_colours)]
     aurora_colours: Option<[Color; 3]>,
+}
+
+fn parse_modes(arg: &str) -> Result<TransformModes, String> {
+    if arg == "all" {
+        return Ok(TransformModes::ALL);
+    }
+    let mut modes = TransformModes {
+        translate: false,
+        rotate: false,
+        scale: false,
+    };
+    for mode in arg.split(',') {
+        match mode.trim() {
+            "move" => modes.translate = true,
+            "turn" => modes.rotate = true,
+            "scale" => modes.scale = true,
+            other => return Err(format!("{other} is not a mode: use move, turn or scale")),
+        }
+    }
+    Ok(modes)
 }
 
 fn parse_colours(arg: &str) -> Result<[Color; 3], String> {
@@ -234,6 +266,12 @@ fn main() {
         environment: cli.environment,
         lighting: cli.lighting,
         outline_fill: cli.outline_fill,
+        gizmo: cli.gizmo,
+        gizmo_space: if cli.gizmo_local {
+            GizmoSpace::Local
+        } else {
+            GizmoSpace::World
+        },
     })
     .insert_resource(RobotSpec {
         glb: glb.clone(),
