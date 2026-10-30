@@ -391,6 +391,9 @@ impl Plugin for StagePlugin {
     fn build(&self, app: &mut App) {
         // Carried in the binary rather than loaded from the asset root, which
         // here is wherever the robot happens to live.
+        // Imported by the sky and the aurora rather than used as a material,
+        // so it has to be loaded and kept alive by hand.
+        bevy::shader::load_shader_library!(app, "horizon.wesl");
         embedded_asset!(app, "sky.wesl");
         embedded_asset!(app, "floor.wesl");
         app.add_plugins((

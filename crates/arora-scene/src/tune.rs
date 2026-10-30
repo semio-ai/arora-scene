@@ -16,6 +16,7 @@ use bevy::ui_widgets::{
 };
 use bevy_panorbit_camera::PanOrbitCamera;
 
+use crate::aurora::Aurora;
 use crate::stage::{Look, Palette, Stage};
 use crate::OrbitCamera;
 
@@ -30,6 +31,13 @@ enum Knob {
     HorizonRed,
     HorizonGreen,
     HorizonBlue,
+    AuroraBrightness,
+    /// In metres.
+    AuroraWave,
+    /// In cycles a second.
+    AuroraSpeed,
+    /// In metres.
+    AuroraAltitude,
 }
 
 impl Knob {
@@ -40,6 +48,10 @@ impl Knob {
             Knob::HorizonRed => "horizon red",
             Knob::HorizonGreen => "horizon green",
             Knob::HorizonBlue => "horizon blue",
+            Knob::AuroraBrightness => "aurora brightness",
+            Knob::AuroraWave => "aurora wave (m)",
+            Knob::AuroraSpeed => "aurora speed (cycles/s)",
+            Knob::AuroraAltitude => "aurora altitude (m)",
         }
     }
 
@@ -48,13 +60,21 @@ impl Knob {
             Knob::Floor => (0.0, 51.0, 1.0),
             Knob::Midpoint => (0.5, 30.0, 0.1),
             Knob::HorizonRed | Knob::HorizonGreen | Knob::HorizonBlue => (0.0, 255.0, 1.0),
+            Knob::AuroraBrightness => (0.0, 2.0, 0.01),
+            Knob::AuroraWave => (0.0, 300.0, 1.0),
+            Knob::AuroraSpeed => (0.0, 0.5, 0.005),
+            Knob::AuroraAltitude => (100.0, 2000.0, 10.0),
         }
     }
 
-    /// The value this knob shows for a look.
-    fn read(self, look: &Look) -> f32 {
+    /// The value this knob shows.
+    fn read(self, look: &Look, aurora: &Aurora) -> f32 {
         let horizon = look.horizon.to_srgba();
         match self {
+            Knob::AuroraBrightness => aurora.brightness,
+            Knob::AuroraWave => aurora.wave,
+            Knob::AuroraSpeed => aurora.speed,
+            Knob::AuroraAltitude => aurora.altitude,
             Knob::Floor => (look.ground.to_srgba().red * 255.0).round(),
             Knob::Midpoint => look.midpoint.to_degrees(),
             Knob::HorizonRed => (horizon.red * 255.0).round(),
@@ -63,10 +83,14 @@ impl Knob {
         }
     }
 
-    /// Writes this knob's value into a look.
-    fn write(self, look: &mut Look, value: f32) {
+    /// Writes this knob's value where it belongs.
+    fn write(self, look: &mut Look, aurora: &mut Aurora, value: f32) {
         let mut horizon = look.horizon.to_srgba();
         match self {
+            Knob::AuroraBrightness => aurora.brightness = value,
+            Knob::AuroraWave => aurora.wave = value,
+            Knob::AuroraSpeed => aurora.speed = value,
+            Knob::AuroraAltitude => aurora.altitude = value,
             Knob::Floor => {
                 let grey = value / 255.0;
                 look.ground = Color::srgb(grey, grey, grey);
@@ -85,12 +109,16 @@ impl Knob {
     }
 }
 
-const KNOBS: [Knob; 5] = [
+const KNOBS: [Knob; 9] = [
     Knob::Floor,
     Knob::Midpoint,
     Knob::HorizonRed,
     Knob::HorizonGreen,
     Knob::HorizonBlue,
+    Knob::AuroraBrightness,
+    Knob::AuroraWave,
+    Knob::AuroraSpeed,
+    Knob::AuroraAltitude,
 ];
 
 const TRACK: Color = Color::srgb(0.18, 0.18, 0.2);
@@ -119,8 +147,11 @@ impl Plugin for TunePlugin {
                 (
                     follow_theme.run_if(resource_changed::<Stage>),
                     place_thumbs,
-                    print_values
-                        .run_if(resource_changed::<Palette>.or_else(resource_changed::<Stage>)),
+                    print_values.run_if(
+                        resource_changed::<Palette>
+                            .or_else(resource_changed::<Stage>)
+                            .or_else(resource_changed::<Aurora>),
+                    ),
                     hold_camera,
                 ),
             );
@@ -131,6 +162,7 @@ fn build_panel(
     mut commands: Commands,
     cameras: Query<Entity, With<OrbitCamera>>,
     palette: Res<Palette>,
+    aurora: Res<Aurora>,
 ) {
     let Ok(camera) = cameras.single() else {
         return;
@@ -168,7 +200,7 @@ fn build_panel(
             panel.spawn(text("tuning the current theme", 12.0));
             for knob in KNOBS {
                 panel.spawn(text(knob.label(), 11.0));
-                panel.spawn(slider(knob, knob.read(&look)));
+                panel.spawn(slider(knob, knob.read(&look, &aurora)));
             }
             panel.spawn((text("", 12.0), TuneReadout));
         });
@@ -239,6 +271,7 @@ fn on_knob(
     knobs: Query<&Knob>,
     stage: Res<Stage>,
     mut palette: ResMut<Palette>,
+    mut aurora: ResMut<Aurora>,
     mut commands: Commands,
 ) {
     let Ok(knob) = knobs.get(change.source) else {
@@ -247,19 +280,22 @@ fn on_knob(
     commands
         .entity(change.source)
         .insert(SliderValue(change.value));
-    knob.write(palette.look_mut(stage.theme), change.value);
+    knob.write(palette.look_mut(stage.theme), &mut aurora, change.value);
 }
 
 /// When the theme flips, the sliders show the other theme's values.
 fn follow_theme(
     stage: Res<Stage>,
     palette: Res<Palette>,
+    aurora: Res<Aurora>,
     knobs: Query<(Entity, &Knob)>,
     mut commands: Commands,
 ) {
     let look = palette.look(stage.theme);
     for (entity, knob) in &knobs {
-        commands.entity(entity).insert(SliderValue(knob.read(look)));
+        commands
+            .entity(entity)
+            .insert(SliderValue(knob.read(look, &aurora)));
     }
 }
 
@@ -288,6 +324,7 @@ fn place_thumbs(
 fn print_values(
     stage: Res<Stage>,
     palette: Res<Palette>,
+    aurora: Res<Aurora>,
     mut readouts: Query<&mut Text, With<TuneReadout>>,
 ) {
     let look = palette.look(stage.theme);
@@ -302,11 +339,16 @@ fn print_values(
     };
     for mut text in &mut readouts {
         text.0 = format!(
-            "floor {}\nmidpoint {:.1} deg\nhorizon {}\nzenith {}",
+            "floor {}\nmidpoint {:.1} deg\nhorizon {}\nzenith {}\n\
+             aurora brightness {:.2}, wave {:.0} m, speed {:.3}/s, altitude {:.0} m",
             hex(look.ground),
             look.midpoint.to_degrees(),
             hex(look.horizon),
             hex(look.zenith),
+            aurora.brightness,
+            aurora.wave,
+            aurora.speed,
+            aurora.altitude,
         );
     }
 }

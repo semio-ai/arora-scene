@@ -19,6 +19,7 @@
 //! Percentiles rather than an average: a mean hides the stalls that make a
 //! viewport feel bad, and the 99th is what a person notices.
 
+pub mod aurora;
 pub mod instance;
 pub mod ring;
 pub mod robot;
@@ -142,6 +143,7 @@ impl Plugin for ScenePlugin {
             PanOrbitCameraPlugin,
             JointRingPlugin,
             stage::StagePlugin,
+            aurora::AuroraPlugin,
             arora_visuals::outline::OutlinePlugin,
         ))
             .init_resource::<arora_visuals::Picks>()
