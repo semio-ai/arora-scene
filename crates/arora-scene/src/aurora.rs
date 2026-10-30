@@ -1,15 +1,18 @@
 //! The aurora: curtains of light high over the night sky.
 //!
 //! **Geometry, not backdrop.** Each curtain is a ribbon of mesh hanging in the
-//! world above the mountains, so it can pass behind the robot and shifts
-//! against the stars as the camera moves, as something at a real height does.
-//! It is an augment to the sky rather than part of it: it shows over the sky
-//! environment under a dark theme, and nowhere else.
+//! world, so it shifts against the stars as the camera moves, as something at
+//! a real height does. It is an augment to the sky rather than part of it: it
+//! shows over the sky environment under a dark theme, and nowhere else.
 //!
-//! The ribbons wave up and down and side to side. That motion is applied to
-//! their vertices on the CPU each frame — a few hundred of them — which costs
-//! less to keep right than a vertex shader of its own would. Their light comes
-//! from `aurora.wesl`, drawn additively.
+//! The curtains run nearly overhead, side by side along the direction the
+//! scene opens looking in, from the horizon behind to the horizon ahead. Seen
+//! from the default view they recede down the line toward the hills.
+//!
+//! The ribbons sway mostly side to side, with a little rise and fall. That
+//! motion is applied to their vertices on the CPU each frame — a few hundred
+//! of them — which costs less to keep right than a vertex shader of its own
+//! would. Their light comes from `aurora.wesl`, drawn additively.
 //!
 //! [`Aurora`] holds what is tuned by eye; the tuning panel moves it.
 
@@ -53,16 +56,25 @@ impl Default for Aurora {
     }
 }
 
-/// One curtain's place in the sky and its colours, from Studio's aurora.
+/// One curtain's place in the sky, and its colours from Studio's aurora.
 struct Curtain {
-    /// How far out it hangs, in metres.
-    distance: f32,
-    /// Where along the sky it starts and ends, as angles about the vertical
-    /// from straight ahead in the default view.
+    /// How far to the right of overhead it runs, in metres; negative is left.
+    offset: f32,
+    /// Where it starts and ends along the line it runs, in metres ahead of the
+    /// camera's starting point; negative is behind.
     from: f32,
     to: f32,
+    /// How much higher than [`Aurora::altitude`] its lower edge hangs, in
+    /// metres.
+    lift: f32,
     /// How tall it is, in metres.
     height: f32,
+    /// How far its line bends to either side, in metres. A curtain seen from
+    /// beneath reads by its bright lower edge, and that edge sweeps across the
+    /// sky in long curves, not straight lines.
+    bend: f32,
+    /// How many half-turns of bend it makes along its length.
+    bends: f32,
     /// Its own offset in the wave, so the curtains do not move in step.
     phase: f32,
     low: Color,
@@ -71,36 +83,69 @@ struct Curtain {
     weight: f32,
 }
 
-fn shapes() -> [Curtain; 2] {
+fn shapes() -> [Curtain; 4] {
     let green = Color::srgb_u8(0x14, 0xe8, 0x1e);
-    let blue = Color::srgb_u8(0x01, 0x7e, 0xd5);
-    let purple = Color::srgb_u8(0xb5, 0x3d, 0xff);
+    let red = Color::srgb_u8(0xd0, 0x2a, 0x5c);
+    let magenta = Color::srgb_u8(0xb0, 0x30, 0x90);
     [
         Curtain {
-            distance: 1500.0,
-            from: -1.1,
-            to: 0.9,
-            height: 420.0,
+            offset: -380.0,
+            from: -2500.0,
+            to: 4500.0,
+            lift: 40.0,
+            height: 700.0,
+            bend: 260.0,
+            bends: 1.5,
             phase: 0.0,
             low: green,
-            high: blue,
+            high: red,
+            weight: 0.8,
+        },
+        Curtain {
+            offset: -90.0,
+            from: -3500.0,
+            to: 5000.0,
+            lift: 0.0,
+            height: 900.0,
+            bend: 420.0,
+            bends: 2.2,
+            phase: 2.1,
+            low: green,
+            high: magenta,
             weight: 1.0,
         },
         Curtain {
-            distance: 1900.0,
-            from: -0.4,
-            to: 1.3,
-            height: 520.0,
-            phase: 2.1,
+            offset: 200.0,
+            from: -2000.0,
+            to: 4000.0,
+            lift: 70.0,
+            height: 650.0,
+            bend: 300.0,
+            bends: 1.2,
+            phase: 4.0,
             low: green,
-            high: purple,
-            weight: 0.6,
+            high: red,
+            weight: 0.7,
+        },
+        Curtain {
+            offset: 520.0,
+            from: -3000.0,
+            to: 3500.0,
+            lift: 120.0,
+            height: 800.0,
+            bend: 380.0,
+            bends: 1.8,
+            phase: 5.3,
+            low: green,
+            high: magenta,
+            weight: 0.5,
         },
     ]
 }
 
-/// Segments along each ribbon: enough that the waving reads as a curve.
-const SEGMENTS: usize = 180;
+/// Segments along each ribbon: enough that the waving reads as a curve over
+/// several kilometres.
+const SEGMENTS: usize = 240;
 
 #[derive(ShaderType, Clone, Debug, Default)]
 pub struct AuroraUniform {
@@ -164,8 +209,8 @@ impl Plugin for AuroraPlugin {
 }
 
 /// The direction straight ahead in the default view, on the ground plane, and
-/// the one to its right: the curtains are hung in front of where the scene
-/// opens.
+/// the one to its right: the curtains run along the first and are spaced
+/// along the second.
 fn ahead(opts: &SceneOptions) -> (Vec3, Vec3) {
     let forward = (Quat::from_rotation_y(opts.angle) * Vec3::NEG_Z)
         .with_y(0.0)
@@ -254,9 +299,10 @@ fn tint(
 
 /// Moves every ribbon's vertices to where the wave has them now.
 ///
-/// The ribbon sways toward and away from the camera, and its lower edge rises
-/// and falls, each along its length at its own rate. The top lags the bottom,
-/// so the curtain folds rather than moving as a flat sheet.
+/// The ribbon sways side to side, in two waves of different lengths along it
+/// travelling in opposite directions, and its lower edge rises and falls a
+/// little. The top lags the bottom, so the curtain folds rather than moving
+/// as a flat sheet.
 fn wave(
     time: Res<Time>,
     aurora: Res<Aurora>,
@@ -278,17 +324,17 @@ fn wave(
         let mut positions = Vec::with_capacity((SEGMENTS + 1) * 2);
         for i in 0..=SEGMENTS {
             let along = i as f32 / SEGMENTS as f32;
-            let bearing = shape.from + (shape.to - shape.from) * along;
-            let outward = forward * bearing.cos() + right * bearing.sin();
+            let ahead = shape.from + (shape.to - shape.from) * along;
             let sway = |lag: f32| {
-                aurora.wave * (TAU * 1.4 * along + t + shape.phase + lag).sin()
-                    + 0.4 * aurora.wave * (TAU * 3.1 * along - 0.7 * t + shape.phase).sin()
+                aurora.wave * (TAU * 2.3 * along + t + shape.phase + lag).sin()
+                    + 0.5 * aurora.wave * (TAU * 5.1 * along - 0.7 * t + shape.phase).sin()
             };
-            let rise = 0.5 * aurora.wave * (TAU * 2.2 * along - 1.3 * t + shape.phase).sin();
-            let bottom =
-                outward * (shape.distance + sway(0.0)) + Vec3::Y * (aurora.altitude + rise);
-            let top = outward * (shape.distance + sway(0.6))
-                + Vec3::Y * (aurora.altitude + shape.height + rise * 0.5);
+            let rise = 0.2 * aurora.wave * (TAU * 3.7 * along - 1.3 * t + shape.phase).sin();
+            let bent = shape.offset
+                + shape.bend * (std::f32::consts::PI * shape.bends * along + shape.phase).sin();
+            let base = forward * ahead + Vec3::Y * (aurora.altitude + shape.lift + rise);
+            let bottom = base + right * (bent + sway(0.0));
+            let top = base + right * (bent + sway(0.5)) + Vec3::Y * shape.height;
             positions.push(bottom.to_array());
             positions.push(top.to_array());
         }

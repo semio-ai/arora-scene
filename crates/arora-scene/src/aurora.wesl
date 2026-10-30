@@ -1,8 +1,8 @@
 // An aurora curtain: light hanging from a ribbon high over the night sky.
 //
 // `uv.x` runs along the ribbon and `uv.y` up the curtain. A curtain is
-// brightest along its lower edge, which is sharp, and fades upward into the
-// dark; it fades in and out along its length so it has no ends; and it is
+// brightest near its lower edge and fades upward into the dark; it fades in
+// and out along its length so it has no ends; and it is
 // broken into vertical rays that drift slowly along it. Drawn additively, so
 // curtains crossing each other brighten rather than hide one another.
 
@@ -35,12 +35,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let up = in.uv.y;
     let time = globals.time;
 
-    let lower_edge = smoothstep(0.0, 0.06, up);
-    let fade_upward = pow(1.0 - up, 1.6);
-    let ends = smoothstep(0.0, 0.18, along) * smoothstep(1.0, 0.82, along);
+    // Every edge fades out over a wide band, so no curtain has a line where it
+    // stops: the lower edge is the brightest part but still not a hard one,
+    // and the ends thin out over a third of the length each.
+    let lower_edge = smoothstep(0.0, 0.18, up);
+    let fade_upward = pow(1.0 - up, 2.2);
+    let ends = smoothstep(0.0, 0.35, along) * smoothstep(1.0, 0.65, along);
     let rays = 0.45 + 0.55 * noise(along * 140.0 + time * 0.35) * noise(along * 31.0 - time * 0.15);
 
-    let colour = mix(aurora.low.rgb, aurora.high.rgb, smoothstep(0.05, 0.85, up));
+    // Green holds through the lower third, as it does in a real curtain, and
+    // gives way to the upper colour above it.
+    let colour = mix(aurora.low.rgb, aurora.high.rgb, smoothstep(0.25, 0.7, up));
     // The curtain hangs far nearer than the sky dome, so depth alone would put
     // it in front of the hills; it is hidden behind them by their silhouette.
     let dir = normalize(in.world_position.xyz - view.world_position);
