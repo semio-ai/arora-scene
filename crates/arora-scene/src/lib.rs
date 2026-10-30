@@ -170,14 +170,13 @@ impl Plugin for ScenePlugin {
                 .after(TransformGizmoSystems)
                 .before(PanOrbitCameraSystemSet),
         )
-        .init_resource::<arora_visuals::Picks>()
         .init_resource::<arora_visuals::select::Selections>()
         .init_resource::<instance::Selected>()
         // Bevy's own mesh picking is not added: it casts base vertices,
         // and a pick has to meet the mesh where a morph put it. The
-        // shared cast is reached through this observer instead, and the
-        // press that drives it arrives on the window entity.
-        .add_observer(arora_visuals::pick::on_press)
+        // shared cast decides picks instead, from presses and releases
+        // that arrive on the window entity.
+        .add_plugins(arora_visuals::pick::PickPlugin)
         .add_observer(look_from)
         .init_resource::<Frames>()
         .init_resource::<Census>()
