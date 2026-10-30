@@ -24,6 +24,7 @@ pub mod instance;
 pub mod ring;
 pub mod robot;
 pub mod stage;
+pub mod toggles;
 pub mod tune;
 
 use std::f32::consts::{PI, TAU};
@@ -160,6 +161,7 @@ impl Plugin for ScenePlugin {
             arora_visuals::outline::OutlinePlugin,
             arora_visuals::view_gizmo::ViewGizmoPlugin,
             TransformGizmoPlugin,
+            toggles::TogglesPlugin,
         ))
         .init_resource::<OrbitHold>()
         .add_systems(Update, (attach_gizmo, choose_gizmo_mode))
@@ -1173,6 +1175,8 @@ pub struct OrbitHold {
     pub joint: bool,
     /// The pointer is on the tuning panel, or a slider is in hand.
     pub panel: bool,
+    /// The pointer is on the toggles.
+    pub toggles: bool,
 }
 
 /// Holds the orbit still while anything else has the pointer. A gizmo's
@@ -1189,7 +1193,7 @@ pub(crate) fn hold_orbit(
     mut settled: Local<Option<bool>>,
     mut orbits: Query<&mut PanOrbitCamera>,
 ) {
-    let claimed = hold.joint || hold.panel || gizmos.engaged();
+    let claimed = hold.joint || hold.panel || hold.toggles || gizmos.engaged();
     let held = if buttons.get_pressed().next().is_some() {
         *settled.get_or_insert(claimed)
     } else {
@@ -1232,8 +1236,12 @@ fn attach_gizmo(
 }
 
 /// While M, R or S is held, the gizmo shows only its moving, turning or
-/// scaling handles.
-fn choose_gizmo_mode(keys: Res<ButtonInput<KeyCode>>, mut gizmos: Query<&mut TransformGizmo>) {
+/// scaling handles; otherwise it shows what the toggles chose.
+fn choose_gizmo_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    picked: Res<toggles::GizmoChoice>,
+    mut gizmos: Query<&mut TransformGizmo>,
+) {
     let only = if keys.pressed(KeyCode::KeyM) {
         Some(TransformMode::Translate)
     } else if keys.pressed(KeyCode::KeyR) {
@@ -1241,7 +1249,7 @@ fn choose_gizmo_mode(keys: Res<ButtonInput<KeyCode>>, mut gizmos: Query<&mut Tra
     } else if keys.pressed(KeyCode::KeyS) {
         Some(TransformMode::Scale)
     } else {
-        None
+        picked.0
     };
     for mut gizmo in &mut gizmos {
         if gizmo.only != only {

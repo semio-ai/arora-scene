@@ -27,8 +27,8 @@
 //! shadows under either.
 //!
 //! Every choice can change while the scene runs. [`Stage`] holds the current
-//! one and the scene follows it; in a window the keys listed by
-//! [`StageReadout`] change it.
+//! one and the scene follows it; in a window the toggles in the corner and
+//! the keys they name change it.
 //!
 //! # Where the numbers come from
 //!
@@ -381,10 +381,6 @@ struct RigAnchor;
 #[derive(Component)]
 struct RigLight;
 
-/// The on-screen line naming the current stage and the keys that change it.
-#[derive(Component)]
-pub struct StageReadout;
-
 pub struct StagePlugin;
 
 impl Plugin for StagePlugin {
@@ -407,7 +403,7 @@ impl Plugin for StagePlugin {
             (
                 stage_keys,
                 apply_look.run_if(resource_changed::<Stage>.or_else(resource_changed::<Palette>)),
-                (apply_lighting, show_stage).run_if(resource_changed::<Stage>),
+                apply_lighting.run_if(resource_changed::<Stage>),
             )
                 .chain(),
         );
@@ -483,28 +479,6 @@ fn build_stage(
         Visibility::default(),
         RigAnchor,
     ));
-
-    // A capture wants the scene alone; a window wants to know what it is
-    // looking at and how to change it.
-    if !opts.offscreen && opts.screenshot.is_none() {
-        commands.spawn((
-            Text::new(""),
-            TextFont {
-                font_size: bevy::text::FontSize::Px(13.0),
-                ..default()
-            },
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(12.0),
-                top: Val::Px(10.0),
-                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.09, 0.09, 0.11, 0.85)),
-            UiTargetCamera(main),
-            StageReadout,
-        ));
-    }
 
     commands.insert_resource(Stage {
         theme: opts.theme,
@@ -600,15 +574,6 @@ fn apply_lighting(
             ));
         }
     });
-}
-
-fn show_stage(stage: Res<Stage>, mut readouts: Query<&mut Text, With<StageReadout>>) {
-    for mut text in &mut readouts {
-        text.0 = format!(
-            "[E] environment: {:?}   [L] lighting: {:?}   [T] theme: {:?}",
-            stage.environment, stage.lighting, stage.theme,
-        );
-    }
 }
 
 #[cfg(test)]
