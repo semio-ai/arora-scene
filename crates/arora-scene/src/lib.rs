@@ -26,6 +26,7 @@ pub mod robot;
 pub mod stage;
 pub mod tune;
 
+use std::f32::consts::{PI, TAU};
 use std::path::PathBuf;
 
 use bevy::camera::primitives::Aabb;
@@ -35,7 +36,9 @@ use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+
 use arora_visuals::outline::OutlineOverlay;
+use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use ring::{
     JointBarMaterial, JointRingMaterial, JointRingPlugin, JointRingUniform, DEPTH_IN_FRONT,
@@ -145,33 +148,35 @@ impl Plugin for ScenePlugin {
             stage::StagePlugin,
             aurora::AuroraPlugin,
             arora_visuals::outline::OutlinePlugin,
+            arora_visuals::view_gizmo::ViewGizmoPlugin,
         ))
-            .init_resource::<arora_visuals::Picks>()
-            .init_resource::<arora_visuals::select::Selections>()
-            .init_resource::<instance::Selected>()
-            // Bevy's own mesh picking is not added: it casts base vertices,
-            // and a pick has to meet the mesh where a morph put it. The
-            // shared cast is reached through this observer instead, and the
-            // press that drives it arrives on the window entity.
-            .add_observer(arora_visuals::pick::on_press)
-            .init_resource::<Frames>()
-            .init_resource::<Census>()
-            .init_resource::<Framing>()
-            .init_resource::<Capture>()
-            .add_systems(Startup, setup)
-            .add_systems(
-                Update,
-                (
-                    take_census,
-                    split_materials,
-                    spawn_marker,
-                    fit_orbit,
-                    count_visible,
-                    capture,
-                    measure,
-                )
-                    .chain(),
-            );
+        .init_resource::<arora_visuals::Picks>()
+        .init_resource::<arora_visuals::select::Selections>()
+        .init_resource::<instance::Selected>()
+        // Bevy's own mesh picking is not added: it casts base vertices,
+        // and a pick has to meet the mesh where a morph put it. The
+        // shared cast is reached through this observer instead, and the
+        // press that drives it arrives on the window entity.
+        .add_observer(arora_visuals::pick::on_press)
+        .add_observer(look_from)
+        .init_resource::<Frames>()
+        .init_resource::<Census>()
+        .init_resource::<Framing>()
+        .init_resource::<Capture>()
+        .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (
+                take_census,
+                split_materials,
+                spawn_marker,
+                fit_orbit,
+                count_visible,
+                capture,
+                measure,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -288,7 +293,6 @@ struct ScreenMount {
     screen: robot::Screen,
     texture: Handle<Image>,
 }
-
 
 /// Selects the joint to put a gizmo on, or lists what there is.
 pub fn mount_joint(
@@ -1051,6 +1055,12 @@ pub fn setup(
             ..default()
         },
         OrbitCamera,
+        // Studio's corner gizmo. Studio's world is Z-up, so its letters name
+        // the axes a Studio user knows rather than Bevy's.
+        ViewGizmo {
+            axes: ViewGizmo::Z_UP,
+            ..default()
+        },
     ));
     // Saving a frame implies rendering offscreen, because the window's own
     // swapchain cannot be read back here: a capture of it returns pure black
@@ -1129,6 +1139,27 @@ fn fit_orbit(
         if !opts.still {
             orbit.target_yaw = opts.angle + time.elapsed_secs() * 0.35;
         }
+    }
+}
+
+/// Turns the orbit toward a view the view gizmo asked for: the camera moves
+/// round its focus to the side the request names, at the orbit's own
+/// smoothing.
+///
+/// Straight up or down keeps the current yaw, which is what decides how the
+/// view is turned on screen there. Otherwise the yaw goes the short way round,
+/// since the orbit eases its yaw toward the target as a plain number and would
+/// otherwise spin the long way past a half-turn.
+fn look_from(look: On<LookFrom>, mut cameras: Query<&mut PanOrbitCamera, With<OrbitCamera>>) {
+    let Ok(mut orbit) = cameras.get_mut(look.camera) else {
+        return;
+    };
+    let from = *look.from;
+    orbit.target_pitch = from.y.clamp(-1.0, 1.0).asin();
+    if from.y.abs() < 0.999 {
+        let yaw = from.x.atan2(from.z);
+        let turn = (yaw - orbit.target_yaw + PI).rem_euclid(TAU) - PI;
+        orbit.target_yaw += turn;
     }
 }
 
@@ -1271,10 +1302,7 @@ fn split_materials(
 
 /// Tracks how many meshes survived culling, which is the engine's own answer
 /// to "is the camera looking at the robot".
-fn count_visible(
-    mut census: ResMut<Census>,
-    meshes: VisibleMeshes,
-) {
+fn count_visible(mut census: ResMut<Census>, meshes: VisibleMeshes) {
     let visible = meshes
         .iter()
         .filter(|(visible, layers)| visible.get() && !on_mounted_layer(*layers))
@@ -1400,5 +1428,66 @@ pub fn report(opts: &SceneOptions, frames: &Frames, census: &Census) {
                 n => format!(" / plus {n} face meshes on their own layer"),
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::f32::consts::FRAC_PI_2;
+
+    use super::*;
+
+    /// An orbit aimed by a request from the view gizmo, starting from `yaw`.
+    fn aimed(yaw: f32, from: Dir3) -> (f32, f32) {
+        let mut app = App::new();
+        app.add_observer(look_from);
+        let camera = app
+            .world_mut()
+            .spawn((
+                PanOrbitCamera {
+                    target_yaw: yaw,
+                    ..default()
+                },
+                OrbitCamera,
+            ))
+            .id();
+        app.world_mut().trigger(LookFrom { camera, from });
+        let orbit = app.world().get::<PanOrbitCamera>(camera).unwrap();
+        (orbit.target_yaw, orbit.target_pitch)
+    }
+
+    /// The orbit sits at yaw `atan2(x, z)` and pitch `asin(y)` of the side it
+    /// looks from, so each axis lands on a known pair.
+    #[test]
+    fn each_side_lands_on_its_own_yaw_and_pitch() {
+        let (yaw, pitch) = aimed(0.0, Dir3::X);
+        assert!((yaw - FRAC_PI_2).abs() < 1e-5 && pitch.abs() < 1e-5);
+        let (yaw, pitch) = aimed(0.0, Dir3::NEG_X);
+        assert!((yaw + FRAC_PI_2).abs() < 1e-5 && pitch.abs() < 1e-5);
+        let (yaw, pitch) = aimed(0.0, Dir3::Z);
+        assert!(yaw.abs() < 1e-5 && pitch.abs() < 1e-5);
+    }
+
+    /// Facing behind turns the short way: from just short of a half-turn one
+    /// way, the target is the half-turn on the same side, not the one a whole
+    /// turn back, which the orbit's easing would spin all the way round to.
+    #[test]
+    fn a_turn_goes_the_short_way_round() {
+        let (yaw, _) = aimed(3.0, Dir3::NEG_Z);
+        assert!((yaw - PI).abs() < 1e-5, "{yaw}");
+        let (yaw, _) = aimed(-3.0, Dir3::NEG_Z);
+        assert!((yaw + PI).abs() < 1e-5, "{yaw}");
+        let (yaw, _) = aimed(2.0 * TAU, Dir3::X);
+        assert!((yaw - (2.0 * TAU + FRAC_PI_2)).abs() < 1e-4, "{yaw}");
+    }
+
+    /// Straight up or down keeps the yaw, which is what sets how the view is
+    /// turned on screen there.
+    #[test]
+    fn looking_straight_down_keeps_the_yaw() {
+        let (yaw, pitch) = aimed(0.7, Dir3::Y);
+        assert!((yaw - 0.7).abs() < 1e-6 && (pitch - FRAC_PI_2).abs() < 1e-5);
+        let (yaw, pitch) = aimed(0.7, Dir3::NEG_Y);
+        assert!((yaw - 0.7).abs() < 1e-6 && (pitch + FRAC_PI_2).abs() < 1e-5);
     }
 }
