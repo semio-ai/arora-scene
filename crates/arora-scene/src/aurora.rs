@@ -57,7 +57,7 @@ impl Default for Aurora {
             wave: 60.0,
             speed: 0.001,
             altitude: 400.0,
-            edge_fade: 0.5,
+            edge_fade: 1.0,
         }
     }
 }
