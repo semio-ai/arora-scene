@@ -39,9 +39,10 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
+use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
 use arora_visuals::transform_gizmo::{
-    GizmoHandle, GizmoPart, GizmoPointer, GizmoSize, GizmoSpace, TransformGizmo,
-    TransformGizmoPlugin, TransformGizmoSystems, TransformMode, TransformModes,
+    GizmoHandle, GizmoPart, GizmoPointer, GizmoSpace, TransformGizmo, TransformGizmoPlugin,
+    TransformGizmoSystems, TransformMode, TransformModes,
 };
 use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
@@ -158,6 +159,7 @@ impl Plugin for ScenePlugin {
             arora_visuals::outline::OutlinePlugin,
             arora_visuals::view_gizmo::ViewGizmoPlugin,
             TransformGizmoPlugin,
+            OverlayPlugin,
             toggles::TogglesPlugin,
         ))
         .init_resource::<OrbitHold>()
@@ -426,6 +428,9 @@ fn attach_joint(
         joint.name,
         joint.axis,
     );
+    // Named in the overlay by the joint's name, which is what the label
+    // finds it by.
+    gizmo.key = joint.name.clone();
     commands.spawn(gizmo);
 }
 
@@ -486,11 +491,14 @@ fn spawn_label(mut commands: Commands) {
         ));
 }
 
+/// Places the label beside the joint's gizmo, reading where the gizmo is
+/// from the overlay — the same report a web host would place a DOM label
+/// from, so the two cannot disagree about where the gizmo is.
 fn place_label(
     wanted: Res<WantedJoint>,
+    overlay: Res<Overlay>,
     gizmos: Query<&JointGizmo>,
-    bodies: Query<&GlobalTransform>,
-    cameras: Query<(Entity, &Camera, &GlobalTransform), With<OrbitCamera>>,
+    cameras: Query<Entity, With<OrbitCamera>>,
     mut labels: LabelQuery,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     mut commands: Commands,
@@ -498,44 +506,31 @@ fn place_label(
     let Ok((label, mut node, mut visibility, children, targeted)) = labels.single_mut() else {
         return;
     };
-    let Some((camera_entity, camera, camera_at)) = cameras.iter().next() else {
+    let Some(camera) = cameras.iter().next() else {
         return;
     };
     // UI draws to the primary window unless told otherwise, so a label left
     // untargeted is missing from every offscreen capture while looking fine on
     // screen.
     if !targeted {
-        commands.entity(label).insert(UiTargetCamera(camera_entity));
+        commands.entity(label).insert(UiTargetCamera(camera));
     }
-    let Some(gizmo) = gizmos.iter().next() else {
-        *visibility = Visibility::Hidden;
-        return;
-    };
-    let Ok(anchor) = bodies.get(gizmo.target).map(|body| body.translation()) else {
-        return;
-    };
-    let Ok(screen) = camera.world_to_viewport(camera_at, anchor) else {
+    let joint = &wanted.joint;
+    let anchor = overlay
+        .0
+        .gizmos
+        .iter()
+        .find(|anchor| anchor.kind == GizmoKind::Joint && anchor.key == joint.name);
+    let (Some(anchor), Some(gizmo)) = (anchor, gizmos.iter().next()) else {
         *visibility = Visibility::Hidden;
         return;
     };
     *visibility = Visibility::Inherited;
-    // Clear of the ring rather than over it, so the handle stays legible. The
-    // ring's own screen size is what decides how far clear that is: its
-    // radius is the gizmo's unit times the transform gizmo's ring's.
-    let radius = match gizmo.size {
-        GizmoSize::World(metres) => camera
-            .world_to_viewport(
-                camera_at,
-                anchor + camera_at.right() * metres * arora_visuals::transform_gizmo::RING_RADIUS,
-            )
-            .map(|edge| (edge.x - screen.x).abs())
-            .unwrap_or(40.0),
-        GizmoSize::Pixels(pixels) => pixels * arora_visuals::transform_gizmo::RING_RADIUS,
-    };
-    node.left = Val::Px(screen.x + radius + 14.0);
-    node.top = Val::Px(screen.y - 10.0);
+    // Clear of the ring or bar rather than over it, so the handle stays
+    // legible.
+    node.left = Val::Px(anchor.screen.max_x + 14.0);
+    node.top = Val::Px(anchor.screen.y - 10.0);
 
-    let joint = &wanted.joint;
     let colour: Color = joint.color.into();
     for child in children.iter() {
         if let Ok((mut text, mut text_colour)) = texts.get_mut(child) {
@@ -884,7 +879,7 @@ pub(crate) fn hold_orbit(
 fn attach_gizmo(
     opts: Res<SceneOptions>,
     mut commands: Commands,
-    instances: Query<Entity, With<arora_visuals::EntityInstance>>,
+    instances: Query<(Entity, &arora_visuals::EntityInstance)>,
     cameras: Query<Entity, With<OrbitCamera>>,
     gizmos: Query<(), With<TransformGizmo>>,
 ) {
@@ -894,10 +889,13 @@ fn attach_gizmo(
     if !gizmos.is_empty() {
         return;
     }
-    let (Some(target), Some(camera)) = (instances.iter().next(), cameras.iter().next()) else {
+    let (Some((target, instance)), Some(camera)) = (instances.iter().next(), cameras.iter().next())
+    else {
         return;
     };
     commands.spawn(TransformGizmo {
+        // Named in the overlay by the instance it moves.
+        key: instance.id.clone(),
         modes,
         space: opts.gizmo_space,
         // Labelled as the view gizmo is, for Studio's Z-up world, so the two
