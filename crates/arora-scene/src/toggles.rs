@@ -28,6 +28,9 @@ enum Choice {
     Environment(Environment),
     Lighting(Lighting),
     Mode(Option<TransformMode>),
+    /// One mode the gizmo offers, switched on or off on its own, so every
+    /// combination can be tried.
+    Offer(TransformMode),
     Space(GizmoSpace),
 }
 
@@ -41,9 +44,11 @@ impl Choice {
             Choice::Lighting(Lighting::World) => "world",
             Choice::Lighting(Lighting::Camera) => "camera",
             Choice::Mode(None) => "all",
-            Choice::Mode(Some(TransformMode::Translate)) => "move",
-            Choice::Mode(Some(TransformMode::Rotate)) => "turn",
-            Choice::Mode(Some(TransformMode::Scale)) => "scale",
+            Choice::Mode(Some(mode)) | Choice::Offer(mode) => match mode {
+                TransformMode::Translate => "move",
+                TransformMode::Rotate => "turn",
+                TransformMode::Scale => "scale",
+            },
             Choice::Space(GizmoSpace::World) => "world",
             Choice::Space(GizmoSpace::Local) => "local",
         }
@@ -105,18 +110,16 @@ fn build_panel(
             ],
         ),
     ];
-    if let Some(modes) = opts.gizmo {
-        let mut choices = vec![Choice::Mode(None)];
-        for mode in [
+    if opts.gizmo.is_some() {
+        const MODES: [TransformMode; 3] = [
             TransformMode::Translate,
             TransformMode::Rotate,
             TransformMode::Scale,
-        ] {
-            if modes.has(mode) {
-                choices.push(Choice::Mode(Some(mode)));
-            }
-        }
-        rows.push(("gizmo [hold M/R/S]", choices));
+        ];
+        rows.push(("gizmo offers", MODES.map(Choice::Offer).to_vec()));
+        let mut showing = vec![Choice::Mode(None)];
+        showing.extend(MODES.map(|mode| Choice::Mode(Some(mode))));
+        rows.push(("gizmo shows [hold M/R/S]", showing));
         rows.push((
             "gizmo axes",
             vec![
@@ -158,7 +161,7 @@ fn build_panel(
                             TextFont::from_font_size(11.0),
                             TextColor(MUTED),
                             Node {
-                                width: Val::Px(136.0),
+                                width: Val::Px(150.0),
                                 ..default()
                             },
                         ));
@@ -202,6 +205,20 @@ fn choose(
         Choice::Environment(environment) => stage.environment = environment,
         Choice::Lighting(lighting) => stage.lighting = lighting,
         Choice::Mode(mode) => picked.0 = mode,
+        Choice::Offer(mode) => {
+            for mut gizmo in &mut gizmos {
+                let mut modes = gizmo.modes;
+                match mode {
+                    TransformMode::Translate => modes.translate = !modes.translate,
+                    TransformMode::Rotate => modes.rotate = !modes.rotate,
+                    TransformMode::Scale => modes.scale = !modes.scale,
+                }
+                // A gizmo offering nothing would vanish with no way back.
+                if modes.translate || modes.rotate || modes.scale {
+                    gizmo.modes = modes;
+                }
+            }
+        }
         Choice::Space(space) => {
             for mut gizmo in &mut gizmos {
                 gizmo.space = space;
@@ -223,6 +240,7 @@ fn show_choices(
             Choice::Environment(environment) => stage.environment == environment,
             Choice::Lighting(lighting) => stage.lighting == lighting,
             Choice::Mode(mode) => gizmo.is_some_and(|gizmo| gizmo.only == mode),
+            Choice::Offer(mode) => gizmo.is_some_and(|gizmo| gizmo.modes.has(mode)),
             Choice::Space(space) => gizmo.is_some_and(|gizmo| gizmo.space == space),
         };
         let colour = if current {
