@@ -49,7 +49,6 @@
 
 use std::f32::consts::PI;
 
-use bevy::anti_alias::smaa::Smaa;
 use bevy::asset::{embedded_asset, embedded_path, AssetPath};
 use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
@@ -427,10 +426,6 @@ fn build_stage(
         // combined, and three does not dither either.
         Tonemapping::None,
         DebandDither::Disabled,
-        // Studio's composer turns multisampling off and runs SMAA last. One
-        // or the other: stacking them blurs edges SMAA has already resolved.
-        Msaa::Off,
-        Smaa::default(),
         rig_ambient(),
     ));
 
