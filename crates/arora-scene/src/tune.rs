@@ -62,7 +62,7 @@ impl Knob {
             Knob::HorizonRed | Knob::HorizonGreen | Knob::HorizonBlue => (0.0, 255.0, 1.0),
             Knob::AuroraBrightness => (0.0, 2.0, 0.01),
             Knob::AuroraWave => (0.0, 300.0, 1.0),
-            Knob::AuroraSpeed => (0.0, 0.5, 0.005),
+            Knob::AuroraSpeed => (0.0, 0.05, 0.0005),
             Knob::AuroraAltitude => (100.0, 2000.0, 10.0),
         }
     }

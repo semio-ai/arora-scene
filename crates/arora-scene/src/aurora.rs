@@ -48,10 +48,10 @@ pub struct Aurora {
 impl Default for Aurora {
     fn default() -> Self {
         Self {
-            brightness: 0.6,
+            brightness: 0.31,
             wave: 60.0,
-            speed: 0.05,
-            altitude: 250.0,
+            speed: 0.001,
+            altitude: 400.0,
         }
     }
 }
@@ -83,26 +83,26 @@ struct Curtain {
     weight: f32,
 }
 
-fn shapes() -> [Curtain; 4] {
+fn shapes() -> [Curtain; 5] {
     let green = Color::srgb_u8(0x14, 0xe8, 0x1e);
     let red = Color::srgb_u8(0xd0, 0x2a, 0x5c);
     let magenta = Color::srgb_u8(0xb0, 0x30, 0x90);
     [
         Curtain {
-            offset: -380.0,
-            from: -2500.0,
+            offset: -1100.0,
+            from: -3000.0,
             to: 4500.0,
-            lift: 40.0,
-            height: 700.0,
-            bend: 260.0,
-            bends: 1.5,
+            lift: 60.0,
+            height: 750.0,
+            bend: 300.0,
+            bends: 1.4,
             phase: 0.0,
             low: green,
             high: red,
-            weight: 0.8,
+            weight: 0.7,
         },
         Curtain {
-            offset: -90.0,
+            offset: -520.0,
             from: -3500.0,
             to: 5000.0,
             lift: 0.0,
@@ -115,30 +115,43 @@ fn shapes() -> [Curtain; 4] {
             weight: 1.0,
         },
         Curtain {
-            offset: 200.0,
-            from: -2000.0,
-            to: 4000.0,
-            lift: 70.0,
-            height: 650.0,
-            bend: 300.0,
-            bends: 1.2,
+            offset: 40.0,
+            from: -2500.0,
+            to: 4200.0,
+            lift: 90.0,
+            height: 680.0,
+            bend: 280.0,
+            bends: 1.1,
             phase: 4.0,
             low: green,
             high: red,
-            weight: 0.7,
+            weight: 0.8,
         },
         Curtain {
-            offset: 520.0,
-            from: -3000.0,
-            to: 3500.0,
-            lift: 120.0,
-            height: 800.0,
+            offset: 600.0,
+            from: -3200.0,
+            to: 4800.0,
+            lift: 30.0,
+            height: 820.0,
             bend: 380.0,
-            bends: 1.8,
+            bends: 1.9,
             phase: 5.3,
             low: green,
             high: magenta,
-            weight: 0.5,
+            weight: 0.9,
+        },
+        Curtain {
+            offset: 1180.0,
+            from: -2800.0,
+            to: 3800.0,
+            lift: 140.0,
+            height: 720.0,
+            bend: 320.0,
+            bends: 1.6,
+            phase: 1.2,
+            low: green,
+            high: red,
+            weight: 0.6,
         },
     ]
 }
