@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use arora_visuals::ghost::{Ghost, GhostWash};
+use arora_visuals::ghost::{Ghost, GhostLook};
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
@@ -108,6 +108,9 @@ pub struct SceneOptions {
     pub ghost: bool,
     /// Wash ghosts toward the theme's ink rather than always toward white.
     pub ghost_wash_theme: bool,
+    /// A ghost's rim strength against Studio's on the light theme, when
+    /// washing toward the theme.
+    pub ghost_rim: f32,
 }
 
 impl Default for SceneOptions {
@@ -132,6 +135,7 @@ impl Default for SceneOptions {
             gizmo_space: GizmoSpace::World,
             ghost: false,
             ghost_wash_theme: false,
+            ghost_rim: 1.0,
         }
     }
 }
@@ -906,11 +910,15 @@ fn ghost_robots(
     }
 }
 
-/// Whether ghosts are washed toward the theme's ink rather than white; the
-/// toggles change it, and the options set where it starts.
+/// How ghosts show: washed toward the theme's ink rather than white, and how
+/// strong their rim is on the light theme. The toggles change it, and the
+/// options set where it starts.
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
 pub struct WashChoice {
     pub theme: bool,
+    /// The rim's strength against Studio's on the light theme, where a dark
+    /// wash on a light ground holds its outline less than white on dark.
+    pub light_rim: f32,
     /// Whether the options have been read into it yet.
     started: bool,
 }
@@ -925,25 +933,29 @@ const LIGHT_INK: Color = Color::srgb(
     0x34 as f32 / 255.0,
 );
 
-/// Sets what ghosts are washed toward, from the theme and the choice.
+/// Sets how ghosts show, from the theme and the choice.
 fn wash_ghosts(
     opts: Res<SceneOptions>,
     stage: Option<Res<stage::Stage>>,
     mut choice: ResMut<WashChoice>,
-    mut wash: ResMut<GhostWash>,
+    mut look: ResMut<GhostLook>,
 ) {
     if !choice.started {
         choice.theme = opts.ghost_wash_theme;
+        choice.light_rim = opts.ghost_rim;
         choice.started = true;
     }
     let light = stage.is_some_and(|stage| stage.theme == stage::Theme::Light);
-    let wanted = GhostWash(if choice.theme && light {
-        LIGHT_INK
+    let wanted = if choice.theme && light {
+        GhostLook {
+            wash: LIGHT_INK,
+            rim: choice.light_rim,
+        }
     } else {
-        Color::WHITE
-    });
-    if *wash != wanted {
-        *wash = wanted;
+        GhostLook::default()
+    };
+    if *look != wanted {
+        *look = wanted;
     }
 }
 

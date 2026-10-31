@@ -44,6 +44,8 @@ enum Choice {
     Ghost(bool),
     /// Wash ghosts toward the theme's ink rather than white.
     Wash(bool),
+    /// A ghost's rim strength on the light theme, in tenths of Studio's.
+    Rim(u8),
 }
 
 impl Choice {
@@ -69,6 +71,10 @@ impl Choice {
             Choice::Ghost(true) => "ghost",
             Choice::Wash(false) => "white",
             Choice::Wash(true) => "theme",
+            Choice::Rim(10) => "1x",
+            Choice::Rim(15) => "1.5x",
+            Choice::Rim(20) => "2x",
+            Choice::Rim(_) => "3x",
         }
     }
 }
@@ -135,6 +141,10 @@ fn build_panel(
         ),
         ("robot", vec![Choice::Ghost(false), Choice::Ghost(true)]),
         ("ghost wash", vec![Choice::Wash(false), Choice::Wash(true)]),
+        (
+            "ghost rim (light)",
+            [10, 15, 20, 30].map(Choice::Rim).to_vec(),
+        ),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -264,6 +274,7 @@ fn choose(
         }
         Choice::Shifted(on) => shifted.0 = on,
         Choice::Wash(theme) => wash.theme = theme,
+        Choice::Rim(tenths) => wash.light_rim = f32::from(tenths) / 10.0,
         Choice::Ghost(on) => {
             for instance in &instances {
                 if on {
@@ -337,6 +348,7 @@ fn show_choices(
             Choice::Shifted(on) => shifted.0 == on,
             Choice::Ghost(on) => ghosted == on,
             Choice::Wash(theme) => wash.theme == theme,
+            Choice::Rim(tenths) => (wash.light_rim * 10.0).round() as u8 == tenths,
         };
         let colour = if current {
             LIT

@@ -167,6 +167,11 @@ struct Cli {
     #[arg(long, default_value = "white", value_parser = ["white", "theme"])]
     ghost_wash: String,
 
+    /// How strong a ghost's rim is against Studio's on the light theme, when
+    /// washing toward the theme.
+    #[arg(long, default_value_t = 1.0)]
+    ghost_rim: f32,
+
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
     #[arg(long, value_parser = parse_colours)]
@@ -278,6 +283,7 @@ fn main() {
         gizmo: cli.gizmo,
         ghost: cli.ghost,
         ghost_wash_theme: cli.ghost_wash == "theme",
+        ghost_rim: cli.ghost_rim,
         gizmo_space: if cli.gizmo_local {
             GizmoSpace::Local
         } else {
