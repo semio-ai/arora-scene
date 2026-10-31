@@ -42,6 +42,8 @@ enum Choice {
     Space(GizmoSpace),
     Shifted(bool),
     Ghost(bool),
+    /// Wash ghosts toward the theme's ink rather than white.
+    Wash(bool),
 }
 
 impl Choice {
@@ -65,6 +67,8 @@ impl Choice {
             Choice::Shifted(true) => "shifted",
             Choice::Ghost(false) => "solid",
             Choice::Ghost(true) => "ghost",
+            Choice::Wash(false) => "white",
+            Choice::Wash(true) => "theme",
         }
     }
 }
@@ -130,6 +134,7 @@ fn build_panel(
             ],
         ),
         ("robot", vec![Choice::Ghost(false), Choice::Ghost(true)]),
+        ("ghost wash", vec![Choice::Wash(false), Choice::Wash(true)]),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -225,6 +230,7 @@ fn choose(
     mut stage: ResMut<Stage>,
     mut picked: ResMut<GizmoChoice>,
     mut shifted: ResMut<Shifted>,
+    mut wash: ResMut<crate::WashChoice>,
     instances: Query<Entity, With<EntityInstance>>,
     mut commands: Commands,
     mut gizmos: Query<&mut TransformGizmo>,
@@ -257,6 +263,7 @@ fn choose(
             }
         }
         Choice::Shifted(on) => shifted.0 = on,
+        Choice::Wash(theme) => wash.theme = theme,
         Choice::Ghost(on) => {
             for instance in &instances {
                 if on {
@@ -312,6 +319,7 @@ fn place_gizmos(
 fn show_choices(
     stage: Res<Stage>,
     shifted: Res<Shifted>,
+    wash: Res<crate::WashChoice>,
     instances: Query<Has<Ghost>, With<EntityInstance>>,
     gizmos: Query<&TransformGizmo>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
@@ -328,6 +336,7 @@ fn show_choices(
             Choice::Space(space) => gizmo.is_some_and(|gizmo| gizmo.space == space),
             Choice::Shifted(on) => shifted.0 == on,
             Choice::Ghost(on) => ghosted == on,
+            Choice::Wash(theme) => wash.theme == theme,
         };
         let colour = if current {
             LIT

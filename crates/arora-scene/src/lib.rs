@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use arora_visuals::ghost::Ghost;
+use arora_visuals::ghost::{Ghost, GhostWash};
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
@@ -106,6 +106,8 @@ pub struct SceneOptions {
     /// Draw the robots as ghosts, as Studio draws the instance showing a
     /// robot's measured state.
     pub ghost: bool,
+    /// Wash ghosts toward the theme's ink rather than always toward white.
+    pub ghost_wash_theme: bool,
 }
 
 impl Default for SceneOptions {
@@ -129,6 +131,7 @@ impl Default for SceneOptions {
             gizmo: None,
             gizmo_space: GizmoSpace::World,
             ghost: false,
+            ghost_wash_theme: false,
         }
     }
 }
@@ -169,6 +172,7 @@ impl Plugin for ScenePlugin {
             toggles::TogglesPlugin,
         ))
         .init_resource::<OrbitHold>()
+        .init_resource::<WashChoice>()
         .add_systems(
             Update,
             (
@@ -176,6 +180,7 @@ impl Plugin for ScenePlugin {
                 choose_gizmo_mode,
                 ghost_robots,
                 hide_controls_on_ghosts,
+                wash_ghosts,
             ),
         )
         .add_systems(
@@ -898,6 +903,47 @@ fn ghost_robots(
     }
     for instance in &instances {
         commands.entity(instance).insert(Ghost);
+    }
+}
+
+/// Whether ghosts are washed toward the theme's ink rather than white; the
+/// toggles change it, and the options set where it starts.
+#[derive(Resource, Default, Clone, Copy, PartialEq)]
+pub struct WashChoice {
+    pub theme: bool,
+    /// Whether the options have been read into it yet.
+    started: bool,
+}
+
+/// The ink a ghost is washed toward on the light theme when washing toward
+/// the theme: the light theme's own ink, as its grid's major lines are drawn
+/// in, so a ghost reads against the light ground as everything else on it
+/// does. On the dark theme the ink is white, which is Studio's wash.
+const LIGHT_INK: Color = Color::srgb(
+    0x28 as f32 / 255.0,
+    0x2c as f32 / 255.0,
+    0x34 as f32 / 255.0,
+);
+
+/// Sets what ghosts are washed toward, from the theme and the choice.
+fn wash_ghosts(
+    opts: Res<SceneOptions>,
+    stage: Option<Res<stage::Stage>>,
+    mut choice: ResMut<WashChoice>,
+    mut wash: ResMut<GhostWash>,
+) {
+    if !choice.started {
+        choice.theme = opts.ghost_wash_theme;
+        choice.started = true;
+    }
+    let light = stage.is_some_and(|stage| stage.theme == stage::Theme::Light);
+    let wanted = GhostWash(if choice.theme && light {
+        LIGHT_INK
+    } else {
+        Color::WHITE
+    });
+    if *wash != wanted {
+        *wash = wanted;
     }
 }
 

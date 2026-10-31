@@ -162,6 +162,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     ghost: bool,
 
+    /// What a ghost is washed toward: `white`, as Studio has it, or `theme`,
+    /// the theme's ink, so a ghost reads on the light ground too.
+    #[arg(long, default_value = "white", value_parser = ["white", "theme"])]
+    ghost_wash: String,
+
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
     #[arg(long, value_parser = parse_colours)]
@@ -272,6 +277,7 @@ fn main() {
         outline_fill: cli.outline_fill,
         gizmo: cli.gizmo,
         ghost: cli.ghost,
+        ghost_wash_theme: cli.ghost_wash == "theme",
         gizmo_space: if cli.gizmo_local {
             GizmoSpace::Local
         } else {
