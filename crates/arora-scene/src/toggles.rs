@@ -50,7 +50,7 @@ enum Choice {
     Rim(u8),
     /// Frame the view beside a panel covering its right side.
     Panel(bool),
-    /// Let a zoom carry on with the trackpad's inertia.
+    /// Let motion carry on after the input stops, as Studio's damping does.
     Inertia(bool),
 }
 
@@ -83,8 +83,8 @@ impl Choice {
             Choice::Rim(_) => "3x",
             Choice::Panel(false) => "full",
             Choice::Panel(true) => "beside panel",
-            Choice::Inertia(false) => "fingers only",
-            Choice::Inertia(true) => "with inertia",
+            Choice::Inertia(false) => "off",
+            Choice::Inertia(true) => "on",
         }
     }
 }
@@ -151,7 +151,7 @@ fn build_panel(
         ),
         ("view", vec![Choice::Panel(false), Choice::Panel(true)]),
         (
-            "trackpad zoom",
+            "inertia",
             vec![Choice::Inertia(false), Choice::Inertia(true)],
         ),
     ];
