@@ -52,6 +52,8 @@ enum Choice {
     Panel(bool),
     /// Let motion carry on after the input stops, as Studio's damping does.
     Inertia(bool),
+    /// Keep the camera above the floor.
+    Floor(bool),
 }
 
 impl Choice {
@@ -85,6 +87,8 @@ impl Choice {
             Choice::Panel(true) => "beside panel",
             Choice::Inertia(false) => "off",
             Choice::Inertia(true) => "on",
+            Choice::Floor(false) => "free",
+            Choice::Floor(true) => "above floor",
         }
     }
 }
@@ -154,6 +158,7 @@ fn build_panel(
             "inertia",
             vec![Choice::Inertia(false), Choice::Inertia(true)],
         ),
+        ("camera", vec![Choice::Floor(true), Choice::Floor(false)]),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -292,6 +297,11 @@ fn choose(
                 bindings.inertia = on;
             }
         }
+        Choice::Floor(on) => {
+            for mut bindings in &mut cameras {
+                bindings.floor = on.then_some(crate::CAMERA_FLOOR);
+            }
+        }
         Choice::Ghost(on) => {
             for instance in &instances {
                 if on {
@@ -371,6 +381,9 @@ fn show_choices(
             Choice::Rim(tenths) => (wash.light_rim * 10.0).round() as u8 == tenths,
             Choice::Panel(on) => beside.0 == on,
             Choice::Inertia(on) => cameras.iter().any(|bindings| bindings.inertia == on),
+            Choice::Floor(on) => cameras
+                .iter()
+                .any(|bindings| bindings.floor.is_some() == on),
         };
         let colour = if current {
             LIT

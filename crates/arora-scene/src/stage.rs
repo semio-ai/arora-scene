@@ -116,7 +116,7 @@ pub const GROUND_REACH: f32 = 100_000.0;
 const DOME_RADIUS: f32 = GROUND_REACH * 0.5;
 
 /// The floor's height: zero, where Studio's grid lies.
-const FLOOR_HEIGHT: f32 = 0.0;
+pub const FLOOR_HEIGHT: f32 = 0.0;
 
 /// How far a full shadow darkens the floor.
 const FLOOR_SHADOW: f32 = 0.35;

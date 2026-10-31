@@ -36,7 +36,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use arora_visuals::camera_input::{CameraBindings, CameraInputPlugin};
+use arora_visuals::camera_input::{CameraBindings, CameraFloor, CameraInputPlugin};
 use arora_visuals::ghost::{Ghost, GhostLook};
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
@@ -765,7 +765,10 @@ pub fn setup(
             },
             ..default()
         },
-        CameraBindings::default(),
+        CameraBindings {
+            floor: Some(CAMERA_FLOOR),
+            ..default()
+        },
         OrbitCamera,
         // Studio's corner gizmo. Studio's world is Z-up, so its letters name
         // the axes a Studio user knows rather than Bevy's.
@@ -795,6 +798,13 @@ pub fn setup(
         commands.insert_resource(OffscreenView(target));
     }
 }
+
+/// Where the camera is kept above, as Studio keeps its camera a centimetre
+/// above the floor, so the view never looks up from beneath it.
+pub const CAMERA_FLOOR: CameraFloor = CameraFloor {
+    up: Dir3::Y,
+    height: stage::FLOOR_HEIGHT + 0.01,
+};
 
 /// Frames the model once its bounds are known, and turns the view about it
 /// when the options ask for a moving camera.
