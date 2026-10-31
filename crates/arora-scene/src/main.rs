@@ -12,7 +12,8 @@ use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::select::{Highlight, Selection};
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformModes};
 use bevy::prelude::*;
-use bevy::window::PresentMode;
+use bevy::window::{ExitCondition, PresentMode};
+use bevy::winit::WinitSettings;
 
 /// Splits a path to an asset into the root Bevy resolves under and the name
 /// within it.
@@ -75,7 +76,7 @@ struct Cli {
     ///
     /// Note that wgpu falls back to Fifo where a platform cannot honour this —
     /// macOS among them, where it does nothing at all. Use `--offscreen`
-    /// there.
+    /// there, which runs with no window to pace.
     #[arg(long, default_value_t = false)]
     uncapped: bool,
 
@@ -123,7 +124,12 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     unique_materials: bool,
 
-    /// Render into an offscreen target and leave the window empty.
+    /// Render into an offscreen target, with no window and nothing pacing the
+    /// loop, so the frame time is the work alone.
+    ///
+    /// A window would be presented even with nothing drawn into it, and
+    /// macOS paces a presented window to the display whatever the present
+    /// mode asks, so an offscreen run with a window measures the display.
     #[arg(long, default_value_t = false)]
     offscreen: bool,
 
@@ -248,7 +254,7 @@ fn main() {
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
+                primary_window: (!cli.offscreen).then(|| Window {
                     title: "arora-scene".into(),
                     resolution: (1280u32, 800u32).into(),
                     present_mode: if cli.uncapped {
@@ -258,6 +264,13 @@ fn main() {
                     },
                     ..default()
                 }),
+                // A headless run ends when its seconds are up, not when its
+                // last window closes, since it has none.
+                exit_condition: if cli.offscreen {
+                    ExitCondition::DontExit
+                } else {
+                    ExitCondition::OnAllClosed
+                },
                 ..default()
             })
             .set(AssetPlugin {
@@ -268,6 +281,14 @@ fn main() {
             // The process installs its own logger before Bevy starts.
             .disable::<bevy::log::LogPlugin>(),
     )
+    // Bevy's default loop drops to 60 Hz whenever no window has focus, which
+    // is how a run started from a terminal begins, and always the case with no
+    // window; a run measuring the work must not be paced by it.
+    .insert_resource(if cli.uncapped || cli.offscreen {
+        WinitSettings::continuous()
+    } else {
+        WinitSettings::game()
+    })
     .add_plugins(ScenePlugin)
     .insert_resource(SceneOptions {
         still: cli.still,
