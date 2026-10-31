@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 
 use arora_visuals::active_area::ActiveArea;
+use arora_visuals::camera_input::CameraBindings;
 use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::JointGizmo;
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformGizmo, TransformMode};
@@ -49,6 +50,8 @@ enum Choice {
     Rim(u8),
     /// Frame the view beside a panel covering its right side.
     Panel(bool),
+    /// Let a zoom carry on with the trackpad's inertia.
+    Inertia(bool),
 }
 
 impl Choice {
@@ -80,6 +83,8 @@ impl Choice {
             Choice::Rim(_) => "3x",
             Choice::Panel(false) => "full",
             Choice::Panel(true) => "beside panel",
+            Choice::Inertia(false) => "fingers only",
+            Choice::Inertia(true) => "with inertia",
         }
     }
 }
@@ -145,6 +150,10 @@ fn build_panel(
             [10, 15, 20, 30].map(Choice::Rim).to_vec(),
         ),
         ("view", vec![Choice::Panel(false), Choice::Panel(true)]),
+        (
+            "trackpad zoom",
+            vec![Choice::Inertia(false), Choice::Inertia(true)],
+        ),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -245,6 +254,7 @@ fn choose(
     instances: Query<Entity, With<EntityInstance>>,
     mut commands: Commands,
     mut gizmos: Query<&mut TransformGizmo>,
+    mut cameras: Query<&mut CameraBindings>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
         return;
@@ -277,6 +287,11 @@ fn choose(
         Choice::Wash(theme) => wash.theme = theme,
         Choice::Rim(tenths) => wash.light_rim = f32::from(tenths) / 10.0,
         Choice::Panel(on) => beside.0 = on,
+        Choice::Inertia(on) => {
+            for mut bindings in &mut cameras {
+                bindings.inertia = on;
+            }
+        }
         Choice::Ghost(on) => {
             for instance in &instances {
                 if on {
@@ -329,6 +344,7 @@ fn place_gizmos(
 }
 
 /// Lights the current choice in each row, and the one under the pointer.
+#[allow(clippy::too_many_arguments)]
 fn show_choices(
     stage: Res<Stage>,
     shifted: Res<Shifted>,
@@ -336,6 +352,7 @@ fn show_choices(
     beside: Res<Beside>,
     instances: Query<Has<Ghost>, With<EntityInstance>>,
     gizmos: Query<&TransformGizmo>,
+    cameras: Query<&CameraBindings>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
 ) {
     let gizmo = gizmos.iter().next();
@@ -353,6 +370,7 @@ fn show_choices(
             Choice::Wash(theme) => wash.theme == theme,
             Choice::Rim(tenths) => (wash.light_rim * 10.0).round() as u8 == tenths,
             Choice::Panel(on) => beside.0 == on,
+            Choice::Inertia(on) => cameras.iter().any(|bindings| bindings.inertia == on),
         };
         let colour = if current {
             LIT
