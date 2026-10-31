@@ -11,13 +11,12 @@
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{
-    Slider, SliderDragState, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick,
-    ValueChange,
+    Slider, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange,
 };
 
 use crate::aurora::Aurora;
 use crate::stage::{Look, Palette, Stage};
-use crate::{OrbitCamera, OrbitHold};
+use crate::OrbitCamera;
 
 /// What a slider controls.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +177,6 @@ impl Plugin for TunePlugin {
                             .or_else(resource_changed::<Stage>)
                             .or_else(resource_changed::<Aurora>),
                     ),
-                    hold_camera.before(crate::hold_orbit),
                 ),
             );
     }
@@ -382,14 +380,4 @@ fn print_values(
             aurora.colour_lift,
         );
     }
-}
-
-/// Holds the orbit still while the pointer is on the panel or a slider is in
-/// hand, so a drag moves the slider and not the view.
-fn hold_camera(
-    panels: Query<&Hovered, With<TunePanel>>,
-    drags: Query<&SliderDragState, With<Knob>>,
-    mut hold: ResMut<OrbitHold>,
-) {
-    hold.panel = panels.iter().any(|hovered| hovered.0) || drags.iter().any(|drag| drag.dragging);
 }

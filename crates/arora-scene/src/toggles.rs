@@ -19,7 +19,7 @@ use arora_visuals::transform_gizmo::{GizmoSpace, TransformGizmo, TransformMode};
 use arora_visuals::EntityInstance;
 
 use crate::stage::{Environment, Lighting, Stage, Theme};
-use crate::{OrbitCamera, OrbitHold, SceneOptions};
+use crate::{OrbitCamera, SceneOptions};
 
 /// The gizmo mode chosen on the panel; a key held overrides it while held.
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
@@ -103,15 +103,7 @@ impl Plugin for TogglesPlugin {
             .init_resource::<Shifted>()
             .init_resource::<Beside>()
             .add_systems(PostStartup, (build_panel, build_strip))
-            .add_systems(
-                Update,
-                (
-                    show_choices,
-                    place_gizmos,
-                    frame_beside_strip,
-                    hold_for_panel.before(crate::hold_orbit),
-                ),
-            );
+            .add_systems(Update, (show_choices, place_gizmos, frame_beside_strip));
     }
 }
 
@@ -375,15 +367,6 @@ fn show_choices(
     }
 }
 
-/// The panels whose hover holds the orbit: the toggles and the strip.
-type HoldingPanels<'w, 's> = Query<'w, 's, &'static Hovered, Or<(With<TogglePanel>, With<Strip>)>>;
-
-/// The pointer on the panel or the strip holds the orbit, so a click there
-/// does not also turn the view.
-fn hold_for_panel(panels: HoldingPanels, mut hold: ResMut<OrbitHold>) {
-    hold.toggles = panels.iter().any(Hovered::get);
-}
-
 /// Whether the view is framed beside the strip; the options set where it
 /// starts.
 #[derive(Resource, Default)]
@@ -391,7 +374,7 @@ struct Beside(bool);
 
 /// A stand-in for a panel over the right of the canvas, as Studio's sidebar
 /// covers it, so framing beside one can be seen. It takes the pointer as a
-/// panel would.
+/// panel would: a press on it is the strip's, not the camera's.
 #[derive(Component)]
 struct Strip;
 

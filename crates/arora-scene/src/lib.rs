@@ -26,7 +26,6 @@ pub mod stage;
 pub mod toggles;
 pub mod tune;
 
-use std::f32::consts::{PI, TAU};
 use std::path::PathBuf;
 
 use bevy::camera::primitives::Aabb;
@@ -37,16 +36,19 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
+use arora_visuals::camera_input::{CameraBindings, CameraInputPlugin};
 use arora_visuals::ghost::{Ghost, GhostLook};
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
 use arora_visuals::transform_gizmo::{
     GizmoHandle, GizmoPart, GizmoPointer, GizmoSpace, TransformGizmo, TransformGizmoPlugin,
-    TransformGizmoSystems, TransformMode, TransformModes,
+    TransformMode, TransformModes,
 };
 use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
-use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
+use bevy::camera_controller::pan_orbit_camera::extensions::look_to::LookToTrigger;
+use bevy::camera_controller::pan_orbit_camera::prelude::{OrbitConstraint, PanOrbitCamera};
+use bevy::math::DVec3;
 
 /// How the scene draws, independent of how a host chose it.
 ///
@@ -167,7 +169,7 @@ pub struct ScenePlugin;
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            PanOrbitCameraPlugin,
+            CameraInputPlugin,
             arora_visuals::joint_gizmo::JointGizmoPlugin,
             stage::StagePlugin,
             aurora::AuroraPlugin,
@@ -179,7 +181,6 @@ impl Plugin for ScenePlugin {
             arora_visuals::active_area::ActiveAreaPlugin,
             toggles::TogglesPlugin,
         ))
-        .init_resource::<OrbitHold>()
         .init_resource::<WashChoice>()
         .add_systems(
             Update,
@@ -190,12 +191,6 @@ impl Plugin for ScenePlugin {
                 hide_controls_on_ghosts,
                 wash_ghosts,
             ),
-        )
-        .add_systems(
-            Update,
-            hold_orbit
-                .after(TransformGizmoSystems)
-                .before(PanOrbitCameraSystemSet),
         )
         .init_resource::<arora_visuals::select::Selections>()
         .init_resource::<instance::Selected>()
@@ -760,15 +755,17 @@ pub fn setup(
     // Lit and finished by `stage`, which reads what the host chose.
     let mut camera = commands.spawn((
         Camera3d::default(),
-        // three.js OrbitControls' bindings, which is what the scene's users
-        // already have in their hands: left orbits, right pans. The joint
-        // gizmo shares the left button and takes priority when the press
-        // lands on it.
+        // Bevy's controller, under Studio's bindings: left orbits, right pans,
+        // the wheel zooms. A gizmo's handle takes a press before the camera
+        // does. The world is Y-up, and the view never tips over the top.
         PanOrbitCamera {
-            button_orbit: MouseButton::Left,
-            button_pan: MouseButton::Right,
+            orbit_constraint: OrbitConstraint::Fixed {
+                up: DVec3::Y,
+                can_pass_tdc: false,
+            },
             ..default()
         },
+        CameraBindings::default(),
         OrbitCamera,
         // Studio's corner gizmo. Studio's world is Z-up, so its letters name
         // the axes a Studio user knows rather than Bevy's.
@@ -799,43 +796,35 @@ pub fn setup(
     }
 }
 
-/// Points the camera controller at the model, once its bounds are known.
+/// Frames the model once its bounds are known, and turns the view about it
+/// when the options ask for a moving camera.
 ///
-/// The controls themselves are `bevy_panorbit_camera`'s. A hand-rolled orbit
-/// gets drag direction wrong on trackpads and has no inertia, focus handling
-/// or zoom limits, and none of that is what this spike is measuring.
-///
-/// Orbit is on the right button and pan on the middle one, because the left
-/// belongs to the joint gizmo — a camera control and a joint control competing
-/// for one drag makes both feel broken.
+/// The controller works from wherever the camera stands, so framing is
+/// placing the camera: at the options' angle and height about the model's
+/// centre, far enough out that its bounding sphere fits the view with a little
+/// air, looking at the centre. The controller is told how deep that centre is,
+/// so a gesture begun over empty space anchors there rather than somewhere
+/// arbitrary.
 fn fit_orbit(
     opts: Res<SceneOptions>,
     time: Res<Time>,
     framing: Res<Framing>,
-    mut cameras: Query<(&mut PanOrbitCamera, &mut Projection), With<OrbitCamera>>,
+    mut cameras: Query<(&mut Transform, &mut PanOrbitCamera, &mut Projection), With<OrbitCamera>>,
 ) {
     if !framing.fitted {
         return;
     }
-    // Far enough out that the bounding sphere fits the vertical field of view,
-    // with a little air around it.
     let distance = framing.radius * 2.6;
-    for (mut orbit, mut projection) in &mut cameras {
+    for (mut transform, mut controller, mut projection) in &mut cameras {
         if framing.is_changed() {
-            orbit.focus = framing.center;
-            orbit.target_focus = framing.center;
-            orbit.radius = Some(distance);
-            orbit.target_radius = distance;
-            orbit.yaw = Some(opts.angle);
-            orbit.target_yaw = opts.angle;
-            orbit.pitch = Some(opts.pitch);
-            orbit.target_pitch = opts.pitch;
-            orbit.zoom_lower_limit = framing.radius * 0.4;
-            orbit.zoom_upper_limit = Some(framing.radius * 20.0);
-            // The controller initialises itself from the camera's transform,
-            // and this camera has none worth reading; without this it keeps
-            // its own state and ignores everything set above.
-            orbit.force_update = true;
+            let toward = Vec3::new(
+                opts.angle.sin() * opts.pitch.cos(),
+                opts.pitch.sin(),
+                opts.angle.cos() * opts.pitch.cos(),
+            );
+            *transform = Transform::from_translation(framing.center + toward * distance)
+                .looking_at(framing.center, Vec3::Y);
+            controller.last_anchor_depth = -f64::from(distance);
 
             // The default near/far pair assumes a metre-scale world; a model in
             // millimetres would sit entirely behind the far plane. The far
@@ -849,53 +838,13 @@ fn fit_orbit(
         }
 
         // A turning camera is what the frame-time measurement wants; a still
-        // one is what inspecting a joint wants. Driving the target rather than
-        // the angle leaves the controller free to take over mid-turn.
-        if !opts.still {
-            orbit.target_yaw = opts.angle + time.elapsed_secs() * 0.35;
-        }
-    }
-}
-
-/// What is holding the orbit still.
-///
-/// The orbit shares the left button with the gizmos, the tuning panel and
-/// the toggles. The panels say here whether they have the pointer, the
-/// gizmos say so through [`GizmoPointer`], and [`hold_orbit`] alone switches
-/// the orbit: with two writers of the switch, each would undo the other's
-/// hold every frame.
-#[derive(Resource, Default)]
-pub struct OrbitHold {
-    /// The pointer is on the tuning panel, or a slider is in hand.
-    pub panel: bool,
-    /// The pointer is on the toggles.
-    pub toggles: bool,
-}
-
-/// Holds the orbit still while anything else has the pointer. A gizmo's
-/// handle under the pointer counts as well as one in hand, so the press that
-/// takes it does not also start a turn of the view.
-///
-/// Who has the pointer is settled when a button goes down and kept until
-/// every button is up. A turn of the view that passes over a handle or the
-/// panel is the view's to finish, and a drag that leaves them stays theirs.
-pub(crate) fn hold_orbit(
-    hold: Res<OrbitHold>,
-    gizmos: Res<GizmoPointer>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    mut settled: Local<Option<bool>>,
-    mut orbits: Query<&mut PanOrbitCamera>,
-) {
-    let claimed = hold.panel || hold.toggles || gizmos.engaged();
-    let held = if buttons.get_pressed().next().is_some() {
-        *settled.get_or_insert(claimed)
-    } else {
-        *settled = None;
-        claimed
-    };
-    for mut orbit in &mut orbits {
-        if orbit.enabled == held {
-            orbit.enabled = !held;
+        // one is what inspecting a joint wants. It turns only while nobody is
+        // moving it, so a gesture is never fought.
+        if !opts.still && !controller.current_motion.is_moving() {
+            transform.rotate_around(
+                framing.center,
+                Quat::from_rotation_y(time.delta_secs() * 0.35),
+            );
         }
     }
 }
@@ -1039,25 +988,26 @@ fn choose_gizmo_mode(
     }
 }
 
-/// Turns the orbit toward a view the view gizmo asked for: the camera moves
-/// round its focus to the side the request names, at the orbit's own
-/// smoothing.
-///
-/// Straight up or down keeps the current yaw, which is what decides how the
-/// view is turned on screen there. Otherwise the yaw goes the short way round,
-/// since the orbit eases its yaw toward the target as a plain number and would
-/// otherwise spin the long way past a half-turn.
-fn look_from(look: On<LookFrom>, mut cameras: Query<&mut PanOrbitCamera, With<OrbitCamera>>) {
-    let Ok(mut orbit) = cameras.get_mut(look.camera) else {
+/// Turns the camera toward a view the view gizmo asked for, with the
+/// controller's own `look_to`: it swings about its anchor until it faces the
+/// way the request names, from the side the request names, keeping the
+/// world's up where it can.
+fn look_from(
+    look: On<LookFrom>,
+    cameras: Query<(&GlobalTransform, &PanOrbitCamera), With<OrbitCamera>>,
+    mut turns: MessageWriter<LookToTrigger>,
+) {
+    let Ok((at, controller)) = cameras.get(look.camera) else {
         return;
     };
-    let from = *look.from;
-    orbit.target_pitch = from.y.clamp(-1.0, 1.0).asin();
-    if from.y.abs() < 0.999 {
-        let yaw = from.x.atan2(from.z);
-        let turn = (yaw - orbit.target_yaw + PI).rem_euclid(TAU) - PI;
-        orbit.target_yaw += turn;
-    }
+    // Looking from a side is facing back across from it.
+    let facing = -look.from.as_vec3().as_dvec3();
+    turns.write(LookToTrigger::auto_snap_up_direction(
+        facing,
+        look.camera,
+        &at.rotation().as_dquat(),
+        controller,
+    ));
 }
 
 /// The meshes a census counts: everything but the stage.
@@ -1335,61 +1285,52 @@ pub fn report(opts: &SceneOptions, frames: &Frames, census: &Census) {
 
 #[cfg(test)]
 mod tests {
-    use std::f32::consts::FRAC_PI_2;
-
     use super::*;
 
-    /// An orbit aimed by a request from the view gizmo, starting from `yaw`.
-    fn aimed(yaw: f32, from: Dir3) -> (f32, f32) {
+    /// What the view gizmo's request asks the controller to face, looking
+    /// from `from`.
+    fn facing_from(from: Dir3) -> DVec3 {
         let mut app = App::new();
-        app.add_observer(look_from);
+        app.add_message::<LookToTrigger>().add_observer(look_from);
         let camera = app
             .world_mut()
             .spawn((
+                GlobalTransform::default(),
                 PanOrbitCamera {
-                    target_yaw: yaw,
+                    orbit_constraint: OrbitConstraint::Fixed {
+                        up: DVec3::Y,
+                        can_pass_tdc: false,
+                    },
                     ..default()
                 },
                 OrbitCamera,
             ))
             .id();
         app.world_mut().trigger(LookFrom { camera, from });
-        let orbit = app.world().get::<PanOrbitCamera>(camera).unwrap();
-        (orbit.target_yaw, orbit.target_pitch)
+        let turns = app.world().resource::<Messages<LookToTrigger>>();
+        let mut reader = turns.get_cursor();
+        let turn = reader.read(turns).next().expect("a turn was asked for");
+        assert_eq!(turn.camera, camera);
+        turn.target_facing_direction
     }
 
-    /// The orbit sits at yaw `atan2(x, z)` and pitch `asin(y)` of the side it
-    /// looks from, so each axis lands on a known pair.
+    /// Looking from a side faces back across from it, for every side, up and
+    /// down included.
     #[test]
-    fn each_side_lands_on_its_own_yaw_and_pitch() {
-        let (yaw, pitch) = aimed(0.0, Dir3::X);
-        assert!((yaw - FRAC_PI_2).abs() < 1e-5 && pitch.abs() < 1e-5);
-        let (yaw, pitch) = aimed(0.0, Dir3::NEG_X);
-        assert!((yaw + FRAC_PI_2).abs() < 1e-5 && pitch.abs() < 1e-5);
-        let (yaw, pitch) = aimed(0.0, Dir3::Z);
-        assert!(yaw.abs() < 1e-5 && pitch.abs() < 1e-5);
-    }
-
-    /// Facing behind turns the short way: from just short of a half-turn one
-    /// way, the target is the half-turn on the same side, not the one a whole
-    /// turn back, which the orbit's easing would spin all the way round to.
-    #[test]
-    fn a_turn_goes_the_short_way_round() {
-        let (yaw, _) = aimed(3.0, Dir3::NEG_Z);
-        assert!((yaw - PI).abs() < 1e-5, "{yaw}");
-        let (yaw, _) = aimed(-3.0, Dir3::NEG_Z);
-        assert!((yaw + PI).abs() < 1e-5, "{yaw}");
-        let (yaw, _) = aimed(2.0 * TAU, Dir3::X);
-        assert!((yaw - (2.0 * TAU + FRAC_PI_2)).abs() < 1e-4, "{yaw}");
-    }
-
-    /// Straight up or down keeps the yaw, which is what sets how the view is
-    /// turned on screen there.
-    #[test]
-    fn looking_straight_down_keeps_the_yaw() {
-        let (yaw, pitch) = aimed(0.7, Dir3::Y);
-        assert!((yaw - 0.7).abs() < 1e-6 && (pitch - FRAC_PI_2).abs() < 1e-5);
-        let (yaw, pitch) = aimed(0.7, Dir3::NEG_Y);
-        assert!((yaw - 0.7).abs() < 1e-6 && (pitch + FRAC_PI_2).abs() < 1e-5);
+    fn looking_from_a_side_faces_back_across_it() {
+        for from in [
+            Dir3::X,
+            Dir3::NEG_X,
+            Dir3::Z,
+            Dir3::NEG_Z,
+            Dir3::Y,
+            Dir3::NEG_Y,
+        ] {
+            let facing = facing_from(from);
+            assert!(
+                facing.abs_diff_eq(-from.as_vec3().as_dvec3(), 1e-9),
+                "{from:?} faces {facing:?}"
+            );
+        }
     }
 }
