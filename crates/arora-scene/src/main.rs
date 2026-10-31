@@ -162,15 +162,20 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     ghost: bool,
 
-    /// What a ghost is washed toward: `white`, as Studio has it, or `theme`,
-    /// the theme's ink, so a ghost reads on the light ground too.
-    #[arg(long, default_value = "white", value_parser = ["white", "theme"])]
+    /// What a ghost is washed toward: `theme`, the theme's ink, so a ghost
+    /// reads on the light ground too, or `white`, as Studio has it.
+    #[arg(long, default_value = "theme", value_parser = ["white", "theme"])]
     ghost_wash: String,
 
     /// How strong a ghost's rim is against Studio's on the light theme, when
     /// washing toward the theme.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 2.0)]
     ghost_rim: f32,
+
+    /// Frame the view beside a panel covering its right side, as Studio does
+    /// beside its sidebar.
+    #[arg(long, default_value_t = false)]
+    panel: bool,
 
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
@@ -284,6 +289,7 @@ fn main() {
         ghost: cli.ghost,
         ghost_wash_theme: cli.ghost_wash == "theme",
         ghost_rim: cli.ghost_rim,
+        panel: cli.panel,
         gizmo_space: if cli.gizmo_local {
             GizmoSpace::Local
         } else {

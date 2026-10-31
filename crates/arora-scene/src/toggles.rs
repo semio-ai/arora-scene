@@ -12,6 +12,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 
+use arora_visuals::active_area::ActiveArea;
 use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::JointGizmo;
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformGizmo, TransformMode};
@@ -46,6 +47,8 @@ enum Choice {
     Wash(bool),
     /// A ghost's rim strength on the light theme, in tenths of Studio's.
     Rim(u8),
+    /// Frame the view beside a panel covering its right side.
+    Panel(bool),
 }
 
 impl Choice {
@@ -75,6 +78,8 @@ impl Choice {
             Choice::Rim(15) => "1.5x",
             Choice::Rim(20) => "2x",
             Choice::Rim(_) => "3x",
+            Choice::Panel(false) => "full",
+            Choice::Panel(true) => "beside panel",
         }
     }
 }
@@ -96,12 +101,14 @@ impl Plugin for TogglesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GizmoChoice>()
             .init_resource::<Shifted>()
-            .add_systems(PostStartup, build_panel)
+            .init_resource::<Beside>()
+            .add_systems(PostStartup, (build_panel, build_strip))
             .add_systems(
                 Update,
                 (
                     show_choices,
                     place_gizmos,
+                    frame_beside_strip,
                     hold_for_panel.before(crate::hold_orbit),
                 ),
             );
@@ -145,6 +152,7 @@ fn build_panel(
             "ghost rim (light)",
             [10, 15, 20, 30].map(Choice::Rim).to_vec(),
         ),
+        ("view", vec![Choice::Panel(false), Choice::Panel(true)]),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -241,6 +249,7 @@ fn choose(
     mut picked: ResMut<GizmoChoice>,
     mut shifted: ResMut<Shifted>,
     mut wash: ResMut<crate::WashChoice>,
+    mut beside: ResMut<Beside>,
     instances: Query<Entity, With<EntityInstance>>,
     mut commands: Commands,
     mut gizmos: Query<&mut TransformGizmo>,
@@ -275,6 +284,7 @@ fn choose(
         Choice::Shifted(on) => shifted.0 = on,
         Choice::Wash(theme) => wash.theme = theme,
         Choice::Rim(tenths) => wash.light_rim = f32::from(tenths) / 10.0,
+        Choice::Panel(on) => beside.0 = on,
         Choice::Ghost(on) => {
             for instance in &instances {
                 if on {
@@ -331,6 +341,7 @@ fn show_choices(
     stage: Res<Stage>,
     shifted: Res<Shifted>,
     wash: Res<crate::WashChoice>,
+    beside: Res<Beside>,
     instances: Query<Has<Ghost>, With<EntityInstance>>,
     gizmos: Query<&TransformGizmo>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
@@ -349,6 +360,7 @@ fn show_choices(
             Choice::Ghost(on) => ghosted == on,
             Choice::Wash(theme) => wash.theme == theme,
             Choice::Rim(tenths) => (wash.light_rim * 10.0).round() as u8 == tenths,
+            Choice::Panel(on) => beside.0 == on,
         };
         let colour = if current {
             LIT
@@ -363,8 +375,106 @@ fn show_choices(
     }
 }
 
-/// The pointer on the panel holds the orbit, so a click on a choice does not
-/// also turn the view.
-fn hold_for_panel(panels: Query<&Hovered, With<TogglePanel>>, mut hold: ResMut<OrbitHold>) {
+/// The panels whose hover holds the orbit: the toggles and the strip.
+type HoldingPanels<'w, 's> = Query<'w, 's, &'static Hovered, Or<(With<TogglePanel>, With<Strip>)>>;
+
+/// The pointer on the panel or the strip holds the orbit, so a click there
+/// does not also turn the view.
+fn hold_for_panel(panels: HoldingPanels, mut hold: ResMut<OrbitHold>) {
     hold.toggles = panels.iter().any(Hovered::get);
+}
+
+/// Whether the view is framed beside the strip; the options set where it
+/// starts.
+#[derive(Resource, Default)]
+struct Beside(bool);
+
+/// A stand-in for a panel over the right of the canvas, as Studio's sidebar
+/// covers it, so framing beside one can be seen. It takes the pointer as a
+/// panel would.
+#[derive(Component)]
+struct Strip;
+
+/// How wide the strip is, in logical pixels.
+const STRIP_WIDTH: f32 = 380.0;
+
+fn build_strip(
+    mut commands: Commands,
+    opts: Res<SceneOptions>,
+    mut beside: ResMut<Beside>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+) {
+    beside.0 = opts.panel;
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Px(STRIP_WIDTH),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.09, 0.09, 0.11, 0.55)),
+            // Under the toggles, which sit in the same corner.
+            ZIndex(-1),
+            UiTargetCamera(camera),
+            Hovered::default(),
+            Visibility::Hidden,
+            Strip,
+        ))
+        .with_child((
+            Text::new("a panel covers this side"),
+            TextFont::from_font_size(12.0),
+            TextColor(MUTED),
+            Pickable::IGNORE,
+        ));
+}
+
+/// Frames the view beside the strip, or across the whole canvas, and shows
+/// the strip while it is in play.
+fn frame_beside_strip(
+    beside: Res<Beside>,
+    mut commands: Commands,
+    cameras: Query<(Entity, &Camera, Option<&ActiveArea>), With<OrbitCamera>>,
+    mut strips: Query<&mut Visibility, With<Strip>>,
+) {
+    for (entity, camera, area) in &cameras {
+        let Some(viewport) = camera.logical_viewport_size() else {
+            continue;
+        };
+        let wanted = beside.0.then(|| {
+            ActiveArea(Rect::new(
+                0.0,
+                0.0,
+                (viewport.x - STRIP_WIDTH).max(1.0),
+                viewport.y,
+            ))
+        });
+        match (wanted, area) {
+            (Some(wanted), Some(area)) if *area == wanted => {}
+            (Some(wanted), _) => {
+                commands.entity(entity).insert(wanted);
+            }
+            (None, Some(_)) => {
+                commands.entity(entity).remove::<ActiveArea>();
+            }
+            (None, None) => {}
+        }
+    }
+    let shown = if beside.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in &mut strips {
+        if *visibility != shown {
+            *visibility = shown;
+        }
+    }
 }

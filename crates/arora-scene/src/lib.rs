@@ -111,6 +111,8 @@ pub struct SceneOptions {
     /// A ghost's rim strength against Studio's on the light theme, when
     /// washing toward the theme.
     pub ghost_rim: f32,
+    /// Frame the view beside a panel covering its right side.
+    pub panel: bool,
 }
 
 impl Default for SceneOptions {
@@ -134,8 +136,9 @@ impl Default for SceneOptions {
             gizmo: None,
             gizmo_space: GizmoSpace::World,
             ghost: false,
-            ghost_wash_theme: false,
-            ghost_rim: 1.0,
+            ghost_wash_theme: true,
+            ghost_rim: 2.0,
+            panel: false,
         }
     }
 }
@@ -173,6 +176,7 @@ impl Plugin for ScenePlugin {
             TransformGizmoPlugin,
             OverlayPlugin,
             arora_visuals::ghost::GhostPlugin,
+            arora_visuals::active_area::ActiveAreaPlugin,
             toggles::TogglesPlugin,
         ))
         .init_resource::<OrbitHold>()
