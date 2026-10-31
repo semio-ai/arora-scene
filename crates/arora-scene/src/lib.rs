@@ -37,6 +37,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
+use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
@@ -102,6 +103,9 @@ pub struct SceneOptions {
     pub gizmo: Option<TransformModes>,
     /// Whose axes that gizmo moves and turns along.
     pub gizmo_space: GizmoSpace,
+    /// Draw the robots as ghosts, as Studio draws the instance showing a
+    /// robot's measured state.
+    pub ghost: bool,
 }
 
 impl Default for SceneOptions {
@@ -124,6 +128,7 @@ impl Default for SceneOptions {
             outline_fill: 0.0,
             gizmo: None,
             gizmo_space: GizmoSpace::World,
+            ghost: false,
         }
     }
 }
@@ -160,10 +165,19 @@ impl Plugin for ScenePlugin {
             arora_visuals::view_gizmo::ViewGizmoPlugin,
             TransformGizmoPlugin,
             OverlayPlugin,
+            arora_visuals::ghost::GhostPlugin,
             toggles::TogglesPlugin,
         ))
         .init_resource::<OrbitHold>()
-        .add_systems(Update, (attach_gizmo, choose_gizmo_mode))
+        .add_systems(
+            Update,
+            (
+                attach_gizmo,
+                choose_gizmo_mode,
+                ghost_robots,
+                hide_controls_on_ghosts,
+            ),
+        )
         .add_systems(
             Update,
             hold_orbit
@@ -869,6 +883,42 @@ pub(crate) fn hold_orbit(
     for mut orbit in &mut orbits {
         if orbit.enabled == held {
             orbit.enabled = !held;
+        }
+    }
+}
+
+/// Ghosts each robot as it appears, when the options ask for it.
+fn ghost_robots(
+    opts: Res<SceneOptions>,
+    mut commands: Commands,
+    instances: Query<Entity, Added<arora_visuals::EntityInstance>>,
+) {
+    if !opts.ghost {
+        return;
+    }
+    for instance in &instances {
+        commands.entity(instance).insert(Ghost);
+    }
+}
+
+/// Hides a joint control while the body it moves is ghosted, as Studio does:
+/// a ghost shows where the robot is, not something to take hold of.
+fn hide_controls_on_ghosts(
+    mut gizmos: Query<(&JointGizmo, &mut Visibility)>,
+    ghosts: Query<(), With<Ghost>>,
+    parents: Query<&ChildOf>,
+) {
+    for (gizmo, mut visibility) in &mut gizmos {
+        let ghosted = std::iter::once(gizmo.target)
+            .chain(parents.iter_ancestors(gizmo.target))
+            .any(|entity| ghosts.contains(entity));
+        let wanted = if ghosted {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
         }
     }
 }

@@ -158,6 +158,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     gizmo_local: bool,
 
+    /// Draw the robot as a ghost, as Studio draws a robot's measured state.
+    #[arg(long, default_value_t = false)]
+    ghost: bool,
+
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
     #[arg(long, value_parser = parse_colours)]
@@ -267,6 +271,7 @@ fn main() {
         lighting: cli.lighting,
         outline_fill: cli.outline_fill,
         gizmo: cli.gizmo,
+        ghost: cli.ghost,
         gizmo_space: if cli.gizmo_local {
             GizmoSpace::Local
         } else {

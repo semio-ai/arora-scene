@@ -12,8 +12,10 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 
+use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::JointGizmo;
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformGizmo, TransformMode};
+use arora_visuals::EntityInstance;
 
 use crate::stage::{Environment, Lighting, Stage, Theme};
 use crate::{OrbitCamera, OrbitHold, SceneOptions};
@@ -39,6 +41,7 @@ enum Choice {
     Offer(TransformMode),
     Space(GizmoSpace),
     Shifted(bool),
+    Ghost(bool),
 }
 
 impl Choice {
@@ -60,6 +63,8 @@ impl Choice {
             Choice::Space(GizmoSpace::Local) => "local",
             Choice::Shifted(false) => "none",
             Choice::Shifted(true) => "shifted",
+            Choice::Ghost(false) => "solid",
+            Choice::Ghost(true) => "ghost",
         }
     }
 }
@@ -124,6 +129,7 @@ fn build_panel(
                 Choice::Lighting(Lighting::Camera),
             ],
         ),
+        ("robot", vec![Choice::Ghost(false), Choice::Ghost(true)]),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -212,12 +218,15 @@ fn build_panel(
 }
 
 /// Makes the clicked choice the current one.
+#[allow(clippy::too_many_arguments)]
 fn choose(
     click: On<PointerClick>,
     choices: Query<&Choice>,
     mut stage: ResMut<Stage>,
     mut picked: ResMut<GizmoChoice>,
     mut shifted: ResMut<Shifted>,
+    instances: Query<Entity, With<EntityInstance>>,
+    mut commands: Commands,
     mut gizmos: Query<&mut TransformGizmo>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
@@ -248,6 +257,15 @@ fn choose(
             }
         }
         Choice::Shifted(on) => shifted.0 = on,
+        Choice::Ghost(on) => {
+            for instance in &instances {
+                if on {
+                    commands.entity(instance).insert(Ghost);
+                } else {
+                    commands.entity(instance).remove::<Ghost>();
+                }
+            }
+        }
     }
 }
 
@@ -294,10 +312,12 @@ fn place_gizmos(
 fn show_choices(
     stage: Res<Stage>,
     shifted: Res<Shifted>,
+    instances: Query<Has<Ghost>, With<EntityInstance>>,
     gizmos: Query<&TransformGizmo>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
 ) {
     let gizmo = gizmos.iter().next();
+    let ghosted = instances.iter().any(|ghosted| ghosted);
     for (choice, hovered, mut background) in &mut buttons {
         let current = match *choice {
             Choice::Theme(theme) => stage.theme == theme,
@@ -307,6 +327,7 @@ fn show_choices(
             Choice::Offer(mode) => gizmo.is_some_and(|gizmo| gizmo.modes.has(mode)),
             Choice::Space(space) => gizmo.is_some_and(|gizmo| gizmo.space == space),
             Choice::Shifted(on) => shifted.0 == on,
+            Choice::Ghost(on) => ghosted == on,
         };
         let colour = if current {
             LIT
