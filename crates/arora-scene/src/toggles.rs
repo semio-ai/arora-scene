@@ -60,14 +60,13 @@ enum Choice {
     JointSize(GizmoSize),
 }
 
-/// The transform gizmo's own default, the same on screen however far.
-const TRANSFORM_ON_SCREEN: GizmoSize = GizmoSize::Pixels(100.0);
-/// The joint gizmo's own default, and Studio's: fixed in the world.
+/// Each gizmo's own default, fixed in the world as Studio's are.
+const TRANSFORM_IN_WORLD: GizmoSize = GizmoSize::World(0.25);
 const JOINT_IN_WORLD: GizmoSize = GizmoSize::World(0.2);
-/// The alternatives are each sized to match the default at the opening view,
-/// where Quori shows at about 427 pixels a metre, so switching changes only
-/// how a gizmo answers a zoom, not how big it starts.
-const TRANSFORM_IN_WORLD: GizmoSize = GizmoSize::World(0.23);
+/// The on-screen alternatives are each sized to match the default at the
+/// opening view, where Quori shows at about 427 pixels a metre, so switching
+/// changes only how a gizmo answers a zoom, not how big it starts.
+const TRANSFORM_ON_SCREEN: GizmoSize = GizmoSize::Pixels(107.0);
 const JOINT_ON_SCREEN: GizmoSize = GizmoSize::Pixels(85.0);
 
 impl Choice {
@@ -199,8 +198,8 @@ fn build_panel(
         rows.push((
             "gizmo size",
             vec![
-                Choice::TransformSize(TRANSFORM_ON_SCREEN),
                 Choice::TransformSize(TRANSFORM_IN_WORLD),
+                Choice::TransformSize(TRANSFORM_ON_SCREEN),
             ],
         ));
     }
