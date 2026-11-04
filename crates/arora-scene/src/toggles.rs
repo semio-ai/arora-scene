@@ -16,7 +16,7 @@ use arora_visuals::active_area::ActiveArea;
 use arora_visuals::camera_input::CameraBindings;
 use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::JointGizmo;
-use arora_visuals::transform_gizmo::{GizmoSpace, TransformGizmo, TransformMode};
+use arora_visuals::transform_gizmo::{GizmoSize, GizmoSpace, TransformGizmo, TransformMode};
 use arora_visuals::EntityInstance;
 
 use crate::stage::{Environment, Lighting, Stage, Theme};
@@ -54,7 +54,21 @@ enum Choice {
     Inertia(bool),
     /// Keep the camera above the floor.
     Floor(bool),
+    /// How the transform gizmo is sized.
+    TransformSize(GizmoSize),
+    /// How the joint gizmo is sized.
+    JointSize(GizmoSize),
 }
+
+/// The transform gizmo's own default, the same on screen however far.
+const TRANSFORM_ON_SCREEN: GizmoSize = GizmoSize::Pixels(100.0);
+/// The joint gizmo's own default, and Studio's: fixed in the world.
+const JOINT_IN_WORLD: GizmoSize = GizmoSize::World(0.2);
+/// The alternatives are each sized to match the default at the opening view,
+/// where Quori shows at about 427 pixels a metre, so switching changes only
+/// how a gizmo answers a zoom, not how big it starts.
+const TRANSFORM_IN_WORLD: GizmoSize = GizmoSize::World(0.23);
+const JOINT_ON_SCREEN: GizmoSize = GizmoSize::Pixels(85.0);
 
 impl Choice {
     fn label(self) -> &'static str {
@@ -89,6 +103,11 @@ impl Choice {
             Choice::Inertia(true) => "on",
             Choice::Floor(false) => "free",
             Choice::Floor(true) => "above floor",
+            Choice::TransformSize(GizmoSize::Pixels(_))
+            | Choice::JointSize(GizmoSize::Pixels(_)) => "on screen",
+            Choice::TransformSize(GizmoSize::World(_)) | Choice::JointSize(GizmoSize::World(_)) => {
+                "in world"
+            }
         }
     }
 }
@@ -177,6 +196,22 @@ fn build_panel(
                 Choice::Space(GizmoSpace::Local),
             ],
         ));
+        rows.push((
+            "gizmo size",
+            vec![
+                Choice::TransformSize(TRANSFORM_ON_SCREEN),
+                Choice::TransformSize(TRANSFORM_IN_WORLD),
+            ],
+        ));
+    }
+    if joint.is_some() {
+        rows.push((
+            "joint size",
+            vec![
+                Choice::JointSize(JOINT_IN_WORLD),
+                Choice::JointSize(JOINT_ON_SCREEN),
+            ],
+        ));
     }
 
     if opts.gizmo.is_some() || joint.is_some() {
@@ -259,6 +294,7 @@ fn choose(
     instances: Query<Entity, With<EntityInstance>>,
     mut commands: Commands,
     mut gizmos: Query<&mut TransformGizmo>,
+    mut joints: Query<&mut JointGizmo>,
     mut cameras: Query<&mut CameraBindings>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
@@ -295,6 +331,16 @@ fn choose(
         Choice::Inertia(on) => {
             for mut bindings in &mut cameras {
                 bindings.inertia = on;
+            }
+        }
+        Choice::TransformSize(size) => {
+            for mut gizmo in &mut gizmos {
+                gizmo.size = size;
+            }
+        }
+        Choice::JointSize(size) => {
+            for mut joint in &mut joints {
+                joint.size = size;
             }
         }
         Choice::Floor(on) => {
@@ -362,6 +408,7 @@ fn show_choices(
     beside: Res<Beside>,
     instances: Query<Has<Ghost>, With<EntityInstance>>,
     gizmos: Query<&TransformGizmo>,
+    joints: Query<&JointGizmo>,
     cameras: Query<&CameraBindings>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
 ) {
@@ -384,6 +431,8 @@ fn show_choices(
             Choice::Floor(on) => cameras
                 .iter()
                 .any(|bindings| bindings.floor.is_some() == on),
+            Choice::TransformSize(size) => gizmo.is_some_and(|gizmo| gizmo.size == size),
+            Choice::JointSize(size) => joints.iter().any(|joint| joint.size == size),
         };
         let colour = if current {
             LIT
