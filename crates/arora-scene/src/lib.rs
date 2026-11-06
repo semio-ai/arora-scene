@@ -178,6 +178,7 @@ impl Plugin for ScenePlugin {
             TransformGizmoPlugin,
             OverlayPlugin,
             arora_visuals::ghost::GhostPlugin,
+            arora_visuals::axes::FrameAxesPlugin,
             arora_visuals::active_area::ActiveAreaPlugin,
             toggles::TogglesPlugin,
         ))

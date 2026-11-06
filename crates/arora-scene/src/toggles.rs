@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 
 use arora_visuals::active_area::ActiveArea;
+use arora_visuals::axes::FrameAxes;
 use arora_visuals::camera_input::CameraBindings;
 use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::JointGizmo;
@@ -58,6 +59,20 @@ enum Choice {
     TransformSize(GizmoSize),
     /// How the joint gizmo is sized.
     JointSize(GizmoSize),
+    /// Which reference frames show their axes.
+    Frames(Frames),
+}
+
+/// Which reference frames show their axes.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum Frames {
+    #[default]
+    Off,
+    /// The robot's own frame, at Studio's body-axes length.
+    Robot,
+    /// Every element's frame, short enough that the robot still shows
+    /// through dozens of them.
+    Elements,
 }
 
 /// Each gizmo's own default, fixed in the world as Studio's are.
@@ -101,6 +116,9 @@ impl Choice {
             Choice::Inertia(false) => "off",
             Choice::Inertia(true) => "on",
             Choice::Floor(false) => "free",
+            Choice::Frames(Frames::Off) => "off",
+            Choice::Frames(Frames::Robot) => "robot",
+            Choice::Frames(Frames::Elements) => "elements",
             Choice::Floor(true) => "above floor",
             Choice::TransformSize(GizmoSize::Pixels(_))
             | Choice::JointSize(GizmoSize::Pixels(_)) => "on screen",
@@ -129,6 +147,7 @@ impl Plugin for TogglesPlugin {
         app.init_resource::<GizmoChoice>()
             .init_resource::<Shifted>()
             .init_resource::<Beside>()
+            .init_resource::<Frames>()
             .add_systems(PostStartup, (build_panel, build_strip))
             .add_systems(Update, (show_choices, place_gizmos, frame_beside_strip));
     }
@@ -177,6 +196,14 @@ fn build_panel(
             vec![Choice::Inertia(false), Choice::Inertia(true)],
         ),
         ("camera", vec![Choice::Floor(true), Choice::Floor(false)]),
+        (
+            "frames",
+            vec![
+                Choice::Frames(Frames::Off),
+                Choice::Frames(Frames::Robot),
+                Choice::Frames(Frames::Elements),
+            ],
+        ),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -295,6 +322,9 @@ fn choose(
     mut gizmos: Query<&mut TransformGizmo>,
     mut joints: Query<&mut JointGizmo>,
     mut cameras: Query<&mut CameraBindings>,
+    mut frames: ResMut<Frames>,
+    robots: Query<(Entity, &EntityInstance)>,
+    showing: Query<Entity, With<FrameAxes>>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
         return;
@@ -330,6 +360,28 @@ fn choose(
         Choice::Inertia(on) => {
             for mut bindings in &mut cameras {
                 bindings.inertia = on;
+            }
+        }
+        Choice::Frames(wanted) => {
+            *frames = wanted;
+            for entity in &showing {
+                commands.entity(entity).remove::<FrameAxes>();
+            }
+            for (robot, instance) in &robots {
+                match wanted {
+                    Frames::Off => {}
+                    Frames::Robot => {
+                        commands.entity(robot).insert(FrameAxes::default());
+                    }
+                    Frames::Elements => {
+                        for targets in instance.bindings.elements.values() {
+                            commands.entity(targets.node).insert(FrameAxes {
+                                size: GizmoSize::World(0.1),
+                                ..default()
+                            });
+                        }
+                    }
+                }
             }
         }
         Choice::TransformSize(size) => {
@@ -409,6 +461,7 @@ fn show_choices(
     gizmos: Query<&TransformGizmo>,
     joints: Query<&JointGizmo>,
     cameras: Query<&CameraBindings>,
+    frames: Res<Frames>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
 ) {
     let gizmo = gizmos.iter().next();
@@ -432,6 +485,7 @@ fn show_choices(
                 .any(|bindings| bindings.floor.is_some() == on),
             Choice::TransformSize(size) => gizmo.is_some_and(|gizmo| gizmo.size == size),
             Choice::JointSize(size) => joints.iter().any(|joint| joint.size == size),
+            Choice::Frames(shown) => *frames == shown,
         };
         let colour = if current {
             LIT
