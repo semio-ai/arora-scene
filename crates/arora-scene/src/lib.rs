@@ -220,6 +220,7 @@ impl Plugin for ScenePlugin {
                 split_materials,
                 spawn_marker,
                 fit_orbit,
+                reveal_framed,
                 count_visible,
                 capture,
                 measure,
@@ -433,6 +434,7 @@ fn attach_joint(
         joint.default,
         joint.color.into(),
     );
+    gizmo.limited = joint.is_limited();
     if let Some(asked) = wanted.asked {
         let held = if joint.is_limited() {
             asked.clamp(joint.min, joint.max)
@@ -846,13 +848,22 @@ pub fn setup(
         commands.spawn((
             WorldAssetRoot(scene.clone()),
             Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
+            // Shown once framed, so its first frame on screen is a framed one
+            // rather than the view from wherever the camera stood before its
+            // bounds were known. Bounds are measured hidden all the same.
+            Visibility::Hidden,
+            AwaitingFrame,
         ));
     }
 
     // Placed properly once the model's bounds are known; see `take_census`.
-    // Lit and finished by `stage`, which reads what the host chose.
+    // Until then it stands where a robot of ordinary size would be framed
+    // from, at the options' angle, so the stage looks as it will and the
+    // glide to the real framing is short. Lit and finished by `stage`, which
+    // reads what the host chose.
     let mut camera = commands.spawn((
         Camera3d::default(),
+        standing(&opts, ORDINARY_CENTRE, ORDINARY_RADIUS * FRAMING_DISTANCE),
         // Bevy's controller, under Studio's bindings: left orbits, right pans,
         // the wheel zooms. A gizmo's handle takes a press before the camera
         // does. The world is Y-up, and the view never tips over the top.
@@ -904,42 +915,118 @@ pub const CAMERA_FLOOR: CameraFloor = CameraFloor {
     height: stage::FLOOR_HEIGHT + 0.01,
 };
 
+/// On a robot not yet shown, because it is not yet framed.
+#[derive(Component)]
+struct AwaitingFrame;
+
+/// How far out a framed camera stands, in the model's bounding radii: far
+/// enough that its bounding sphere fits the view with a little air.
+const FRAMING_DISTANCE: f32 = 2.6;
+
+/// What the camera stands back from before a model's bounds are known: a
+/// robot of ordinary size standing on the floor, about a metre and a half
+/// tall, so most robots need only a short glide once they are measured.
+const ORDINARY_CENTRE: Vec3 = Vec3::new(0.0, 0.75, 0.0);
+const ORDINARY_RADIUS: f32 = 0.85;
+
+/// How long the camera takes to ease from where it stood to the framed view.
+const GLIDE_SECONDS: f32 = 0.5;
+
+/// Where a camera stands to frame `centre` from `distance` away, at the
+/// options' angle round it and height above it, looking at it.
+fn standing(opts: &SceneOptions, centre: Vec3, distance: f32) -> Transform {
+    let toward = Vec3::new(
+        opts.angle.sin() * opts.pitch.cos(),
+        opts.pitch.sin(),
+        opts.angle.cos() * opts.pitch.cos(),
+    );
+    Transform::from_translation(centre + toward * distance).looking_at(centre, Vec3::Y)
+}
+
+/// A camera easing from where it stood to the framed view.
+#[derive(Component)]
+struct Glide {
+    from: Transform,
+    to: Transform,
+    elapsed: f32,
+}
+
+impl Glide {
+    /// Where the camera stands now: quick to leave and slow to arrive, so
+    /// the view settles onto the framing rather than stopping on it.
+    fn at(&self) -> Transform {
+        let t = (self.elapsed / GLIDE_SECONDS).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        Transform {
+            translation: self.from.translation.lerp(self.to.translation, eased),
+            rotation: self.from.rotation.slerp(self.to.rotation, eased),
+            scale: self.to.scale,
+        }
+    }
+}
+
+/// Shows each robot once the view is framed on it.
+fn reveal_framed(
+    framing: Res<Framing>,
+    mut robots: Query<(Entity, &mut Visibility), With<AwaitingFrame>>,
+    mut commands: Commands,
+) {
+    if !framing.fitted {
+        return;
+    }
+    for (robot, mut visibility) in &mut robots {
+        *visibility = Visibility::Inherited;
+        commands.entity(robot).remove::<AwaitingFrame>();
+    }
+}
+
 /// Frames the model once its bounds are known, and turns the view about it
 /// when the options ask for a moving camera.
 ///
 /// The controller works from wherever the camera stands, so framing is
 /// placing the camera: at the options' angle and height about the model's
 /// centre, far enough out that its bounding sphere fits the view with a little
-/// air, looking at the centre. The controller is told how deep that centre is,
+/// air, looking at the centre. A person watching sees it glide there from
+/// where it stood; a capture or a measurement has it placed at once. The controller is told how deep that centre is,
 /// so a gesture begun over empty space anchors there rather than somewhere
 /// arbitrary.
+#[allow(clippy::type_complexity)]
 fn fit_orbit(
     opts: Res<SceneOptions>,
     time: Res<Time>,
     framing: Res<Framing>,
     mut cameras: Query<
         (
+            Entity,
             &mut Transform,
             &mut PanOrbitCamera,
             &mut Projection,
             &mut CameraBindings,
+            Option<&mut Glide>,
         ),
         With<OrbitCamera>,
     >,
+    mut commands: Commands,
 ) {
     if !framing.fitted {
         return;
     }
-    let distance = framing.radius * 2.6;
-    for (mut transform, mut controller, mut projection, mut bindings) in &mut cameras {
+    let distance = framing.radius * FRAMING_DISTANCE;
+    for (camera, mut transform, mut controller, mut projection, mut bindings, glide) in &mut cameras
+    {
         if framing.is_changed() {
-            let toward = Vec3::new(
-                opts.angle.sin() * opts.pitch.cos(),
-                opts.pitch.sin(),
-                opts.angle.cos() * opts.pitch.cos(),
-            );
-            *transform = Transform::from_translation(framing.center + toward * distance)
-                .looking_at(framing.center, Vec3::Y);
+            let framed = standing(&opts, framing.center, distance);
+            // A capture or a measurement wants the framed view at once; a
+            // person watching gets there by a glide, not a jump.
+            if opts.offscreen || opts.screenshot.is_some() {
+                *transform = framed;
+            } else {
+                commands.entity(camera).insert(Glide {
+                    from: *transform,
+                    to: framed,
+                    elapsed: 0.0,
+                });
+            }
             controller.last_anchor_depth = -f64::from(distance);
             // Near enough to look a part over, never into it; far enough to
             // see the robot whole, never so far it shrinks to nothing.
@@ -955,6 +1042,21 @@ fn fit_orbit(
                 far: (framing.radius * 40.0).max(stage::GROUND_REACH),
                 ..default()
             });
+        }
+
+        // A glide gives way to a gesture at once, leaving the camera where
+        // the person took it; otherwise it eases on to the framed view.
+        if let Some(mut glide) = glide {
+            if controller.current_motion.is_moving() {
+                commands.entity(camera).remove::<Glide>();
+            } else {
+                glide.elapsed += time.delta_secs();
+                *transform = glide.at();
+                if glide.elapsed >= GLIDE_SECONDS {
+                    commands.entity(camera).remove::<Glide>();
+                }
+                continue;
+            }
         }
 
         // A turning camera is what the frame-time measurement wants; a still

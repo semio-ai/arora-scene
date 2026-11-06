@@ -147,38 +147,6 @@ impl Joint {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn joint(kind: JointKind, min: f32, max: f32) -> Joint {
-        Joint {
-            name: "joint".into(),
-            kind,
-            axis: Vec3::Z,
-            child_node: 0,
-            min,
-            max,
-            default: 0.0,
-            color: Srgba::WHITE,
-        }
-    }
-
-    /// A joint is held within its limits by its kind and its limits alone:
-    /// a revolute joint a whole turn wide still stops at its ends, and a
-    /// continuous one never does, whatever it carries.
-    #[test]
-    fn a_joint_is_limited_by_its_kind_and_its_limits() {
-        use std::f32::consts::PI;
-        assert!(joint(JointKind::Revolute, -PI, PI).is_limited());
-        assert!(joint(JointKind::Prismatic, 0.0, 0.1).is_limited());
-        assert!(!joint(JointKind::Continuous, 0.0, 2.0 * PI).is_limited());
-        assert!(!joint(JointKind::Fixed, 0.0, 1.0).is_limited());
-        assert!(!joint(JointKind::Revolute, f32::NEG_INFINITY, 1.0).is_limited());
-        assert!(!joint(JointKind::Revolute, 1.0, 1.0).is_limited());
-    }
-}
-
 /// Finds every joint the robot declares, resolved to the nodes they move.
 pub fn find_joints(bytes: &[u8]) -> Result<Vec<Joint>> {
     let gltf = glb_json_chunk(bytes)?;
@@ -347,4 +315,36 @@ fn read_vec(value: Option<&Json>) -> Option<Vec3> {
     }
     let at = |i: usize| values[i].as_f64().unwrap_or_default() as f32;
     Some(Vec3::new(at(0), at(1), at(2)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn joint(kind: JointKind, min: f32, max: f32) -> Joint {
+        Joint {
+            name: "joint".into(),
+            kind,
+            axis: Vec3::Z,
+            child_node: 0,
+            min,
+            max,
+            default: 0.0,
+            color: Srgba::WHITE,
+        }
+    }
+
+    /// A joint is held within its limits by its kind and its limits alone:
+    /// a revolute joint a whole turn wide still stops at its ends, and a
+    /// continuous one never does, whatever it carries.
+    #[test]
+    fn a_joint_is_limited_by_its_kind_and_its_limits() {
+        use std::f32::consts::PI;
+        assert!(joint(JointKind::Revolute, -PI, PI).is_limited());
+        assert!(joint(JointKind::Prismatic, 0.0, 0.1).is_limited());
+        assert!(!joint(JointKind::Continuous, 0.0, 2.0 * PI).is_limited());
+        assert!(!joint(JointKind::Fixed, 0.0, 1.0).is_limited());
+        assert!(!joint(JointKind::Revolute, f32::NEG_INFINITY, 1.0).is_limited());
+        assert!(!joint(JointKind::Revolute, 1.0, 1.0).is_limited());
+    }
 }
