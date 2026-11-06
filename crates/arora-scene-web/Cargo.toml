@@ -1,0 +1,46 @@
+[package]
+name = "arora-scene-web"
+version = "0.0.0"
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "A browser host for arora-scene, instrumented for load and frame-time measurement."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# One backend per build: Bevy chooses its wgpu backend at compile time.
+webgl2 = ["bevy/webgl2"]
+webgpu = ["bevy/webgpu"]
+
+[dependencies]
+arora-scene = { path = "../arora-scene", default-features = false }
+arora-visuals = { workspace = true, features = ["view"] }
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bevy = { workspace = true, features = [
+  "default_app",
+  "3d_bevy_render",
+  "scene",
+  "png",
+  "bevy_winit",
+  "std",
+  "picking",
+  "mesh_picking",
+  "bevy_ui",
+  "bevy_ui_render",
+  "bevy_text",
+  "default_font",
+  "bevy_ui_widgets",
+  "ui_picking",
+  "web",
+] }
+# Must equal the wasm-bindgen CLI's version exactly.
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = ["Window", "Performance"] }
+console_error_panic_hook = "0.1"

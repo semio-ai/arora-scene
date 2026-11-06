@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/arora-scene"]
+members = ["crates/arora-scene", "crates/arora-scene-web"]
 resolver = "2"
 
 [workspace.package]
