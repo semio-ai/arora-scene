@@ -68,10 +68,9 @@ enum Choice {
 enum Frames {
     #[default]
     Off,
-    /// The robot asset's own frame, at Studio's body-axes length: its glTF
-    /// root, not the entity holding it. A robot exported from a Z-up world
-    /// carries one root turning it into Bevy's Y-up, and every frame beneath
-    /// it is the asset's; the holder's is Bevy's world, not the robot's.
+    /// Where the robot is placed, at Studio's body-axes length, named as
+    /// Studio's Z-up world names it. Every robot has this frame, however its
+    /// asset was exported; each element's own frame is shown as authored.
     Robot,
     /// Every element's frame, short enough that the robot still shows
     /// through dozens of them.
@@ -328,8 +327,6 @@ fn choose(
     mut frames: ResMut<Frames>,
     robots: Query<(Entity, &EntityInstance)>,
     showing: Query<Entity, With<FrameAxes>>,
-    children: Query<&Children>,
-    names: Query<&Name>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
         return;
@@ -376,17 +373,10 @@ fn choose(
                 match wanted {
                     Frames::Off => {}
                     Frames::Robot => {
-                        // Bevy names an unnamed glTF node by its index, and
-                        // the scene's roots are the first such beneath the
-                        // holder.
-                        let root = children.iter_descendants(robot).find(|entity| {
-                            names
-                                .get(*entity)
-                                .is_ok_and(|name| name.as_str().starts_with("GltfNode"))
+                        commands.entity(robot).insert(FrameAxes {
+                            axes: TransformGizmo::Z_UP,
+                            ..default()
                         });
-                        if let Some(root) = root {
-                            commands.entity(root).insert(FrameAxes::default());
-                        }
                     }
                     Frames::Elements => {
                         for targets in instance.bindings.elements.values() {
