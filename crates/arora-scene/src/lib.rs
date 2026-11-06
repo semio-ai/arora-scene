@@ -1048,10 +1048,12 @@ fn fit_orbit(
             });
         }
 
-        // A glide gives way to a gesture at once, leaving the camera where
-        // the person took it; otherwise it eases on to the framed view.
+        // A glide gives way at once to a gesture, a scroll or a gizmo drag —
+        // a drag casts its ray from the camera, so a gliding camera would
+        // carry the held handle with it — leaving the camera where it is;
+        // otherwise it eases on to the framed view.
         if let Some(mut glide) = glide {
-            if controller.current_motion.is_moving() || scrolled {
+            if controller.current_motion.is_moving() || scrolled || dragging {
                 commands.entity(camera).remove::<Glide>();
             } else {
                 glide.elapsed += time.delta_secs();
