@@ -42,8 +42,7 @@ use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
 use arora_visuals::transform_gizmo::{
-    GizmoHandle, GizmoPart, GizmoPointer, GizmoSpace, TransformGizmo, TransformGizmoPlugin,
-    TransformMode, TransformModes,
+    GizmoPart, GizmoSpace, TransformGizmo, TransformGizmoPlugin, TransformMode, TransformModes,
 };
 use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
 use bevy::camera_controller::pan_orbit_camera::extensions::look_to::LookToTrigger;
@@ -115,11 +114,10 @@ pub struct SceneOptions {
     pub ghost_rim: f32,
     /// Frame the view beside a panel covering its right side.
     pub panel: bool,
-    /// Which reference frames show axes at the start: `off`, `robot` or
-    /// `elements`.
-    pub frames: String,
-    /// How they are drawn: `arrows`, `lines` or `both`.
-    pub frame_style: String,
+    /// Which reference frames show axes at the start.
+    pub frames: toggles::Frames,
+    /// How they are drawn.
+    pub frame_style: toggles::FrameStyle,
 }
 
 impl Default for SceneOptions {
@@ -146,8 +144,8 @@ impl Default for SceneOptions {
             ghost_wash_theme: true,
             ghost_rim: 2.0,
             panel: false,
-            frames: "off".into(),
-            frame_style: "arrows".into(),
+            frames: toggles::Frames::Off,
+            frame_style: toggles::FrameStyle::Arrows,
         }
     }
 }
@@ -198,8 +196,10 @@ impl Plugin for ScenePlugin {
                 ghost_robots,
                 hide_controls_on_ghosts,
                 wash_ghosts,
+                place_readout,
             ),
         )
+        .add_systems(Startup, spawn_readout)
         .init_resource::<arora_visuals::select::Selections>()
         .init_resource::<instance::Selected>()
         // Bevy's own mesh picking is not added: it casts base vertices,
@@ -390,15 +390,7 @@ pub fn mount_joint(
         asked: joint_value,
     })
     .add_systems(Startup, spawn_label)
-    .add_systems(
-        Update,
-        (
-            attach_joint,
-            hold_in_hand.after(arora_visuals::transform_gizmo::TransformGizmoSystems),
-            place_label,
-        )
-            .chain(),
-    );
+    .add_systems(Update, (attach_joint, hold_in_hand, place_label).chain());
 }
 
 /// Puts the joint gizmo on the body the joint moves, once the scene has
@@ -442,7 +434,7 @@ fn attach_joint(
         joint.color.into(),
     );
     if let Some(asked) = wanted.asked {
-        let held = if gizmo.is_limited() {
+        let held = if joint.is_limited() {
             asked.clamp(joint.min, joint.max)
         } else {
             asked
@@ -463,18 +455,14 @@ fn attach_joint(
     commands.spawn(gizmo);
 }
 
-/// Holds the joint control in hand when the options ask, since a headless
-/// capture has no pointer to hover it with.
-fn hold_in_hand(
-    opts: Res<SceneOptions>,
-    gizmos: Query<Entity, With<JointGizmo>>,
-    mut pointer: ResMut<GizmoPointer>,
-) {
-    if !opts.ring_active || pointer.hovered.is_some() || pointer.dragging.is_some() {
-        return;
-    }
-    if let Some(gizmo) = gizmos.iter().next() {
-        pointer.hovered = Some((gizmo, GizmoHandle::Joint));
+/// Draws the joint control as though in hand when the options ask, since a
+/// headless capture has no pointer to hover it with. Only its look: the
+/// pointer is left alone, so the view and picks work as ever.
+fn hold_in_hand(opts: Res<SceneOptions>, mut gizmos: Query<&mut JointGizmo>) {
+    for mut gizmo in &mut gizmos {
+        if gizmo.show_in_hand != opts.ring_active {
+            gizmo.show_in_hand = opts.ring_active;
+        }
     }
 }
 
@@ -574,6 +562,108 @@ fn place_label(
             };
             text_colour.0 = colour;
         }
+    }
+}
+
+/// What a held transform gizmo reads, one line to each axis, beside the
+/// gizmo: a host's own label, placed from the overlay as the joint's is.
+#[derive(Component)]
+struct Readout;
+
+/// One line of the readout, by its place in the stack.
+#[derive(Component)]
+struct ReadoutLine(usize);
+
+fn spawn_readout(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.09, 0.09, 0.11, 0.92)),
+            Visibility::Hidden,
+            Readout,
+        ))
+        .with_children(|readout| {
+            // A plane reads two axes; nothing reads more.
+            for line in 0..2 {
+                readout.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(13.0),
+                        ..default()
+                    },
+                    ReadoutLine(line),
+                ));
+            }
+        });
+}
+
+/// Shows a held transform gizmo's readings beside it, stacked, each in its
+/// axis's colour, and hides when no transform handle is held.
+fn place_readout(
+    overlay: Res<Overlay>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+    mut readouts: Query<(Entity, &mut Node, &mut Visibility, Has<UiTargetCamera>), With<Readout>>,
+    mut lines: Query<(&ReadoutLine, &mut Text, &mut TextColor, &mut Node), Without<Readout>>,
+    mut commands: Commands,
+) {
+    let Ok((readout, mut node, mut visibility, targeted)) = readouts.single_mut() else {
+        return;
+    };
+    if !targeted {
+        if let Some(camera) = cameras.iter().next() {
+            commands.entity(readout).insert(UiTargetCamera(camera));
+        }
+    }
+    let frame = &overlay.0;
+    let held = frame.pointer.as_ref().filter(|pointer| {
+        pointer.kind == GizmoKind::Transform && pointer.held && !pointer.readings.is_empty()
+    });
+    let anchor = held.and_then(|pointer| {
+        frame
+            .gizmos
+            .iter()
+            .find(|anchor| anchor.kind == GizmoKind::Transform && anchor.key == pointer.key)
+    });
+    let (Some(pointer), Some(anchor)) = (held, anchor) else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    visibility.set_if_neq(Visibility::Inherited);
+    node.left = Val::Px(anchor.screen.max_x + 14.0);
+    node.top = Val::Px(anchor.screen.min_y);
+    for (line, mut text, mut colour, mut line_node) in &mut lines {
+        let Some(reading) = pointer.readings.get(line.0) else {
+            line_node.display = Display::None;
+            continue;
+        };
+        line_node.display = Display::Flex;
+        text.0 = reading_text(reading);
+        colour.0 = reading
+            .axis
+            .map(|axis| arora_visuals::transform_gizmo::AXIS_COLOURS[axis])
+            .unwrap_or(Color::WHITE);
+    }
+}
+
+/// One reading as a line: its axis, its amount and its unit. Bevy's bundled
+/// fallback font carries ASCII only, so degrees are spelled out.
+fn reading_text(reading: &arora_visuals::overlay::Reading) -> String {
+    use arora_visuals::overlay::ReadingUnit;
+    let axis = match reading.axis {
+        Some(0) => "X",
+        Some(1) => "Y",
+        Some(2) => "Z",
+        _ => "",
+    };
+    match reading.unit {
+        ReadingUnit::Metres => format!("{axis}  {:+.3} m", reading.amount),
+        ReadingUnit::Degrees => format!("{axis}  {:+.1} deg", reading.amount),
+        ReadingUnit::Factor => format!("{axis}  x{:.2}", reading.amount),
     }
 }
 
@@ -827,13 +917,21 @@ fn fit_orbit(
     opts: Res<SceneOptions>,
     time: Res<Time>,
     framing: Res<Framing>,
-    mut cameras: Query<(&mut Transform, &mut PanOrbitCamera, &mut Projection), With<OrbitCamera>>,
+    mut cameras: Query<
+        (
+            &mut Transform,
+            &mut PanOrbitCamera,
+            &mut Projection,
+            &mut CameraBindings,
+        ),
+        With<OrbitCamera>,
+    >,
 ) {
     if !framing.fitted {
         return;
     }
     let distance = framing.radius * 2.6;
-    for (mut transform, mut controller, mut projection) in &mut cameras {
+    for (mut transform, mut controller, mut projection, mut bindings) in &mut cameras {
         if framing.is_changed() {
             let toward = Vec3::new(
                 opts.angle.sin() * opts.pitch.cos(),
@@ -843,6 +941,10 @@ fn fit_orbit(
             *transform = Transform::from_translation(framing.center + toward * distance)
                 .looking_at(framing.center, Vec3::Y);
             controller.last_anchor_depth = -f64::from(distance);
+            // Near enough to look a part over, never into it; far enough to
+            // see the robot whole, never so far it shrinks to nothing.
+            bindings.min_distance = framing.radius * 0.4;
+            bindings.max_distance = framing.radius * 20.0;
 
             // The default near/far pair assumes a metre-scale world; a model in
             // millimetres would sit entirely behind the far plane. The far
@@ -894,16 +996,6 @@ pub struct WashChoice {
     started: bool,
 }
 
-/// The ink a ghost is washed toward on the light theme when washing toward
-/// the theme: the light theme's own ink, as its grid's major lines are drawn
-/// in, so a ghost reads against the light ground as everything else on it
-/// does. On the dark theme the ink is white, which is Studio's wash.
-const LIGHT_INK: Color = Color::srgb(
-    0x28 as f32 / 255.0,
-    0x2c as f32 / 255.0,
-    0x34 as f32 / 255.0,
-);
-
 /// Sets how ghosts show, from the theme and the choice.
 fn wash_ghosts(
     opts: Res<SceneOptions>,
@@ -919,7 +1011,7 @@ fn wash_ghosts(
     let light = stage.is_some_and(|stage| stage.theme == stage::Theme::Light);
     let wanted = if choice.theme && light {
         GhostLook {
-            wash: LIGHT_INK,
+            wash: stage::LIGHT_INK,
             rim: choice.light_rim,
         }
     } else {
@@ -932,14 +1024,32 @@ fn wash_ghosts(
 
 /// Hides a joint control while the body it moves is ghosted, as Studio does:
 /// a ghost shows where the robot is, not something to take hold of.
+/// Every gizmo, of either kind, with its visibility.
+type Controls<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static JointGizmo>,
+        Option<&'static TransformGizmo>,
+        &'static mut Visibility,
+    ),
+    Or<(With<JointGizmo>, With<TransformGizmo>)>,
+>;
+
 fn hide_controls_on_ghosts(
-    mut gizmos: Query<(&JointGizmo, &mut Visibility)>,
+    mut gizmos: Controls,
     ghosts: Query<(), With<Ghost>>,
     parents: Query<&ChildOf>,
 ) {
-    for (gizmo, mut visibility) in &mut gizmos {
-        let ghosted = std::iter::once(gizmo.target)
-            .chain(parents.iter_ancestors(gizmo.target))
+    for (joint, transform, mut visibility) in &mut gizmos {
+        let Some(target) = joint
+            .map(|gizmo| gizmo.target)
+            .or(transform.map(|gizmo| gizmo.target))
+        else {
+            continue;
+        };
+        let ghosted = std::iter::once(target)
+            .chain(parents.iter_ancestors(target))
             .any(|entity| ghosts.contains(entity));
         let wanted = if ghosted {
             Visibility::Hidden
@@ -1058,6 +1168,21 @@ type VisibleMeshes<'w, 's> = Query<
     ),
 >;
 
+/// The robot's meshes with a material, its own or a ghost's in its place.
+type MaterialMeshes<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        Or<(
+            With<MeshMaterial3d<StandardMaterial>>,
+            With<MeshMaterial3d<arora_visuals::ghost::GhostMaterial>>,
+        )>,
+        Without<stage::StageMesh>,
+        Without<GizmoPart>,
+    ),
+>;
+
 /// Counts what the glTF actually brought in, and measures where it sits.
 ///
 /// Waits out the first half-second: transform propagation and bounds
@@ -1068,7 +1193,7 @@ fn take_census(
     mut census: ResMut<Census>,
     mut framing: ResMut<Framing>,
     meshes: CensusMeshes,
-    materials: Query<&MeshMaterial3d<StandardMaterial>>,
+    materials: MaterialMeshes,
     assets: Res<Assets<Mesh>>,
 ) {
     if census.taken || frames.elapsed < 0.5 {

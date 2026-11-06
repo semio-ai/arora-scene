@@ -70,7 +70,7 @@ enum Choice {
 /// How a frame's axes are drawn. Lines alone run one way, since nothing else
 /// says which way is positive; beside the arrows they run both ways.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
-enum FrameStyle {
+pub enum FrameStyle {
     #[default]
     Arrows,
     Lines,
@@ -79,7 +79,7 @@ enum FrameStyle {
 
 /// Which reference frames show their axes.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
-enum Frames {
+pub enum Frames {
     #[default]
     Off,
     /// Where the robot is placed, at Studio's body-axes length, named as
@@ -92,8 +92,8 @@ enum Frames {
 }
 
 /// Each gizmo's own default, fixed in the world as Studio's are.
-const TRANSFORM_IN_WORLD: GizmoSize = GizmoSize::World(0.25);
-const JOINT_IN_WORLD: GizmoSize = GizmoSize::World(0.2);
+const TRANSFORM_IN_WORLD: GizmoSize = arora_visuals::transform_gizmo::GIZMO_SIZE;
+const JOINT_IN_WORLD: GizmoSize = arora_visuals::joint_gizmo::JOINT_GIZMO_SIZE;
 /// The on-screen alternatives are each sized to match the default at the
 /// opening view, where Quori shows at about 427 pixels a metre, so switching
 /// changes only how a gizmo answers a zoom, not how big it starts.
@@ -582,16 +582,8 @@ fn start_frames(
     mut frames: ResMut<Frames>,
     mut style: ResMut<FrameStyle>,
 ) {
-    *frames = match opts.frames.as_str() {
-        "robot" => Frames::Robot,
-        "elements" => Frames::Elements,
-        _ => Frames::Off,
-    };
-    *style = match opts.frame_style.as_str() {
-        "lines" => FrameStyle::Lines,
-        "both" => FrameStyle::Both,
-        _ => FrameStyle::Arrows,
-    };
+    *frames = opts.frames;
+    *style = opts.frame_style;
 }
 
 /// Shows the chosen frames' axes in the chosen style, whenever either

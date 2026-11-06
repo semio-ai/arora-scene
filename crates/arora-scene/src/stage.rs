@@ -118,6 +118,15 @@ const DOME_RADIUS: f32 = GROUND_REACH * 0.5;
 /// The floor's height: zero, where Studio's grid lies.
 pub const FLOOR_HEIGHT: f32 = 0.0;
 
+/// The light theme's ink: its grid's major lines, and what a ghost is washed
+/// toward on the light ground, so a ghost reads against it as everything
+/// else on it does. On the dark theme the ink is white, Studio's wash.
+pub const LIGHT_INK: Color = Color::srgb(
+    0x28 as f32 / 255.0,
+    0x2c as f32 / 255.0,
+    0x34 as f32 / 255.0,
+);
+
 /// How far a full shadow darkens the floor.
 const FLOOR_SHADOW: f32 = 0.35;
 
@@ -275,10 +284,7 @@ fn floor_for(theme: Theme, look: &Look) -> FloorUniform {
             Color::srgb_u8(0xa0, 0xa0, 0xa0),
             Color::srgb_u8(0xdc, 0xe0, 0xe8),
         ),
-        Theme::Light => (
-            Color::srgb_u8(0x66, 0x66, 0x66),
-            Color::srgb_u8(0x28, 0x2c, 0x34),
-        ),
+        Theme::Light => (Color::srgb_u8(0x66, 0x66, 0x66), LIGHT_INK),
     };
     FloorUniform {
         colour: linear(look.ground),
@@ -722,6 +728,23 @@ mod tests {
             back.iter().all(|(parent, ..)| *parent == Some(anchor)),
             "nothing is left hanging off the camera",
         );
+    }
+
+    /// With shadows off, no light casts one; with them on, the key does.
+    #[test]
+    fn shadows_off_leaves_no_light_casting() {
+        let casting = |shadows: bool| {
+            let (mut world, ..) = world(stage(Environment::Plain, Lighting::World, Theme::Dark));
+            world.resource_mut::<SceneOptions>().shadows = shadows;
+            world.run_system_once(apply_lighting).unwrap();
+            world
+                .query::<&DirectionalLight>()
+                .iter(&world)
+                .filter(|light| light.shadow_maps_enabled)
+                .count()
+        };
+        assert_eq!(casting(true), 1, "the key casts");
+        assert_eq!(casting(false), 0, "nothing casts");
     }
 
     /// The two anchors hold the same lights: same colours, same strengths, same

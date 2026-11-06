@@ -80,8 +80,7 @@ Three rules hold the model together:
   gizmo primitives disagree about their own plane, imported models are Y-up
   where the Studio scene is Z-up, and `Torus::new` takes inner/outer radii
   where three's `TorusGeometry` takes radius/tube. Each of these renders
-  something wrong without erroring. `JointPlane` is the small version of the
-  answer.
+  something wrong without erroring.
 
 ## Known gaps
 
@@ -89,8 +88,7 @@ Three rules hold the model together:
   `arora-visuals`, so `mount_screen` hands back a texture no one writes. The
   seam works; the content does not arrive through it yet.
 - **wasm is unbuilt and unmeasured**, and it gates every performance number
-  here. `bevy_panorbit_camera` belongs to the binary rather than the library
-  for this reason, but that has not been proven by building without it.
+  here.
 - **Assets load before the app runs.** `mount_screen` and `mount_joint` both
   read the GLB from disk up front, which is why they are the host's to call.
   Making these asset-driven is what lets a running scene gain, swap and lose

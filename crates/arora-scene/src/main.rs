@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use arora_scene::stage::{Environment, Lighting, Theme};
+use arora_scene::toggles::{FrameStyle, Frames};
 use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::select::{Highlight, Selection};
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformModes};
@@ -49,7 +50,8 @@ struct Cli {
     /// The robot GLB to render.
     robot: PathBuf,
 
-    /// Stop after this many seconds and report. Zero runs until closed.
+    /// Stop after this many seconds and report. Zero runs until the window is
+    /// closed, so an offscreen run, having no window, must give a length.
     #[arg(long, default_value_t = 0.0)]
     seconds: f32,
 
@@ -249,6 +251,10 @@ fn parse_selection(arg: &str) -> Result<Selection, String> {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = <Cli as clap::Parser>::parse();
+    if cli.offscreen && cli.seconds <= 0.0 {
+        log::error!("--offscreen needs --seconds: with no window, nothing else ends the run");
+        std::process::exit(2);
+    }
 
     let (assets, glb) = match asset_root_and_name(&cli.robot) {
         Ok(split) => split,
@@ -319,8 +325,16 @@ fn main() {
         ghost_wash_theme: cli.ghost_wash == "theme",
         ghost_rim: cli.ghost_rim,
         panel: cli.panel,
-        frames: cli.frames.clone(),
-        frame_style: cli.frame_style.clone(),
+        frames: match cli.frames.as_str() {
+            "robot" => Frames::Robot,
+            "elements" => Frames::Elements,
+            _ => Frames::Off,
+        },
+        frame_style: match cli.frame_style.as_str() {
+            "lines" => FrameStyle::Lines,
+            "both" => FrameStyle::Both,
+            _ => FrameStyle::Arrows,
+        },
         gizmo_space: if cli.gizmo_local {
             GizmoSpace::Local
         } else {

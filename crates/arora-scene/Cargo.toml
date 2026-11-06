@@ -27,10 +27,6 @@ log = { workspace = true }
 # The GLB extension parse, and the asset semantics above it.
 arora-visuals = { workspace = true, features = ["view", "view_gizmo", "camera_input"] }
 
-# Camera controls. A hand-rolled orbit gets the drag conventions wrong on some
-# devices and has no inertia, focus handling or zoom limits; this is the
-# ecosystem's answer and tracks Bevy's releases.
-
 # The 3d stack: glTF loading, PBR (which carries shadows), the core pipeline,
 # windowing, and mesh picking. Composed rather than taking the `3d` collection,
 # which pulls `default_platform` — gamepads, clipboard, fonts, x11/wayland.
