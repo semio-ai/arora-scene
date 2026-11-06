@@ -1,0 +1,150 @@
+//! Drawing a frame only when something in it changed.
+//!
+//! A robot scene in an editor sits still most of the time, and a frame drawn
+//! when nothing moved is the same picture again at the full cost of one. So
+//! the app waits for winit to wake it — any input, a window event, a value
+//! pushed from outside — and every frame decides whether it needs the next:
+//!
+//! - **anything moved**: a global transform changed this frame. That covers
+//!   the camera however it moves (a gesture, the controller's smoothing, the
+//!   opening glide, an orbit), a gizmo drag, a joint, a bound value, a scene
+//!   arriving. One rule rather than one per feature, so a new thing that
+//!   moves needs nothing added here;
+//! - **anything appeared or was restyled**: a mesh added, a mesh or material
+//!   or image asset added or changed, a visibility toggled, a selection or
+//!   stage choice changed;
+//! - **work is still owed**: the camera has not been framed yet, a robot has
+//!   not spawned, or a pipeline is still compiling — each of which only
+//!   finishes on a later frame;
+//! - **something animates by itself**: the aurora's light changes every frame
+//!   in its shader, so while a curtain is in view the scene ticks at
+//!   [`Redraw::aurora_hz`] rather than at the display's rate.
+//!
+//! Requesting the next frame from the one that saw a change costs one frame
+//! after the last change, which is what lets motion that continues on its own
+//! — inertia, a glide — carry itself frame to frame.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bevy::prelude::*;
+use bevy::render::render_resource::PipelineCache;
+use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::window::RequestRedraw;
+use bevy::winit::{UpdateMode, WinitSettings};
+
+use crate::aurora::AuroraCurtain;
+use crate::stage::{Palette, Stage};
+use crate::{Framing, Glide};
+
+/// How the scene redraws when it is not changing.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct Redraw {
+    /// Frames a second while an aurora curtain is in view. Its light drifts
+    /// slowly; this is how smoothly.
+    pub aurora_hz: f32,
+}
+
+impl Default for Redraw {
+    fn default() -> Self {
+        Self { aurora_hz: 30.0 }
+    }
+}
+
+/// Whether the render world still has pipelines compiling, as of its last
+/// frame. Shared by the two worlds, since a waiting pipeline is a render
+/// world fact and the decision to draw again is the main world's.
+#[derive(Resource, Clone, Default)]
+struct PipelinesPending(Arc<AtomicBool>);
+
+/// Puts the app in reactive mode and requests a frame whenever one is owed.
+/// A host that wants continuous frames leaves it out.
+pub struct RedrawOnChangePlugin;
+
+impl Plugin for RedrawOnChangePlugin {
+    fn build(&self, app: &mut App) {
+        let pending = PipelinesPending::default();
+        app.insert_resource(WinitSettings {
+            focused_mode: UpdateMode::reactive(Duration::MAX),
+            unfocused_mode: UpdateMode::reactive(Duration::MAX),
+        })
+        .init_resource::<Redraw>()
+        .insert_resource(pending.clone())
+        .add_systems(Last, (request_redraw, tick_for_aurora));
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .insert_resource(pending)
+                .add_systems(Render, note_pipelines.in_set(RenderSystems::Cleanup));
+        }
+    }
+}
+
+fn note_pipelines(cache: Res<PipelineCache>, pending: Res<PipelinesPending>) {
+    pending
+        .0
+        .store(cache.waiting_pipelines().next().is_some(), Ordering::Relaxed);
+}
+
+/// What says another frame is owed.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Owed<'w, 's> {
+    framing: Res<'w, Framing>,
+    pending: Res<'w, PipelinesPending>,
+    glides: Query<'w, 's, (), With<Glide>>,
+    moved: Query<'w, 's, (), Changed<GlobalTransform>>,
+    shown: Query<'w, 's, (), Changed<Visibility>>,
+    added: Query<'w, 's, (), Added<Mesh3d>>,
+    unspawned: Query<'w, 's, (), (With<WorldAssetRoot>, Without<Children>)>,
+    stage: Res<'w, Stage>,
+    palette: Res<'w, Palette>,
+    selections: Res<'w, arora_visuals::select::Selections>,
+    meshes: MessageReader<'w, 's, AssetEvent<Mesh>>,
+    materials: MessageReader<'w, 's, AssetEvent<StandardMaterial>>,
+    images: MessageReader<'w, 's, AssetEvent<Image>>,
+}
+
+impl Owed<'_, '_> {
+    fn any(&mut self) -> bool {
+        // Every reader is drained, so a change is seen once.
+        let assets = self.meshes.read().count() + self.materials.read().count()
+            + self.images.read().count()
+            > 0;
+        assets
+            || !self.framing.fitted
+            || self.pending.0.load(Ordering::Relaxed)
+            || !self.glides.is_empty()
+            || !self.moved.is_empty()
+            || !self.shown.is_empty()
+            || !self.added.is_empty()
+            || !self.unspawned.is_empty()
+            || self.stage.is_changed()
+            || self.palette.is_changed()
+            || self.selections.is_changed()
+    }
+}
+
+fn request_redraw(mut owed: Owed, mut redraw: MessageWriter<RequestRedraw>) {
+    if owed.any() {
+        redraw.write(RequestRedraw);
+    }
+}
+
+/// Ticks at the aurora's rate while a curtain was in view last frame, and not
+/// at all otherwise.
+fn tick_for_aurora(
+    rate: Res<Redraw>,
+    curtains: Query<&ViewVisibility, With<AuroraCurtain>>,
+    mut settings: ResMut<WinitSettings>,
+) {
+    let wait = if rate.aurora_hz > 0.0 && curtains.iter().any(|seen| seen.get()) {
+        Duration::from_secs_f32(1.0 / rate.aurora_hz)
+    } else {
+        Duration::MAX
+    };
+    let mode = UpdateMode::reactive(wait);
+    if settings.focused_mode != mode {
+        settings.focused_mode = mode;
+        settings.unfocused_mode = mode;
+    }
+}

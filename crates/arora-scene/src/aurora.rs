@@ -237,7 +237,7 @@ impl Material for AuroraMaterial {
 
 /// A curtain, by its index in [`shapes`].
 #[derive(Component)]
-struct AuroraCurtain {
+pub(crate) struct AuroraCurtain {
     index: usize,
 }
 

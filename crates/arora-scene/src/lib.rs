@@ -21,10 +21,12 @@
 
 pub mod aurora;
 pub mod instance;
+pub mod redraw;
 pub mod robot;
 pub mod stage;
 pub mod toggles;
 pub mod tune;
+pub mod values;
 
 use std::path::PathBuf;
 
@@ -189,6 +191,7 @@ impl Plugin for ScenePlugin {
             arora_visuals::ghost::GhostPlugin,
             arora_visuals::axes::FrameAxesPlugin,
             arora_visuals::active_area::ActiveAreaPlugin,
+            values::ValuesPlugin,
         ))
         .init_resource::<WashChoice>()
         // Read by the scene's gizmo systems; the test window's toggles set it.
@@ -294,10 +297,10 @@ fn on_mounted_layer(layers: Option<&RenderLayers>) -> bool {
 /// guess renders an empty frame that still reports a healthy frame rate — so
 /// the camera is fitted to the bounds the meshes report.
 #[derive(Resource, Default)]
-struct Framing {
+pub(crate) struct Framing {
     center: Vec3,
     radius: f32,
-    fitted: bool,
+    pub(crate) fitted: bool,
 }
 
 const WARMUP_SECONDS: f32 = 2.0;
@@ -973,7 +976,7 @@ fn above_floor(pose: Transform, centre: Vec3, floor: Option<CameraFloor>) -> Tra
 
 /// A camera easing from where it stood to the framed view.
 #[derive(Component)]
-struct Glide {
+pub(crate) struct Glide {
     from: Transform,
     to: Transform,
     elapsed: f32,

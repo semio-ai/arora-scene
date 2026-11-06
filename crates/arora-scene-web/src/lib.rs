@@ -21,7 +21,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use arora_scene::instance::{RobotMeta, Selected};
+use arora_scene::redraw::RedrawOnChangePlugin;
 use arora_scene::stage::Environment;
+use arora_scene::values::{ApplyValues, ValueWrite, ValueWrites};
+use arora_visuals::meta::FeatureKind;
+use arora_visuals::value::Decoded;
+use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
+use std::cell::RefCell;
 use arora_scene::{OrbitCamera, RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
 use arora_visuals::select::Selection;
@@ -68,6 +74,9 @@ struct Options {
     /// The camera's starting height above the model, in radians; negative
     /// looks up from below its middle.
     pitch: Option<f32>,
+    /// Draw every frame, as a game loop does, instead of only frames in
+    /// which something changed.
+    continuous: bool,
 }
 
 static FRAME_START: AtomicU64 = AtomicU64::new(0);
@@ -133,7 +142,6 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
                 ..default()
             }),
     )
-    .insert_resource(WinitSettings::continuous())
     .add_plugins(ScenePlugin)
     .insert_resource(SceneOptions {
         still: opts.still,
@@ -158,6 +166,13 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
             mark("robots-spawned");
         }
     });
+    if opts.continuous {
+        app.insert_resource(WinitSettings::continuous());
+    } else {
+        app.add_plugins(RedrawOnChangePlugin);
+    }
+    app.add_systems(Startup, keep_waker)
+        .add_systems(Update, take_pushed.before(ApplyValues));
     if let Some([x, y, w, h]) = opts.panel {
         app.insert_resource(Panel(Rect::new(x, y, x + w, y + h)))
             .add_systems(Update, place_panel);
@@ -205,6 +220,83 @@ fn frame_ends() {
     let mut frames = FRAMES.lock().unwrap();
     frames.push(start);
     frames.push(end - start);
+    // Every push this frame applied has now been drawn.
+    let drawn = std::mem::take(&mut *APPLYING.lock().unwrap());
+    LATENCIES
+        .lock()
+        .unwrap()
+        .extend(drawn.into_iter().map(|pushed| end - pushed));
+}
+
+thread_local! {
+    /// Wakes a reactive event loop from outside it. The page calls in between
+    /// frames, when the loop may be waiting indefinitely.
+    static WAKE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Pushes waiting for the next frame, each with when it was pushed.
+static PUSHED: Mutex<Vec<(ValueWrite, f64)>> = Mutex::new(Vec::new());
+/// When each push the current frame applied was pushed.
+static APPLYING: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+/// Push-to-drawn times, in milliseconds: from the call to the end of the
+/// frame that drew it.
+static LATENCIES: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+
+fn keep_waker(proxy: Res<EventLoopProxyWrapper>) {
+    let proxy = (**proxy).clone();
+    WAKE.with(|wake| {
+        *wake.borrow_mut() = Some(Box::new(move || {
+            let _ = proxy.send_event(WinitUserEvent::WakeUp);
+        }));
+    });
+}
+
+/// Hands the page's pushes to the scene's one place for applied values.
+fn take_pushed(mut writes: ResMut<ValueWrites>) {
+    let pushed = std::mem::take(&mut *PUSHED.lock().unwrap());
+    if pushed.is_empty() {
+        return;
+    }
+    let mut applying = APPLYING.lock().unwrap();
+    for (write, at) in pushed {
+        writes.0.push(write);
+        applying.push(at);
+    }
+}
+
+/// Writes one feature value: `target` an animatable or element id, `feature`
+/// as `RobotData` names it (`rotation`, `translation`, `color`, ...), and
+/// one value or three.
+#[wasm_bindgen]
+pub fn push_value(target: String, feature: String, values: Vec<f32>) -> Result<(), JsValue> {
+    let feature = FeatureKind::from_name(&feature, &[])
+        .ok_or_else(|| JsValue::from_str(&format!("unknown feature {feature:?}")))?;
+    let value = match values.as_slice() {
+        [s] => Decoded::Scalar(*s),
+        [x, y, z] => Decoded::Triple([*x, *y, *z]),
+        _ => return Err(JsValue::from_str("one value or three")),
+    };
+    PUSHED.lock().unwrap().push((
+        ValueWrite {
+            instance: None,
+            target,
+            feature,
+            value,
+        },
+        now(),
+    ));
+    WAKE.with(|wake| {
+        if let Some(wake) = wake.borrow().as_ref() {
+            wake();
+        }
+    });
+    Ok(())
+}
+
+/// Push-to-drawn times since the last read, in milliseconds.
+#[wasm_bindgen]
+pub fn take_latencies() -> Vec<f64> {
+    std::mem::take(&mut *LATENCIES.lock().unwrap())
 }
 
 #[derive(Resource, Default)]
