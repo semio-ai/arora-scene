@@ -10,16 +10,20 @@
 //! from the default view they recede down the line toward the hills.
 //!
 //! The ribbons sway mostly side to side, with a little rise and fall. That
-//! motion is applied to their vertices on the CPU each frame — a few hundred
-//! of them — which costs less to keep right than a vertex shader of its own
-//! would. Their light comes from `aurora.wesl`, drawn additively.
+//! motion is applied to their vertices on the CPU — a few hundred of them —
+//! and only for a curtain the camera saw last frame: rewriting a mesh
+//! re-uploads it, which is the whole cost, and a curtain out of view has no
+//! use for it. Each curtain's bounds cover everywhere its sway can carry it,
+//! so the engine's own frustum culling decides what is in view and a curtain
+//! turned back into view is found there. Their light comes from
+//! `aurora.wesl`, drawn additively.
 //!
 //! [`Aurora`] holds what is tuned by eye; the tuning panel moves it.
 
 use std::f32::consts::TAU;
 
 use bevy::asset::{embedded_asset, embedded_path, AssetPath, RenderAssetUsages};
-use bevy::camera::visibility::NoFrustumCulling;
+use bevy::camera::primitives::Aabb;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
@@ -223,6 +227,34 @@ impl Material for AuroraMaterial {
 #[derive(Component)]
 struct AuroraCurtain(usize);
 
+/// The box a curtain can reach anywhere in its sway, with the aurora as tuned
+/// and the scene opening the way it does.
+///
+/// Taken from the bounds of every term in [`wave`] rather than from the
+/// ribbon as it stands, so it holds for the whole run without being
+/// remeasured: the box a mesh is given once is otherwise the box it was
+/// spawned with.
+fn reach(shape: &Curtain, aurora: &Aurora, opts: &SceneOptions) -> Aabb {
+    let (forward, right) = ahead(opts);
+    // Side to side: the bend, and the two waves at full stretch together.
+    let side = shape.bend.abs() + 1.5 * aurora.wave.abs();
+    let rise = 0.2 * aurora.wave.abs();
+    let low = aurora.altitude + shape.lift - rise;
+    let high = aurora.altitude + shape.lift + rise + shape.height;
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for along in [shape.from, shape.to] {
+        for across in [shape.offset - side, shape.offset + side] {
+            for up in [low, high] {
+                let corner = forward * along + right * across + Vec3::Y * up;
+                min = min.min(corner);
+                max = max.max(corner);
+            }
+        }
+    }
+    Aabb::from_min_max(min, max)
+}
+
 pub struct AuroraPlugin;
 
 impl Plugin for AuroraPlugin {
@@ -235,7 +267,7 @@ impl Plugin for AuroraPlugin {
                 Update,
                 (
                     show_at_night.run_if(resource_changed::<Stage>),
-                    tint.run_if(resource_changed::<Aurora>),
+                    (tint, bound).run_if(resource_changed::<Aurora>),
                     wave,
                 ),
             );
@@ -254,10 +286,12 @@ fn ahead(opts: &SceneOptions) -> (Vec3, Vec3) {
 
 fn hang_curtains(
     mut commands: Commands,
+    aurora: Res<Aurora>,
+    opts: Res<SceneOptions>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<AuroraMaterial>>,
 ) {
-    for (index, _) in shapes().iter().enumerate() {
+    for (index, shape) in shapes().iter().enumerate() {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
@@ -288,9 +322,9 @@ fn hang_curtains(
             MeshMaterial3d(materials.add(AuroraMaterial::default())),
             Transform::IDENTITY,
             Visibility::Hidden,
-            // Its bounds are measured once, from the empty ribbon it starts as,
-            // and the wave never updates them.
-            NoFrustumCulling,
+            // Given rather than measured: measured, they would be the empty
+            // ribbon's, and the wave never remeasures them.
+            reach(shape, &aurora, &opts),
             NotShadowCaster,
             NotShadowReceiver,
             StageMesh,
@@ -336,7 +370,20 @@ fn tint(
     }
 }
 
-/// Moves every ribbon's vertices to where the wave has them now.
+/// Keeps each curtain's bounds over its whole sway when the aurora is
+/// retuned: a wider wave or a higher altitude moves where it can reach.
+fn bound(
+    aurora: Res<Aurora>,
+    opts: Res<SceneOptions>,
+    mut curtains: Query<(&AuroraCurtain, &mut Aabb)>,
+) {
+    let shapes = shapes();
+    for (curtain, mut aabb) in &mut curtains {
+        *aabb = reach(&shapes[curtain.0], &aurora, &opts);
+    }
+}
+
+/// Moves every ribbon the camera saw last frame to where the wave has it now.
 ///
 /// The ribbon sways side to side, in two waves of different lengths along it
 /// travelling in opposite directions, and its lower edge rises and falls a
@@ -346,14 +393,17 @@ fn wave(
     time: Res<Time>,
     aurora: Res<Aurora>,
     opts: Res<SceneOptions>,
-    curtains: Query<(&AuroraCurtain, &Mesh3d, &Visibility)>,
+    curtains: Query<(&AuroraCurtain, &Mesh3d, &Visibility, &ViewVisibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let shapes = shapes();
     let (forward, right) = ahead(&opts);
     let t = time.elapsed_secs() * aurora.speed * TAU;
-    for (curtain, handle, visibility) in &curtains {
-        if *visibility == Visibility::Hidden {
+    for (curtain, handle, visibility, seen) in &curtains {
+        // Visibility is decided after this runs, so this is last frame's
+        // answer. A curtain turned into view is drawn once where it last
+        // stood, which its bounds still cover, and moves from the next.
+        if *visibility == Visibility::Hidden || !seen.get() {
             continue;
         }
         let shape = &shapes[curtain.0];
