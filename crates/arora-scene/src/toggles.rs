@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 
 use arora_visuals::active_area::ActiveArea;
-use arora_visuals::axes::FrameAxes;
+use arora_visuals::axes::{FrameAxes, FrameLines};
 use arora_visuals::camera_input::CameraBindings;
 use arora_visuals::ghost::Ghost;
 use arora_visuals::joint_gizmo::JointGizmo;
@@ -61,6 +61,20 @@ enum Choice {
     JointSize(GizmoSize),
     /// Which reference frames show their axes.
     Frames(Frames),
+    /// How a frame's axes are drawn.
+    FrameStyle(FrameStyle),
+    /// Whether a held gizmo handle shows its axis lines.
+    Guides(bool),
+}
+
+/// How a frame's axes are drawn. Lines alone run one way, since nothing else
+/// says which way is positive; beside the arrows they run both ways.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum FrameStyle {
+    #[default]
+    Arrows,
+    Lines,
+    Both,
 }
 
 /// Which reference frames show their axes.
@@ -121,6 +135,11 @@ impl Choice {
             Choice::Frames(Frames::Off) => "off",
             Choice::Frames(Frames::Robot) => "robot",
             Choice::Frames(Frames::Elements) => "elements",
+            Choice::FrameStyle(FrameStyle::Arrows) => "arrows",
+            Choice::FrameStyle(FrameStyle::Lines) => "lines",
+            Choice::FrameStyle(FrameStyle::Both) => "both",
+            Choice::Guides(false) => "off",
+            Choice::Guides(true) => "on",
             Choice::Floor(true) => "above floor",
             Choice::TransformSize(GizmoSize::Pixels(_))
             | Choice::JointSize(GizmoSize::Pixels(_)) => "on screen",
@@ -150,8 +169,12 @@ impl Plugin for TogglesPlugin {
             .init_resource::<Shifted>()
             .init_resource::<Beside>()
             .init_resource::<Frames>()
-            .add_systems(PostStartup, (build_panel, build_strip))
-            .add_systems(Update, (show_choices, place_gizmos, frame_beside_strip));
+            .init_resource::<FrameStyle>()
+            .add_systems(PostStartup, (build_panel, build_strip, start_frames))
+            .add_systems(
+                Update,
+                (show_choices, place_gizmos, frame_beside_strip, show_frames),
+            );
     }
 }
 
@@ -206,6 +229,14 @@ fn build_panel(
                 Choice::Frames(Frames::Elements),
             ],
         ),
+        (
+            "frame style",
+            vec![
+                Choice::FrameStyle(FrameStyle::Arrows),
+                Choice::FrameStyle(FrameStyle::Lines),
+                Choice::FrameStyle(FrameStyle::Both),
+            ],
+        ),
     ];
     if opts.gizmo.is_some() {
         const MODES: [TransformMode; 3] = [
@@ -223,6 +254,10 @@ fn build_panel(
                 Choice::Space(GizmoSpace::World),
                 Choice::Space(GizmoSpace::Local),
             ],
+        ));
+        rows.push((
+            "gizmo guides",
+            vec![Choice::Guides(true), Choice::Guides(false)],
         ));
         rows.push((
             "gizmo size",
@@ -325,8 +360,7 @@ fn choose(
     mut joints: Query<&mut JointGizmo>,
     mut cameras: Query<&mut CameraBindings>,
     mut frames: ResMut<Frames>,
-    robots: Query<(Entity, &EntityInstance)>,
-    showing: Query<Entity, With<FrameAxes>>,
+    mut style: ResMut<FrameStyle>,
 ) {
     let Ok(choice) = choices.get(click.entity) else {
         return;
@@ -364,29 +398,11 @@ fn choose(
                 bindings.inertia = on;
             }
         }
-        Choice::Frames(wanted) => {
-            *frames = wanted;
-            for entity in &showing {
-                commands.entity(entity).remove::<FrameAxes>();
-            }
-            for (robot, instance) in &robots {
-                match wanted {
-                    Frames::Off => {}
-                    Frames::Robot => {
-                        commands.entity(robot).insert(FrameAxes {
-                            axes: TransformGizmo::Z_UP,
-                            ..default()
-                        });
-                    }
-                    Frames::Elements => {
-                        for targets in instance.bindings.elements.values() {
-                            commands.entity(targets.node).insert(FrameAxes {
-                                size: GizmoSize::World(0.1),
-                                ..default()
-                            });
-                        }
-                    }
-                }
+        Choice::Frames(wanted) => *frames = wanted,
+        Choice::FrameStyle(wanted) => *style = wanted,
+        Choice::Guides(on) => {
+            for mut gizmo in &mut gizmos {
+                gizmo.guides = on;
             }
         }
         Choice::TransformSize(size) => {
@@ -467,6 +483,7 @@ fn show_choices(
     joints: Query<&JointGizmo>,
     cameras: Query<&CameraBindings>,
     frames: Res<Frames>,
+    style: Res<FrameStyle>,
     mut buttons: Query<(&Choice, &Hovered, &mut BackgroundColor)>,
 ) {
     let gizmo = gizmos.iter().next();
@@ -491,6 +508,8 @@ fn show_choices(
             Choice::TransformSize(size) => gizmo.is_some_and(|gizmo| gizmo.size == size),
             Choice::JointSize(size) => joints.iter().any(|joint| joint.size == size),
             Choice::Frames(shown) => *frames == shown,
+            Choice::FrameStyle(shown) => *style == shown,
+            Choice::Guides(on) => gizmo.is_some_and(|gizmo| gizmo.guides == on),
         };
         let colour = if current {
             LIT
@@ -555,6 +574,81 @@ fn build_strip(
             TextColor(MUTED),
             Pickable::IGNORE,
         ));
+}
+
+/// Starts with the frames and style the options name.
+fn start_frames(
+    opts: Res<SceneOptions>,
+    mut frames: ResMut<Frames>,
+    mut style: ResMut<FrameStyle>,
+) {
+    *frames = match opts.frames.as_str() {
+        "robot" => Frames::Robot,
+        "elements" => Frames::Elements,
+        _ => Frames::Off,
+    };
+    *style = match opts.frame_style.as_str() {
+        "lines" => FrameStyle::Lines,
+        "both" => FrameStyle::Both,
+        _ => FrameStyle::Arrows,
+    };
+}
+
+/// Shows the chosen frames' axes in the chosen style, whenever either
+/// changes or a robot's elements are joined.
+fn show_frames(
+    frames: Res<Frames>,
+    style: Res<FrameStyle>,
+    robots: Query<(Entity, &EntityInstance)>,
+    joined: Query<(), Changed<EntityInstance>>,
+    showing: Query<Entity, With<FrameAxes>>,
+    mut commands: Commands,
+) {
+    if !frames.is_changed() && !style.is_changed() && joined.is_empty() {
+        return;
+    }
+    let drawn = |axes: FrameAxes| FrameAxes {
+        arrows: *style != FrameStyle::Lines,
+        lines: (*style != FrameStyle::Arrows).then_some(FrameLines {
+            both_ways: *style == FrameStyle::Both,
+            ..default()
+        }),
+        ..axes
+    };
+    let mut wanted: Vec<(Entity, FrameAxes)> = Vec::new();
+    for (robot, instance) in &robots {
+        match *frames {
+            Frames::Off => {}
+            Frames::Robot => wanted.push((
+                robot,
+                drawn(FrameAxes {
+                    axes: TransformGizmo::Z_UP,
+                    ..default()
+                }),
+            )),
+            Frames::Elements => {
+                for targets in instance.bindings.elements.values() {
+                    wanted.push((
+                        targets.node,
+                        drawn(FrameAxes {
+                            size: GizmoSize::World(0.1),
+                            ..default()
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+    // Replaced in place where a frame still shows, so its axes rebuild once
+    // rather than being taken away and built again.
+    for entity in &showing {
+        if !wanted.iter().any(|(shown, _)| *shown == entity) {
+            commands.entity(entity).remove::<FrameAxes>();
+        }
+    }
+    for (entity, axes) in wanted {
+        commands.entity(entity).insert(axes);
+    }
 }
 
 /// Frames the view beside the strip, or across the whole canvas, and shows

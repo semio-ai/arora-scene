@@ -115,6 +115,11 @@ pub struct SceneOptions {
     pub ghost_rim: f32,
     /// Frame the view beside a panel covering its right side.
     pub panel: bool,
+    /// Which reference frames show axes at the start: `off`, `robot` or
+    /// `elements`.
+    pub frames: String,
+    /// How they are drawn: `arrows`, `lines` or `both`.
+    pub frame_style: String,
 }
 
 impl Default for SceneOptions {
@@ -141,6 +146,8 @@ impl Default for SceneOptions {
             ghost_wash_theme: true,
             ghost_rim: 2.0,
             panel: false,
+            frames: "off".into(),
+            frame_style: "arrows".into(),
         }
     }
 }

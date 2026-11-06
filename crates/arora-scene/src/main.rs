@@ -183,6 +183,14 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     panel: bool,
 
+    /// Show reference-frame axes: on the robot, or on every element.
+    #[arg(long, default_value = "off", value_parser = ["off", "robot", "elements"])]
+    frames: String,
+
+    /// How shown frames are drawn: arrows, dashed lines, or both.
+    #[arg(long, default_value = "arrows", value_parser = ["arrows", "lines", "both"])]
+    frame_style: String,
+
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
     #[arg(long, value_parser = parse_colours)]
@@ -311,6 +319,8 @@ fn main() {
         ghost_wash_theme: cli.ghost_wash == "theme",
         ghost_rim: cli.ghost_rim,
         panel: cli.panel,
+        frames: cli.frames.clone(),
+        frame_style: cli.frame_style.clone(),
         gizmo_space: if cli.gizmo_local {
             GizmoSpace::Local
         } else {
