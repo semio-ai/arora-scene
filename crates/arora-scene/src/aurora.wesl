@@ -1,5 +1,10 @@
 // An aurora curtain: light hanging from a ribbon high over the night sky.
 //
+// The vertex stage hangs and sways the ribbon: each vertex carries only its
+// place along the ribbon and whether it is the lower or upper edge, in `uv`,
+// and is moved to where the wave has it now, the same motion for every frame
+// at no cost to the CPU.
+//
 // `uv.x` runs along the ribbon and `uv.y` up the curtain. A curtain is
 // brightest near its lower edge and fades upward into the dark; it fades in
 // and out along its length so it has no ends; and it is
@@ -10,7 +15,11 @@
 // of noise over the world picks where on the three-colour gradient each point
 // falls, so curtains differ from one another and from moment to moment.
 
-import bevy_pbr::render::{forward_io::VertexOutput, mesh_view_bindings::{globals, view}};
+import bevy_pbr::render::{
+    forward_io::{Vertex, VertexOutput, decompress_vertex},
+    mesh_view_bindings::{globals, view},
+    view_transformations::position_world_to_clip,
+};
 import super::horizon::above_hills;
 
 struct Aurora {
@@ -25,6 +34,67 @@ struct Aurora {
     colour_speed: f32,
     colour_lift: f32,
     _padding: vec3<f32>,
+    // offset, from, to, lift; height, bend, bends, phase; wave, speed,
+    // altitude: see `Curtain` and `Aurora`.
+    place: vec4<f32>,
+    form: vec4<f32>,
+    motion: vec4<f32>,
+    // The way the curtains run, and the way they are spaced.
+    forward: vec4<f32>,
+    right: vec4<f32>,
+}
+
+const TAU: f32 = 6.283185307;
+const PI: f32 = 3.141592654;
+
+// Where a point of the curtain is now: `along` it from nought to one, on its
+// lower edge (`up` nought) or its upper (`up` one). The ribbon sways side to
+// side in two waves of different lengths travelling in opposite directions,
+// its lower edge rises and falls a little, and the top lags the bottom so the
+// curtain folds rather than moving as a flat sheet.
+fn hang(along: f32, up: f32) -> vec3<f32> {
+    let offset = aurora.place.x;
+    let ahead = mix(aurora.place.y, aurora.place.z, along);
+    let lift = aurora.place.w;
+    let height = aurora.form.x;
+    let bend = aurora.form.y;
+    let bends = aurora.form.z;
+    let phase = aurora.form.w;
+    let wave = aurora.motion.x;
+    let t = globals.time * aurora.motion.y * TAU;
+    let altitude = aurora.motion.z;
+    let lag = 0.5 * up;
+    let sway = wave * sin(TAU * 2.3 * along + t + phase + lag)
+        + 0.5 * wave * sin(TAU * 5.1 * along - 0.7 * t + phase);
+    let rise = 0.2 * wave * sin(TAU * 3.7 * along - 1.3 * t + phase);
+    let bent = offset + bend * sin(PI * bends * along + phase);
+    return aurora.forward.xyz * ahead
+        + vec3(0.0, altitude + lift + rise + height * up, 0.0)
+        + aurora.right.xyz * (bent + sway);
+}
+
+@vertex
+fn vertex(vertex_in: Vertex) -> VertexOutput {
+    let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
+    let along = vertex.uv.x;
+    let up = vertex.uv.y;
+    let position = hang(along, up);
+    // Across the sheet: from the run of the lower edge either side of this
+    // column and the column's own rise, so the edge fade turns smoothly along
+    // the ribbon.
+    let step = 1.0 / 240.0;
+    let run = hang(min(along + step, 1.0), 0.0) - hang(max(along - step, 0.0), 0.0);
+    let rise = hang(along, 1.0) - hang(along, 0.0);
+    var normal = cross(run, rise);
+    if (dot(normal, normal) < 1e-12) {
+        normal = aurora.right.xyz;
+    }
+    var out: VertexOutput;
+    out.world_position = vec4(position, 1.0);
+    out.position = position_world_to_clip(position);
+    out.world_normal = normalize(normal);
+    out.uv = vertex.uv;
+    return out;
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> aurora: Aurora;

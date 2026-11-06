@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use arora_scene::instance::{RobotMeta, Selected};
-use arora_scene::aurora::Aurora;
 use arora_scene::stage::Environment;
 use arora_scene::{OrbitCamera, RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
@@ -69,9 +68,6 @@ struct Options {
     /// The camera's starting height above the model, in radians; negative
     /// looks up from below its middle.
     pitch: Option<f32>,
-    /// How many times a second the aurora's curtains are reshaped; nought is
-    /// every frame.
-    aurora_hz: Option<f32>,
 }
 
 static FRAME_START: AtomicU64 = AtomicU64::new(0);
@@ -162,12 +158,6 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
             mark("robots-spawned");
         }
     });
-    if let Some(hz) = opts.aurora_hz {
-        app.insert_resource(Aurora {
-            wave_hz: hz,
-            ..default()
-        });
-    }
     if let Some([x, y, w, h]) = opts.panel {
         app.insert_resource(Panel(Rect::new(x, y, x + w, y + h)))
             .add_systems(Update, place_panel);
