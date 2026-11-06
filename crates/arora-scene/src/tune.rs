@@ -11,18 +11,19 @@
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{
-    Slider, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange,
+    Slider, SliderDragState, SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick,
+    ValueChange,
 };
 
 use crate::aurora::Aurora;
 use crate::stage::{Look, Palette, Stage};
-use crate::OrbitCamera;
+use crate::{OrbitCamera, OrbitHeld};
 
 /// What a slider controls.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 enum Knob {
-    /// The ground's grey level, `#000000` to `#333333`: black up to Studio's
-    /// own dark ground, the range a dark theme's floor is worth trying in.
+    /// The ground's grey level, `#000000` to `#ffffff`, so either theme's
+    /// ground sits within it.
     Floor,
     /// The gradient's midpoint, in degrees above the horizon.
     Midpoint,
@@ -171,6 +172,7 @@ impl Plugin for TunePlugin {
             .add_systems(
                 Update,
                 (
+                    hold_orbit,
                     follow_theme.run_if(resource_changed::<Stage>),
                     place_thumbs,
                     print_values.run_if(
@@ -288,6 +290,18 @@ fn slider(knob: Knob, value: f32) -> impl Bundle {
             ),
         ],
     )
+}
+
+/// Holds the camera's turning still while the pointer is over the panel or
+/// a slider is being dragged, which can carry on past the panel's edge.
+fn hold_orbit(
+    panels: Query<&Hovered, With<TunePanel>>,
+    sliders: Query<&SliderDragState, With<Knob>>,
+    mut held: ResMut<OrbitHeld>,
+) {
+    let hovered = panels.iter().any(|hovered| hovered.0);
+    let dragging = sliders.iter().any(|state| state.dragging);
+    held.set_if_neq(OrbitHeld(hovered || dragging));
 }
 
 /// A slider moved: take its value, and write it into the current theme.

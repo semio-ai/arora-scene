@@ -216,6 +216,7 @@ impl Plugin for ScenePlugin {
         .init_resource::<Frames>()
         .init_resource::<Census>()
         .init_resource::<Framing>()
+        .init_resource::<OrbitHeld>()
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -1010,9 +1011,10 @@ impl Glide {
 /// it stood; a capture or a measurement has it placed at once. The controller is told how deep that centre is,
 /// so a gesture begun over empty space anchors there rather than somewhere
 /// arbitrary.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn fit_orbit(
     opts: Res<SceneOptions>,
+    held: Res<OrbitHeld>,
     time: Res<Time>,
     framing: Res<Framing>,
     pointer: Option<Res<arora_visuals::transform_gizmo::GizmoPointer>>,
@@ -1105,8 +1107,9 @@ fn fit_orbit(
 
         // A turning camera is what the frame-time measurement wants; a still
         // one is what inspecting a joint wants. It turns only while nobody is
-        // moving it, so a gesture is never fought.
-        if !opts.still && !controller.current_motion.is_moving() && !dragging {
+        // moving it, so a gesture is never fought, and not while a control
+        // over the view holds it.
+        if !opts.still && !held.0 && !controller.current_motion.is_moving() && !dragging {
             transform.rotate_around(
                 framing.center,
                 Quat::from_rotation_y(time.delta_secs() * 0.35),
@@ -1128,6 +1131,13 @@ fn ghost_robots(
         commands.entity(instance).insert(Ghost);
     }
 }
+
+/// Whether something over the view is holding the camera's own turning
+/// still, as a panel being worked is: a view turning under a slider being
+/// dragged is the slider and the view changing at once. Set each frame by
+/// whatever holds it; gestures are kept off such controls by picking.
+#[derive(Resource, Default, PartialEq)]
+pub struct OrbitHeld(pub bool);
 
 /// How ghosts show: washed toward the theme's ink rather than white, and how
 /// strong their rim is on the light theme. The toggles change it, and the
@@ -1642,6 +1652,52 @@ mod tests {
             let at = glide(GLIDE_SECONDS * step as f32 / 1000.0).at();
             assert!(at.translation.y >= 0.0, "below its end at step {step}");
         }
+    }
+
+    /// The camera's own turning stops while something holds it, and
+    /// resumes when it lets go.
+    #[test]
+    fn a_held_orbit_does_not_turn() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<MouseWheel>()
+            // Placed at once rather than glided to, so the turning starts on
+            // the first frame.
+            .insert_resource(SceneOptions {
+                offscreen: true,
+                ..default()
+            })
+            .init_resource::<OrbitHeld>()
+            .insert_resource(Framing {
+                center: Vec3::ZERO,
+                radius: 1.0,
+                fitted: true,
+            })
+            .add_systems(Update, fit_orbit);
+        let camera = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 1.0, 3.0),
+                PanOrbitCamera::default(),
+                Projection::default(),
+                CameraBindings::default(),
+                OrbitCamera,
+            ))
+            .id();
+        let turned = |app: &mut App| {
+            let before = *app.world().get::<Transform>(camera).unwrap();
+            for _ in 0..3 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.update();
+            }
+            let after = *app.world().get::<Transform>(camera).unwrap();
+            !before.translation.abs_diff_eq(after.translation, 1e-6)
+        };
+        app.update();
+        app.world_mut().resource_mut::<OrbitHeld>().0 = true;
+        assert!(!turned(&mut app), "held");
+        app.world_mut().resource_mut::<OrbitHeld>().0 = false;
+        assert!(turned(&mut app), "let go");
     }
 
     /// A view asked for ends the opening glide.
