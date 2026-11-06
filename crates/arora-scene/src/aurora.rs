@@ -71,6 +71,12 @@ pub struct Aurora {
     /// not at all to a whole colour's worth, as a real curtain turns from
     /// green below to red above.
     pub colour_lift: f32,
+    /// How many times a second the curtains' shapes are moved; nought moves
+    /// them every frame. Their light still changes every frame, in the
+    /// shader. At the default speed a curtain sways a fraction of a metre a
+    /// second kilometres away, so between rewrites at a few a second nothing
+    /// moves that an eye could see, and each rewrite costs an upload.
+    pub wave_hz: f32,
 }
 
 impl Default for Aurora {
@@ -84,6 +90,7 @@ impl Default for Aurora {
             colour_scale: 2000.0,
             colour_speed: 0.175,
             colour_lift: 0.15,
+            wave_hz: 15.0,
             colours: [
                 Color::srgb_u8(0x14, 0xe8, 0x1e),
                 Color::srgb_u8(0xd0, 0x2a, 0x5c),
@@ -223,9 +230,15 @@ impl Material for AuroraMaterial {
     }
 }
 
-/// A curtain, by its index in [`shapes`].
+/// A curtain, by its index in [`shapes`], and when its shape was last moved.
 #[derive(Component)]
-struct AuroraCurtain(usize);
+struct AuroraCurtain {
+    index: usize,
+    /// Seconds since startup; `None` until it is first moved, and again
+    /// whenever a frame passes it by unseen, so it moves on the frame it is
+    /// next seen rather than waiting for the next tick.
+    waved: Option<f32>,
+}
 
 /// The box a curtain can reach anywhere in its sway, with the aurora as tuned
 /// and the scene opening the way it does.
@@ -328,7 +341,10 @@ fn hang_curtains(
             NotShadowCaster,
             NotShadowReceiver,
             StageMesh,
-            AuroraCurtain(index),
+            AuroraCurtain {
+                index,
+                waved: None,
+            },
         ));
     }
 }
@@ -353,7 +369,7 @@ fn tint(
 ) {
     let shapes = shapes();
     for (curtain, handle) in &curtains {
-        let shape = &shapes[curtain.0];
+        let shape = &shapes[curtain.index];
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.aurora = AuroraUniform {
                 colours: aurora
@@ -379,7 +395,7 @@ fn bound(
 ) {
     let shapes = shapes();
     for (curtain, mut aabb) in &mut curtains {
-        *aabb = reach(&shapes[curtain.0], &aurora, &opts);
+        *aabb = reach(&shapes[curtain.index], &aurora, &opts);
     }
 }
 
@@ -393,20 +409,31 @@ fn wave(
     time: Res<Time>,
     aurora: Res<Aurora>,
     opts: Res<SceneOptions>,
-    curtains: Query<(&AuroraCurtain, &Mesh3d, &Visibility, &ViewVisibility)>,
+    mut curtains: Query<(&mut AuroraCurtain, &Mesh3d, &Visibility, &ViewVisibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let shapes = shapes();
     let (forward, right) = ahead(&opts);
-    let t = time.elapsed_secs() * aurora.speed * TAU;
-    for (curtain, handle, visibility, seen) in &curtains {
+    let now = time.elapsed_secs();
+    let t = now * aurora.speed * TAU;
+    let interval = if aurora.wave_hz > 0.0 {
+        1.0 / aurora.wave_hz
+    } else {
+        0.0
+    };
+    for (mut curtain, handle, visibility, seen) in &mut curtains {
         // Visibility is decided after this runs, so this is last frame's
         // answer. A curtain turned into view is drawn once where it last
         // stood, which its bounds still cover, and moves from the next.
         if *visibility == Visibility::Hidden || !seen.get() {
+            curtain.waved = None;
             continue;
         }
-        let shape = &shapes[curtain.0];
+        if curtain.waved.is_some_and(|waved| now - waved < interval) {
+            continue;
+        }
+        curtain.waved = Some(now);
+        let shape = &shapes[curtain.index];
         let Some(mut mesh) = meshes.get_mut(&handle.0) else {
             continue;
         };
