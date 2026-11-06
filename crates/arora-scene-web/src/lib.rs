@@ -122,6 +122,10 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
+            .build()
+            // Present because a dependency compiles code against it, not
+            // because the scene uses it.
+            .disable::<bevy::state::app::StatesPlugin>()
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     canvas: Some(canvas),

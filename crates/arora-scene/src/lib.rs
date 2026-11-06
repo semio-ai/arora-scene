@@ -25,6 +25,7 @@ pub mod redraw;
 pub mod robot;
 pub mod stage;
 pub mod toggles;
+#[cfg(feature = "test_window")]
 pub mod tune;
 pub mod values;
 
