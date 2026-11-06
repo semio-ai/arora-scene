@@ -863,7 +863,11 @@ pub fn setup(
     // what the host chose.
     let mut camera = commands.spawn((
         Camera3d::default(),
-        standing(&opts, ORDINARY_CENTRE, STARTING_DISTANCE),
+        above_floor(
+            standing(&opts, ORDINARY_CENTRE, STARTING_DISTANCE),
+            ORDINARY_CENTRE,
+            Some(CAMERA_FLOOR),
+        ),
         // Bevy's controller, under Studio's bindings: left orbits, right pans,
         // the wheel zooms. A gizmo's handle takes a press before the camera
         // does. The world is Y-up, and the view never tips over the top.
@@ -951,6 +955,21 @@ fn standing(opts: &SceneOptions, centre: Vec3, distance: f32) -> Transform {
     Transform::from_translation(centre + toward * distance).looking_at(centre, Vec3::Y)
 }
 
+/// `pose` raised onto `floor` where it stands below it, still looking at
+/// `centre`: a camera told to stand at a low angle stands on the floor
+/// instead, as the floor would put it.
+fn above_floor(pose: Transform, centre: Vec3, floor: Option<CameraFloor>) -> Transform {
+    let Some(floor) = floor else {
+        return pose;
+    };
+    let up = floor.up.as_vec3();
+    let below = floor.height - pose.translation.dot(up);
+    if below <= 0.0 {
+        return pose;
+    }
+    Transform::from_translation(pose.translation + up * below).looking_at(centre, up)
+}
+
 /// A camera easing from where it stood to the framed view.
 #[derive(Component)]
 struct Glide {
@@ -1022,7 +1041,13 @@ fn fit_orbit(
     for (camera, mut transform, mut controller, mut projection, mut bindings, glide) in &mut cameras
     {
         if framing.is_changed() {
-            let framed = standing(&opts, framing.center, distance);
+            // Above the floor, as the pose it glides from is: a glide eases
+            // its height evenly between the two, so it never dips below.
+            let framed = above_floor(
+                standing(&opts, framing.center, distance),
+                framing.center,
+                bindings.floor,
+            );
             // A capture or a measurement wants the framed view at once; a
             // person watching gets there by a glide, not a jump.
             if opts.offscreen || opts.screenshot.is_some() {
@@ -1247,6 +1272,7 @@ fn look_from(
     look: On<LookFrom>,
     cameras: Query<(&GlobalTransform, &PanOrbitCamera, Option<&CameraBindings>), With<OrbitCamera>>,
     mut turns: MessageWriter<LookToTrigger>,
+    mut commands: Commands,
 ) {
     let Ok((at, controller, bindings)) = cameras.get(look.camera) else {
         return;
@@ -1255,6 +1281,9 @@ fn look_from(
     if floor.is_some_and(|floor| look.from.dot(*floor.up) < -0.5) {
         return;
     }
+    // A turn asked for ends the opening glide, as a gesture does, or the
+    // glide would set the camera over the turn every frame until it ended.
+    commands.entity(look.camera).remove::<Glide>();
     // Looking from a side is facing back across from it.
     let facing = -look.from.as_vec3().as_dvec3();
     turns.write(LookToTrigger::auto_snap_up_direction(
@@ -1582,6 +1611,47 @@ mod tests {
         let turn = reader.read(turns).next().expect("a turn was asked for");
         assert_eq!(turn.camera, camera);
         turn.target_facing_direction
+    }
+
+    /// A pose below the floor is raised onto it and still looks at its
+    /// centre; one above it, or with no floor, is left as it is.
+    #[test]
+    fn a_pose_below_the_floor_is_raised_onto_it() {
+        let centre = Vec3::new(0.0, 0.7, 0.0);
+        let low = Transform::from_xyz(0.0, -1.0, 3.0).looking_at(centre, Vec3::Y);
+        let raised = above_floor(low, centre, Some(CAMERA_FLOOR));
+        assert!((raised.translation.y - CAMERA_FLOOR.height).abs() < 1e-5);
+        let facing = (centre - raised.translation).normalize();
+        assert!(raised.forward().as_vec3().abs_diff_eq(facing, 1e-5));
+        let high = Transform::from_xyz(0.0, 2.0, 3.0).looking_at(centre, Vec3::Y);
+        assert_eq!(above_floor(high, centre, Some(CAMERA_FLOOR)), high);
+        assert_eq!(above_floor(low, centre, None), low);
+    }
+
+    /// A view asked for ends the opening glide.
+    #[test]
+    fn a_view_asked_for_ends_the_glide() {
+        let mut app = App::new();
+        app.add_message::<LookToTrigger>().add_observer(look_from);
+        let camera = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                PanOrbitCamera::default(),
+                OrbitCamera,
+                Glide {
+                    from: Transform::default(),
+                    to: Transform::default(),
+                    elapsed: 0.0,
+                },
+            ))
+            .id();
+        app.world_mut().trigger(LookFrom {
+            camera,
+            from: Dir3::X,
+        });
+        app.world_mut().flush();
+        assert!(app.world().get::<Glide>(camera).is_none());
     }
 
     /// With a floor, a view from beneath it is declined; every other view is
