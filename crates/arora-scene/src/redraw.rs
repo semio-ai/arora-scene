@@ -5,7 +5,9 @@
 //! the app waits for winit to wake it — any input, a window event, a value
 //! pushed from outside — and every frame decides whether it needs the next:
 //!
-//! - **anything moved**: a global transform changed this frame. That covers
+//! - **anything moved**: a global transform is not where it was last frame.
+//!   Compared by value, because propagation rewrites a child's transform
+//!   whenever its parent's was written, moved or not. That covers
 //!   the camera however it moves (a gesture, the controller's smoothing, the
 //!   opening glide, an orbit), a gizmo drag, a joint, a bound value, a scene
 //!   arriving. One rule rather than one per feature, so a new thing that
@@ -92,7 +94,9 @@ struct Owed<'w, 's> {
     framing: Res<'w, Framing>,
     pending: Res<'w, PipelinesPending>,
     glides: Query<'w, 's, (), With<Glide>>,
-    moved: Query<'w, 's, (), Changed<GlobalTransform>>,
+    moved: Query<'w, 's, (Entity, &'static GlobalTransform), Changed<GlobalTransform>>,
+    /// Where each entity whose transform was written last stood.
+    stood: Local<'s, bevy::ecs::entity::EntityHashMap<GlobalTransform>>,
     shown: Query<'w, 's, (), Changed<Visibility>>,
     added: Query<'w, 's, (), Added<Mesh3d>>,
     unspawned: Query<'w, 's, (), (With<WorldAssetRoot>, Without<Children>)>,
@@ -105,7 +109,20 @@ struct Owed<'w, 's> {
 }
 
 impl Owed<'_, '_> {
+    /// Whether any written transform actually changed. Every one is looked at,
+    /// so the record stays current for the next frame's comparison.
+    fn moved_any(&mut self) -> bool {
+        let mut moved = false;
+        for (entity, global) in &self.moved {
+            if self.stood.insert(entity, *global) != Some(*global) {
+                moved = true;
+            }
+        }
+        moved
+    }
+
     fn any(&mut self) -> bool {
+        let moved = self.moved_any();
         // Every reader is drained, so a change is seen once.
         let assets = self.meshes.read().count() + self.materials.read().count()
             + self.images.read().count()
@@ -114,7 +131,7 @@ impl Owed<'_, '_> {
             || !self.framing.fitted
             || self.pending.0.load(Ordering::Relaxed)
             || !self.glides.is_empty()
-            || !self.moved.is_empty()
+            || moved
             || !self.shown.is_empty()
             || !self.added.is_empty()
             || !self.unspawned.is_empty()
