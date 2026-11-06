@@ -11,9 +11,9 @@
 //! than written again here.
 
 use anyhow::{anyhow, Result};
+use arora_visuals::glb_json_chunk;
 use bevy::prelude::*;
 use serde_json::Value as Json;
-use arora_visuals::glb_json_chunk;
 
 /// A screen the robot declares: a size in metres and a place to put it, with
 /// no geometry of its own. Whoever renders it builds the quad.
@@ -133,11 +133,17 @@ fn colour_of_axis(axis: Vec3) -> Srgba {
 }
 
 impl Joint {
-    /// Whether the joint's value is bounded at all. A `continuous` joint turns
-    /// forever and a `fixed` one does not turn, so neither takes a limited
-    /// control.
+    /// Whether the joint's value is held within its limits: a revolute or
+    /// prismatic joint whose limits are finite and in order. A `continuous`
+    /// joint turns forever whatever limits it carries, and a `fixed` one does
+    /// not move. Limits a whole turn or more apart are still limits — a
+    /// revolute joint authored `[-π, π]` stops at either end — though a
+    /// control may draw them as a full circle.
     pub fn is_limited(&self) -> bool {
-        self.min.is_finite() && self.max.is_finite() && self.max > self.min
+        matches!(self.kind, JointKind::Revolute | JointKind::Prismatic)
+            && self.min.is_finite()
+            && self.max.is_finite()
+            && self.max > self.min
     }
 }
 
@@ -309,4 +315,36 @@ fn read_vec(value: Option<&Json>) -> Option<Vec3> {
     }
     let at = |i: usize| values[i].as_f64().unwrap_or_default() as f32;
     Some(Vec3::new(at(0), at(1), at(2)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn joint(kind: JointKind, min: f32, max: f32) -> Joint {
+        Joint {
+            name: "joint".into(),
+            kind,
+            axis: Vec3::Z,
+            child_node: 0,
+            min,
+            max,
+            default: 0.0,
+            color: Srgba::WHITE,
+        }
+    }
+
+    /// A joint is held within its limits by its kind and its limits alone:
+    /// a revolute joint a whole turn wide still stops at its ends, and a
+    /// continuous one never does, whatever it carries.
+    #[test]
+    fn a_joint_is_limited_by_its_kind_and_its_limits() {
+        use std::f32::consts::PI;
+        assert!(joint(JointKind::Revolute, -PI, PI).is_limited());
+        assert!(joint(JointKind::Prismatic, 0.0, 0.1).is_limited());
+        assert!(!joint(JointKind::Continuous, 0.0, 2.0 * PI).is_limited());
+        assert!(!joint(JointKind::Fixed, 0.0, 1.0).is_limited());
+        assert!(!joint(JointKind::Revolute, f32::NEG_INFINITY, 1.0).is_limited());
+        assert!(!joint(JointKind::Revolute, 1.0, 1.0).is_limited());
+    }
 }

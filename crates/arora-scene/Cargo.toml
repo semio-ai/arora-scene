@@ -25,12 +25,7 @@ serde_json = { workspace = true }
 log = { workspace = true }
 
 # The GLB extension parse, and the asset semantics above it.
-arora-visuals = { workspace = true, features = ["view"] }
-
-# Camera controls. A hand-rolled orbit gets the drag conventions wrong on some
-# devices and has no inertia, focus handling or zoom limits; this is the
-# ecosystem's answer and tracks Bevy's releases.
-bevy_panorbit_camera = { version = "0.36", default-features = false }
+arora-visuals = { workspace = true, features = ["view", "view_gizmo", "camera_input"] }
 
 # The 3d stack: glTF loading, PBR (which carries shadows), the core pipeline,
 # windowing, and mesh picking. Composed rather than taking the `3d` collection,
@@ -51,6 +46,9 @@ bevy = { workspace = true, features = [
   "bevy_ui_render",
   "bevy_text",
   "default_font",
+  # The tuning panel's sliders, and the pointer reaching them.
+  "bevy_ui_widgets",
+  "ui_picking",
 ] }
 
 clap = { version = "4", features = ["derive"], optional = true }

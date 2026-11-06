@@ -7,9 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
+use arora_scene::stage::{Environment, Lighting, Theme};
+use arora_scene::toggles::{FrameStyle, Frames};
 use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
+use arora_visuals::select::{Highlight, Selection};
+use arora_visuals::transform_gizmo::{GizmoSpace, TransformModes};
 use bevy::prelude::*;
-use bevy::window::PresentMode;
+use bevy::window::{ExitCondition, PresentMode};
+use bevy::winit::WinitSettings;
 
 /// Splits a path to an asset into the root Bevy resolves under and the name
 /// within it.
@@ -25,9 +30,9 @@ use bevy::window::PresentMode;
 /// nothing. Resolving it here also turns a missing file into an error naming
 /// the path, rather than an asset load that quietly never completes.
 fn asset_root_and_name(path: &Path) -> anyhow::Result<(PathBuf, String)> {
-    let full = path.canonicalize().map_err(|error| {
-        anyhow::anyhow!("cannot read {}: {error}", path.display())
-    })?;
+    let full = path
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
     let name = full
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("{} names no file", path.display()))?
@@ -45,7 +50,8 @@ struct Cli {
     /// The robot GLB to render.
     robot: PathBuf,
 
-    /// Stop after this many seconds and report. Zero runs until closed.
+    /// Stop after this many seconds and report. Zero runs until the window is
+    /// closed, so an offscreen run, having no window, must give a length.
     #[arg(long, default_value_t = 0.0)]
     seconds: f32,
 
@@ -72,7 +78,7 @@ struct Cli {
     ///
     /// Note that wgpu falls back to Fifo where a platform cannot honour this —
     /// macOS among them, where it does nothing at all. Use `--offscreen`
-    /// there.
+    /// there, which runs with no window to pace.
     #[arg(long, default_value_t = false)]
     uncapped: bool,
 
@@ -93,9 +99,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     screen: bool,
 
-    /// Outline these elements, by the ids `RobotData` gives them. Repeatable.
-    #[arg(long = "select")]
-    select: Vec<String>,
+    /// Outline these elements, by the ids `RobotData` gives them, each
+    /// optionally in a colour of its own: `ID` or `ID=#rrggbb`. Repeatable.
+    #[arg(long = "select", value_parser = parse_selection)]
+    select: Vec<Selection>,
 
     /// Print the elements the robot declares and exit.
     #[arg(long, default_value_t = false)]
@@ -119,14 +126,138 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     unique_materials: bool,
 
-    /// Render into an offscreen target and leave the window empty.
+    /// Render into an offscreen target, with no window and nothing pacing the
+    /// loop, so the frame time is the work alone.
+    ///
+    /// A window would be presented even with nothing drawn into it, and
+    /// macOS paces a presented window to the display whatever the present
+    /// mode asks, so an offscreen run with a window measures the display.
     #[arg(long, default_value_t = false)]
     offscreen: bool,
+
+    /// Light or dark.
+    #[arg(long, value_enum, default_value_t)]
+    theme: Theme,
+
+    /// What fills the frame above the horizon.
+    #[arg(long, value_enum, default_value_t)]
+    environment: Environment,
+
+    /// What the rig is fixed to.
+    #[arg(long, value_enum, default_value_t)]
+    lighting: Lighting,
+
+    /// How strongly a selection is filled with its outline colour, from 0 to 1.
+    #[arg(long, default_value_t = 0.0)]
+    outline_fill: f32,
+
+    /// Show sliders for tuning the current theme's floor and sky by eye.
+    #[arg(long, default_value_t = false)]
+    tune: bool,
+
+    /// Put a transform gizmo on the robot, offering these modes: `all`, or any
+    /// of `move`, `turn` and `scale` joined by commas. Hold M, R or S to show
+    /// only one.
+    #[arg(long, value_parser = parse_modes)]
+    gizmo: Option<TransformModes>,
+
+    /// Move and turn the gizmo along the robot's own axes rather than the
+    /// world's.
+    #[arg(long, default_value_t = false)]
+    gizmo_local: bool,
+
+    /// Draw the robot as a ghost, as Studio draws a robot's measured state.
+    #[arg(long, default_value_t = false)]
+    ghost: bool,
+
+    /// What a ghost is washed toward: `theme`, the theme's ink, so a ghost
+    /// reads on the light ground too, or `white`, as Studio has it.
+    #[arg(long, default_value = "theme", value_parser = ["white", "theme"])]
+    ghost_wash: String,
+
+    /// How strong a ghost's rim is against Studio's on the light theme, when
+    /// washing toward the theme.
+    #[arg(long, default_value_t = 2.0)]
+    ghost_rim: f32,
+
+    /// Frame the view beside a panel covering its right side, as Studio does
+    /// beside its sidebar.
+    #[arg(long, default_value_t = false)]
+    panel: bool,
+
+    /// Show reference-frame axes: on the robot, or on every element.
+    #[arg(long, default_value = "off", value_parser = ["off", "robot", "elements"])]
+    frames: String,
+
+    /// How shown frames are drawn: arrows, dashed lines, or both.
+    #[arg(long, default_value = "arrows", value_parser = ["arrows", "lines", "both"])]
+    frame_style: String,
+
+    /// The aurora's three colours from its lower edge up, as
+    /// `#rrggbb,#rrggbb,#rrggbb`.
+    #[arg(long, value_parser = parse_colours)]
+    aurora_colours: Option<[Color; 3]>,
+}
+
+fn parse_modes(arg: &str) -> Result<TransformModes, String> {
+    if arg == "all" {
+        return Ok(TransformModes::ALL);
+    }
+    let mut modes = TransformModes {
+        translate: false,
+        rotate: false,
+        scale: false,
+    };
+    for mode in arg.split(',') {
+        match mode.trim() {
+            "move" => modes.translate = true,
+            "turn" => modes.rotate = true,
+            "scale" => modes.scale = true,
+            other => return Err(format!("{other} is not a mode: use move, turn or scale")),
+        }
+    }
+    Ok(modes)
+}
+
+fn parse_colours(arg: &str) -> Result<[Color; 3], String> {
+    let colours = arg
+        .split(',')
+        .map(|hex| {
+            Srgba::hex(hex.trim())
+                .map(Color::from)
+                .map_err(|error| format!("{hex} is not a colour: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    colours
+        .try_into()
+        .map_err(|found: Vec<Color>| format!("expected three colours, found {}", found.len()))
+}
+
+/// `ID` or `ID=#rrggbb`.
+fn parse_selection(arg: &str) -> Result<Selection, String> {
+    let Some((element, hex)) = arg.split_once('=') else {
+        return Ok(Selection::of(arg));
+    };
+    let colour = Srgba::hex(hex).map_err(|error| format!("{hex} is not a colour: {error}"))?;
+    Ok(Selection {
+        element: element.to_string(),
+        highlight: Some(Highlight {
+            colour: Some(colour.into()),
+            ..default()
+        }),
+    })
 }
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = <Cli as clap::Parser>::parse();
+    // A length that never comes to pass — zero, infinite, or not a number,
+    // which no elapsed time is ever past — would leave a run with no window
+    // going for good.
+    if cli.offscreen && !(cli.seconds.is_finite() && cli.seconds > 0.0) {
+        log::error!("--offscreen needs a finite, positive --seconds: with no window, nothing else ends the run");
+        std::process::exit(2);
+    }
 
     let (assets, glb) = match asset_root_and_name(&cli.robot) {
         Ok(split) => split,
@@ -140,7 +271,7 @@ fn main() {
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
+                primary_window: (!cli.offscreen).then(|| Window {
                     title: "arora-scene".into(),
                     resolution: (1280u32, 800u32).into(),
                     present_mode: if cli.uncapped {
@@ -150,6 +281,13 @@ fn main() {
                     },
                     ..default()
                 }),
+                // A headless run ends when its seconds are up, not when its
+                // last window closes, since it has none.
+                exit_condition: if cli.offscreen {
+                    ExitCondition::DontExit
+                } else {
+                    ExitCondition::OnAllClosed
+                },
                 ..default()
             })
             .set(AssetPlugin {
@@ -160,6 +298,14 @@ fn main() {
             // The process installs its own logger before Bevy starts.
             .disable::<bevy::log::LogPlugin>(),
     )
+    // Bevy's default loop drops to 60 Hz whenever no window has focus, which
+    // is how a run started from a terminal begins, and always the case with no
+    // window; a run measuring the work must not be paced by it.
+    .insert_resource(if cli.uncapped || cli.offscreen {
+        WinitSettings::continuous()
+    } else {
+        WinitSettings::game()
+    })
     .add_plugins(ScenePlugin)
     .insert_resource(SceneOptions {
         still: cli.still,
@@ -173,11 +319,41 @@ fn main() {
         seconds: cli.seconds,
         screenshot: cli.screenshot.clone(),
         uncapped: cli.uncapped,
+        theme: cli.theme,
+        environment: cli.environment,
+        lighting: cli.lighting,
+        outline_fill: cli.outline_fill,
+        gizmo: cli.gizmo,
+        ghost: cli.ghost,
+        ghost_wash_theme: cli.ghost_wash == "theme",
+        ghost_rim: cli.ghost_rim,
+        panel: cli.panel,
+        frames: match cli.frames.as_str() {
+            "robot" => Frames::Robot,
+            "elements" => Frames::Elements,
+            _ => Frames::Off,
+        },
+        frame_style: match cli.frame_style.as_str() {
+            "lines" => FrameStyle::Lines,
+            "both" => FrameStyle::Both,
+            _ => FrameStyle::Arrows,
+        },
+        gizmo_space: if cli.gizmo_local {
+            GizmoSpace::Local
+        } else {
+            GizmoSpace::World
+        },
     })
     .insert_resource(RobotSpec {
         glb: glb.clone(),
         copies: cli.copies,
     });
+    if let Some(colours) = cli.aurora_colours {
+        app.insert_resource(arora_scene::aurora::Aurora {
+            colours,
+            ..default()
+        });
+    }
 
     // Both read the GLB from disk before the app runs, which is why they are
     // the CLI's to call rather than the scene's to do: a wasm host has no
@@ -208,6 +384,13 @@ fn main() {
     arora_scene::mount_instances(&mut app, &assets, &glb, cli.select.clone());
     if cli.screen {
         arora_scene::mount_screen(&mut app, &assets, &glb);
+    }
+    // The test window's panels: clickable toggles for every option, and a
+    // stand-in for a sidebar. The binary's, not the scene's, so a host
+    // embedding the scene keeps its own controls and framing.
+    app.add_plugins(arora_scene::toggles::TogglesPlugin);
+    if cli.tune {
+        app.add_plugins(arora_scene::tune::TunePlugin);
     }
     if let Some(joint) = &cli.joint {
         arora_scene::mount_joint(&mut app, &assets, &glb, joint, cli.joint_value);

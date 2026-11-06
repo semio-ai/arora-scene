@@ -19,9 +19,12 @@
 //! Percentiles rather than an average: a mean hides the stalls that make a
 //! viewport feel bad, and the 99th is what a person notices.
 
+pub mod aurora;
 pub mod instance;
-pub mod ring;
 pub mod robot;
+pub mod stage;
+pub mod toggles;
+pub mod tune;
 
 use std::path::PathBuf;
 
@@ -29,13 +32,23 @@ use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
 use bevy::gltf::GltfAssetLabel;
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
-use ring::{
-    JointBarMaterial, JointRingMaterial, JointRingPlugin, JointRingUniform, DEPTH_IN_FRONT,
+
+use arora_visuals::camera_input::{CameraBindings, CameraFloor, CameraInputPlugin};
+use arora_visuals::ghost::{Ghost, GhostLook};
+use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
+use arora_visuals::outline::OutlineOverlay;
+use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
+use arora_visuals::transform_gizmo::{
+    GizmoPart, GizmoSpace, TransformGizmo, TransformGizmoPlugin, TransformMode, TransformModes,
 };
+use arora_visuals::view_gizmo::{LookFrom, ViewGizmo};
+use bevy::camera_controller::pan_orbit_camera::extensions::look_to::LookToTrigger;
+use bevy::camera_controller::pan_orbit_camera::prelude::{OrbitConstraint, PanOrbitCamera};
+use bevy::math::DVec3;
 
 /// How the scene draws, independent of how a host chose it.
 ///
@@ -76,6 +89,39 @@ pub struct SceneOptions {
     /// only reports this; applying it is the host's, since it is a property of
     /// the window and a wasm host has no say in it.
     pub uncapped: bool,
+    /// Where the stage starts. A running scene changes it through
+    /// [`stage::Stage`]; these only set the first frame.
+    ///
+    /// Light or dark, which both the environment and the rig follow.
+    pub theme: stage::Theme,
+    /// What fills the frame above the horizon.
+    pub environment: stage::Environment,
+    /// What the rig is fixed to.
+    pub lighting: stage::Lighting,
+    /// How strongly a selection is filled with its outline colour, from not
+    /// at all to solid.
+    pub outline_fill: f32,
+    /// Put a transform gizmo on the first instance, offering these modes.
+    pub gizmo: Option<TransformModes>,
+    /// Whose axes that gizmo moves and turns along.
+    pub gizmo_space: GizmoSpace,
+    /// Draw the robots as ghosts, as Studio draws the instance showing a
+    /// robot's measured state.
+    pub ghost: bool,
+    /// Wash ghosts toward the theme's ink rather than always toward white.
+    pub ghost_wash_theme: bool,
+    /// A ghost's rim strength against Studio's on the light theme, when
+    /// washing toward the theme.
+    pub ghost_rim: f32,
+    /// Frame the view beside the test window's stand-in panel at the start.
+    /// Acted on by [`toggles::TogglesPlugin`], which a host leaves out: a
+    /// host frames beside its own panels with an active area of its own.
+    pub panel: bool,
+    /// Which reference frames show axes at the start, by the test window's
+    /// toggles.
+    pub frames: toggles::Frames,
+    /// How they are drawn.
+    pub frame_style: toggles::FrameStyle,
 }
 
 impl Default for SceneOptions {
@@ -92,6 +138,18 @@ impl Default for SceneOptions {
             seconds: 0.0,
             screenshot: None,
             uncapped: false,
+            theme: stage::Theme::default(),
+            environment: stage::Environment::default(),
+            lighting: stage::Lighting::default(),
+            outline_fill: 0.0,
+            gizmo: None,
+            gizmo_space: GizmoSpace::World,
+            ghost: false,
+            ghost_wash_theme: true,
+            ghost_rim: 2.0,
+            panel: false,
+            frames: toggles::Frames::Off,
+            frame_style: toggles::FrameStyle::Arrows,
         }
     }
 }
@@ -120,36 +178,60 @@ pub struct ScenePlugin;
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            PanOrbitCameraPlugin,
-            JointRingPlugin,
-            arora_visuals::glow::GlowPlugin,
+            CameraInputPlugin,
+            arora_visuals::joint_gizmo::JointGizmoPlugin,
+            stage::StagePlugin,
+            aurora::AuroraPlugin,
+            arora_visuals::outline::OutlinePlugin,
+            arora_visuals::view_gizmo::ViewGizmoPlugin,
+            TransformGizmoPlugin,
+            OverlayPlugin,
+            arora_visuals::ghost::GhostPlugin,
+            arora_visuals::axes::FrameAxesPlugin,
+            arora_visuals::active_area::ActiveAreaPlugin,
         ))
-            .init_resource::<arora_visuals::Picks>()
-            .init_resource::<arora_visuals::glow::Selections>()
-            .init_resource::<instance::Selected>()
-            // Bevy's own mesh picking is not added: it casts base vertices,
-            // and a pick has to meet the mesh where a morph put it. The
-            // shared cast is reached through this observer instead, and the
-            // press that drives it arrives on the window entity.
-            .add_observer(arora_visuals::pick::on_press)
-            .init_resource::<Frames>()
-            .init_resource::<Census>()
-            .init_resource::<Framing>()
-            .init_resource::<Capture>()
-            .add_systems(Startup, setup)
-            .add_systems(
-                Update,
-                (
-                    take_census,
-                    split_materials,
-                    spawn_marker,
-                    fit_orbit,
-                    count_visible,
-                    capture,
-                    measure,
-                )
-                    .chain(),
-            );
+        .init_resource::<WashChoice>()
+        // Read by the scene's gizmo systems; the test window's toggles set it.
+        .init_resource::<toggles::GizmoChoice>()
+        .add_systems(
+            Update,
+            (
+                attach_gizmo,
+                choose_gizmo_mode,
+                ghost_robots,
+                hide_controls_on_ghosts,
+                wash_ghosts,
+                place_readout,
+            ),
+        )
+        .add_systems(Startup, spawn_readout)
+        .init_resource::<arora_visuals::select::Selections>()
+        .init_resource::<instance::Selected>()
+        // Bevy's own mesh picking is not added: it casts base vertices,
+        // and a pick has to meet the mesh where a morph put it. The
+        // shared cast decides picks instead, from presses and releases
+        // that arrive on the window entity.
+        .add_plugins(arora_visuals::pick::PickPlugin)
+        .add_observer(look_from)
+        .init_resource::<Frames>()
+        .init_resource::<Census>()
+        .init_resource::<Framing>()
+        .init_resource::<OrbitHeld>()
+        .init_resource::<Capture>()
+        .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (
+                take_census,
+                split_materials,
+                spawn_marker,
+                fit_orbit,
+                count_visible,
+                capture,
+                measure,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -232,33 +314,15 @@ const MOUNTED_LAYER: usize = 1;
 #[derive(Component)]
 pub struct OrbitCamera;
 
-/// One joint, its authored range, and the body it turns.
-///
-/// The gizmo exists to answer what a limited rotator costs in Bevy. Studio
-/// gets one from drei's `PivotControls`, which brings the ring, the hover and
-/// annotation states, the drag maths and `rotationLimits` with it; Bevy has no
-/// equivalent, so each of those is drawn or written here.
+/// The joint chosen for a gizmo, until its body is found and the gizmo put
+/// on it; the gizmo itself is `arora_visuals`' `JointGizmo`.
 #[derive(Resource)]
-struct JointGizmo {
+pub(crate) struct WantedJoint {
     joint: robot::Joint,
-    /// The body this turns, once the scene has spawned and been found.
-    body: Option<Entity>,
-    /// The body's pose before any of this touched it.
-    rest: Transform,
-    value: f32,
-    dragging: bool,
-    hovered: bool,
-    /// The range as the ring draws it, measured from one end.
-    range: ring::VisualRange,
-    /// The two tori: thin while idle, thick and shaded while in hand.
-    idle: Option<Entity>,
-    active: Option<Entity>,
+    /// A value asked for from outside, applied once through the gizmo's own
+    /// clamp. Lets a headless run show a limit holding.
+    asked: Option<f32>,
 }
-
-/// A value asked for from outside, applied once through the same clamp a drag
-/// takes. Lets a headless run show a limit holding.
-#[derive(Resource, Default)]
-struct AskedFor(Option<f32>);
 
 /// The screen the robot declared, and the texture a face is drawing into.
 #[derive(Resource)]
@@ -266,7 +330,6 @@ struct ScreenMount {
     screen: robot::Screen,
     texture: Handle<Image>,
 }
-
 
 /// Selects the joint to put a gizmo on, or lists what there is.
 pub fn mount_joint(
@@ -328,408 +391,85 @@ pub fn mount_joint(
         joint.max,
         joint.default
     );
-    app.insert_resource(JointGizmo {
-        value: joint.default,
-        range: ring::VisualRange::of(joint.min, joint.max),
+    app.insert_resource(WantedJoint {
         joint,
-        body: None,
-        rest: Transform::IDENTITY,
-        dragging: false,
-        hovered: false,
-        idle: None,
-        active: None,
+        asked: joint_value,
     })
-    .insert_resource(AskedFor(joint_value))
     .add_systems(Startup, spawn_label)
-    .add_systems(
-        Update,
-        // Before the camera reads the same button, so a press that grabs the
-        // ring has already taken the camera out of the running.
-        (bind_joint, drive_joint, draw_joint, drive_bar, place_label)
-            .chain()
-            .before(PanOrbitCameraSystemSet),
-    );
+    .add_systems(Update, (attach_joint, hold_in_hand, place_label).chain());
 }
 
-/// Finds the body the joint turns, once the scene has spawned.
+/// Puts the joint gizmo on the body the joint moves, once the scene has
+/// spawned.
 ///
 /// The robot's glTF nodes carry no names, so Bevy names them `GltfNode{index}`
 /// — and that index is the only thing tying `RobotData` to a spawned entity.
-#[allow(clippy::too_many_arguments)]
-fn bind_joint(
-    mut gizmo: ResMut<JointGizmo>,
+fn attach_joint(
+    wanted: Res<WantedJoint>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut plain: ResMut<Assets<StandardMaterial>>,
-    mut rings: ResMut<Assets<JointRingMaterial>>,
-    mut bars: ResMut<Assets<JointBarMaterial>>,
-    names: Query<(Entity, &Name, &Transform, &GlobalTransform)>,
+    names: Query<(Entity, &Name)>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+    gizmos: Query<(), With<JointGizmo>>,
     frames: Res<Frames>,
 ) {
-    if gizmo.body.is_some() || frames.elapsed < 0.5 {
+    if !gizmos.is_empty() || frames.elapsed < 0.5 {
         return;
     }
-    let wanted = format!("GltfNode{}", gizmo.joint.child_node);
-    let Some((entity, _, transform, global)) =
-        names.iter().find(|(_, name, _, _)| name.as_str() == wanted)
-    else {
+    let joint = &wanted.joint;
+    let node = format!("GltfNode{}", joint.child_node);
+    let (Some((body, _)), Some(camera)) = (
+        names.iter().find(|(_, name)| name.as_str() == node),
+        cameras.iter().next(),
+    ) else {
         return;
     };
-    gizmo.rest = *transform;
-    gizmo.body = Some(entity);
-    let range = gizmo.range;
-    let colour = gizmo.joint.color;
-    let uniform = JointRingUniform {
-        min: range.min,
-        max: range.max,
-        current: range.value(gizmo.value),
-        color: colour.to_vec4(),
-        background: Srgba::hex("333333").expect("literal").to_vec4(),
-        ..default()
-    };
-    // Thin while idle, thick once in hand — the swap is the hover, as it is in
-    // Studio's `axis-rotator` and `axis-slider` alike.
-    let idle_material = plain.add(StandardMaterial {
-        base_color: Color::from(colour).with_alpha(0.5),
-        unlit: true,
-        alpha_mode: AlphaMode::Blend,
-        depth_bias: DEPTH_IN_FRONT,
-        ..default()
-    });
-    let angular = gizmo.joint.kind.is_angular();
-
-    let (idle_mesh, active_mesh) = if angular {
-        (
-            meshes.add(Torus {
-                minor_radius: HANDLE_RADIUS * 0.02,
-                major_radius: HANDLE_RADIUS,
-            }),
-            meshes.add(Torus {
-                minor_radius: HANDLE_RADIUS * 0.1,
-                major_radius: HANDLE_RADIUS,
-            }),
-        )
+    let motion = if joint.kind.is_angular() {
+        JointMotion::Turn
     } else {
-        // A bar as long as the joint's travel, so its size states the range
-        // the way the ring's arc does.
-        let travel = (range.max - range.min).max(1e-3);
-        let width = HANDLE_RADIUS;
-        (
-            meshes.add(Cuboid::new(width * 0.04, travel, width * 0.04)),
-            meshes.add(Cuboid::new(width * 0.18, travel, width * 0.18)),
-        )
+        JointMotion::Slide
     };
-
-    gizmo.idle = Some(
-        commands
-            .spawn((Mesh3d(idle_mesh), MeshMaterial3d(idle_material)))
-            .id(),
-    );
-    gizmo.active = Some(if angular {
-        commands
-            .spawn((
-                Mesh3d(active_mesh),
-                MeshMaterial3d(rings.add(JointRingMaterial { ring: uniform })),
-                Visibility::Hidden,
-            ))
-            .id()
-    } else {
-        commands
-            .spawn((
-                Mesh3d(active_mesh),
-                MeshMaterial3d(bars.add(JointBarMaterial { bar: uniform })),
-                Visibility::Hidden,
-            ))
-            .id()
-    });
-    log::info!(
-        "{:?} drives {wanted}; axis {:.2?} locally, {:.2?} in the world",
-        gizmo.joint.name,
-        gizmo.joint.axis,
-        (global.rotation() * gizmo.joint.axis).normalize_or(Vec3::Y),
-    );
-}
-
-/// The plane the joint turns in, in world space.
-///
-/// The authored axis is expressed in the joint's own frame, so it has to be
-/// carried out by the joint's world rotation before anything in world space —
-/// the ring, the pointer ray — can be measured against it.
-/// The circle a joint turns through: where it is centred, the axis it turns
-/// about, and two perpendicular directions spanning its plane.
-///
-/// One basis, stated once. Bevy's gizmo primitives disagree about which plane
-/// they draw in — `circle` uses XY about +Z, while `arc_3d` starts at +X and
-/// sweeps about +Y through XZ — so anything deriving its own frame from those
-/// conventions draws a ring and its arc at right angles.
-struct JointPlane {
-    centre: Vec3,
-    axis: Vec3,
-    u: Vec3,
-    v: Vec3,
-}
-
-impl JointPlane {
-    /// Orients a torus mesh so its own angle runs the way this plane measures
-    /// angles, starting from `origin`.
-    ///
-    /// Two corrections live here. The mesh's up is the plane's axis
-    /// **negated**, because a torus winds the opposite way about its own axis
-    /// from the way this basis measures — without that the ring fills against
-    /// the drag. A torus is symmetric about its plane, so flipping its up
-    /// changes the winding and nothing about how it looks. And the zero is
-    /// turned to `origin`, so the span the shader draws lands on the
-    /// directions the joint can actually reach rather than starting wherever
-    /// `u` happened to fall.
-    fn for_torus(&self, origin: f32) -> Quat {
-        let start = self.u * origin.cos() + self.v * origin.sin();
-        Quat::from_mat3(&Mat3::from_cols(start, -self.axis, self.axis.cross(start)))
-    }
-}
-
-fn joint_plane(joint: &robot::Joint, body: &GlobalTransform) -> JointPlane {
-    // Read from the body the joint turns, not from the joint node parsed out
-    // of the glTF. The turn is applied in the body's own frame, so the axis
-    // rides that frame out into the world, and the pivot is the body's own
-    // origin. Taking both live also means the ring follows whatever the joints
-    // above it are doing, which a pose parsed once at load cannot.
-    let (_, rotation, centre) = body.to_scale_rotation_translation();
-    let axis = (rotation * joint.axis).normalize_or(Vec3::Y);
-    let u = axis.any_orthonormal_vector();
-    JointPlane {
-        centre,
+    let axis = Dir3::new(joint.axis).unwrap_or(Dir3::Y);
+    let mut gizmo = JointGizmo::new(
+        body,
+        camera,
+        motion,
         axis,
-        u,
-        v: axis.cross(u),
-    }
-}
-
-/// Where a pointer ray meets the joint's plane: the angle about the axis, and
-/// how far out from the centre it landed.
-fn angle_under_pointer(
-    joint: &robot::Joint,
-    body: &GlobalTransform,
-    camera: &Camera,
-    camera_at: &GlobalTransform,
-    cursor: Vec2,
-) -> Option<(f32, f32)> {
-    let Ok(ray) = camera.viewport_to_world(camera_at, cursor) else {
-        return None;
-    };
-    let plane = joint_plane(joint, body);
-    let (centre, axis) = (plane.centre, plane.axis);
-
-    // A ray parallel to the plane never meets it, and one nearly parallel
-    // meets it so far away that the angle is noise.
-    let slope = axis.dot(*ray.direction);
-    if slope.abs() < 1e-3 {
-        return None;
-    }
-    let distance = (centre - ray.origin).dot(axis) / slope;
-    if distance <= 0.0 {
-        return None;
-    }
-    let offset = ray.origin + *ray.direction * distance - centre;
-    Some((
-        f32::atan2(offset.dot(plane.v), offset.dot(plane.u)),
-        offset.length(),
-    ))
-}
-
-const HANDLE_RADIUS: f32 = 0.12;
-
-/// Whether a hit on the joint's plane counts as being on the ring.
-///
-/// A band rather than the tube's own surface, because the plane a ray is
-/// tested against reaches across the whole scene: without this a click
-/// anywhere would take hold of the joint. Studio does the same thing with a
-/// fatter invisible torus in front of the visible one.
-fn near_ring(distance: f32) -> bool {
-    (HANDLE_RADIUS * 0.45..=HANDLE_RADIUS * 1.7).contains(&distance)
-}
-
-/// Drags the joint within its limits, and writes the result onto the body.
-///
-/// This is a real rotator rather than a pointer-delta: the cursor ray is
-/// projected onto the plane the joint turns in and read as an angle, so the
-/// handle stays under the pointer whatever the camera is doing. Grabbing
-/// records the offset between the pointer's angle and the joint's value, so
-/// the handle does not jump to the cursor on the first frame.
-#[allow(clippy::too_many_arguments)]
-fn drive_joint(
-    opts: Res<SceneOptions>,
-    mut gizmo: ResMut<JointGizmo>,
-    mut asked: ResMut<AskedFor>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    mut cameras: Query<(&Camera, &GlobalTransform, &mut PanOrbitCamera), With<OrbitCamera>>,
-    mut grab: Local<Option<f32>>,
-    mut bodies: Query<(&mut Transform, &GlobalTransform)>,
-) {
-    let Some(body) = gizmo.body else {
-        return;
-    };
-
-    let Ok(body_at) = bodies.get(body).map(|(_, at)| *at) else {
-        return;
-    };
-    let pointer = windows
-        .iter()
-        .find_map(|window| window.cursor_position())
-        .zip(cameras.iter().next())
-        .and_then(|(cursor, (camera, camera_at, _))| {
-            angle_under_pointer(&gizmo.joint, &body_at, camera, camera_at, cursor)
-        });
-
-    // Near the ring is what "hovered" means, and it is the same test a press
-    // has to pass — so what lights up under the pointer is exactly what a
-    // click would take hold of.
-    gizmo.hovered = opts.ring_active || pointer.is_some_and(|(_, distance)| near_ring(distance));
-
-    if !buttons.pressed(MouseButton::Left) {
-        *grab = None;
-    } else if grab.is_none() {
-        // Only a press landing near the ring takes hold of it. Without this a
-        // click anywhere grabs the joint, because the plane the ray is tested
-        // against extends across the whole scene.
-        if let Some((angle, distance)) = pointer {
-            if near_ring(distance) {
-                *grab = Some(angle - gizmo.value);
-            }
-        }
-    }
-    gizmo.dragging = grab.is_some();
-
-    let wanted = match (asked.0.take(), *grab, pointer) {
-        (Some(value), _, _) => Some(value),
-        (None, Some(offset), Some((angle, _))) => Some(angle - offset),
-        _ => None,
-    };
-    if let Some(wanted) = wanted {
-        // The authored range is the whole point: a joint driven past its limit
-        // is not a pose the robot can hold.
-        gizmo.value = if gizmo.joint.is_limited() {
-            wanted.clamp(gizmo.joint.min, gizmo.joint.max)
+        joint.min,
+        joint.max,
+        joint.default,
+        joint.color.into(),
+    );
+    gizmo.limited = joint.is_limited();
+    if let Some(asked) = wanted.asked {
+        let held = if joint.is_limited() {
+            asked.clamp(joint.min, joint.max)
         } else {
-            wanted
+            asked
         };
-        if (wanted - gizmo.value).abs() > 1e-4 {
-            log::info!(
-                "{:?} asked for {wanted:.3}, held at {:.3}",
-                gizmo.joint.name,
-                gizmo.value
-            );
+        if (held - asked).abs() > 1e-4 {
+            log::info!("{:?} asked for {asked:.3}, held at {held:.3}", joint.name);
         }
+        gizmo.value = held;
     }
-
-    // The ring and the camera share the left button, so whichever the press
-    // landed on keeps it for the whole drag. Without this the model spins
-    // while the joint turns.
-    for (_, _, mut orbit) in &mut cameras {
-        orbit.enabled = grab.is_none();
-    }
-
-    let Ok((mut transform, _)) = bodies.get_mut(body) else {
-        return;
-    };
-    // Radians about the axis, or metres along it. Reading a joint's value as
-    // the wrong one of those is silent — the body just moves wrongly — which is
-    // why the kind decides here rather than being assumed.
-    let moved = gizmo.value - gizmo.joint.default;
-    *transform = if gizmo.joint.kind.is_angular() {
-        Transform {
-            rotation: gizmo.rest.rotation * Quat::from_axis_angle(gizmo.joint.axis, moved),
-            ..gizmo.rest
-        }
-    } else {
-        Transform {
-            translation: gizmo.rest.translation + gizmo.rest.rotation * gizmo.joint.axis * moved,
-            ..gizmo.rest
-        }
-    };
+    log::info!(
+        "{:?} drives {node}; axis {:.2?} in its own frame",
+        joint.name,
+        joint.axis,
+    );
+    // Named in the overlay by the joint's name, which is what the label
+    // finds it by.
+    gizmo.key = joint.name.clone();
+    commands.spawn(gizmo);
 }
 
-/// Sits the rings on the joint's plane and tells the shader where the joint
-/// stands.
-///
-/// Bevy's torus is built around +Y, so the plane's axis becomes the mesh's up.
-/// The shader reads its angle from the mesh's own winding, which starts at +X
-/// — the same direction this basis calls zero — so the two agree without an
-/// offset.
-fn draw_joint(
-    gizmo: Res<JointGizmo>,
-    bodies: Query<&GlobalTransform>,
-    mut rings: ResMut<Assets<JointRingMaterial>>,
-    mut parts: Query<(&mut Transform, &mut Visibility)>,
-    handles: Query<&MeshMaterial3d<JointRingMaterial>>,
-) {
-    let Some(body) = gizmo.body.and_then(|body| bodies.get(body).ok()) else {
-        return;
-    };
-    let plane = joint_plane(&gizmo.joint, body);
-    let placement = if gizmo.joint.kind.is_angular() {
-        // A turning joint pivots where it stands, so the ring sits on it.
-        Transform {
-            translation: plane.centre,
-            rotation: plane.for_torus(gizmo.range.origin),
-            scale: Vec3::ONE,
+/// Draws the joint control as though in hand when the options ask, since a
+/// headless capture has no pointer to hover it with. Only its look: the
+/// pointer is left alone, so the view and picks work as ever.
+fn hold_in_hand(opts: Res<SceneOptions>, mut gizmos: Query<&mut JointGizmo>) {
+    for mut gizmo in &mut gizmos {
+        if gizmo.show_in_hand != opts.ring_active {
+            gizmo.show_in_hand = opts.ring_active;
         }
-    } else {
-        // A sliding one carries its body away, so the bar has to stay put
-        // while the body travels along it — anchored to the middle of the
-        // travel rather than to wherever the body currently is.
-        let middle = (gizmo.joint.min + gizmo.joint.max) * 0.5;
-        Transform {
-            // Offset clear of the link. A ring is wider than the thing it
-            // turns and so reads from outside it; a bar laid on the axis sits
-            // inside the housing it slides, where no depth bias will save it.
-            translation: plane.centre
-                + plane.axis * (middle - gizmo.value)
-                + plane.u * HANDLE_RADIUS,
-            rotation: Quat::from_rotation_arc(Vec3::Y, plane.axis),
-            scale: Vec3::ONE,
-        }
-    };
-    let in_hand = gizmo.hovered || gizmo.dragging;
-
-    for (part, shown) in [(gizmo.idle, !in_hand), (gizmo.active, in_hand)] {
-        let Some(part) = part else { continue };
-        let Ok((mut transform, mut visibility)) = parts.get_mut(part) else {
-            continue;
-        };
-        *transform = placement;
-        *visibility = if shown {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-    }
-
-    // The travelled span runs from the range's start to where the joint is, so
-    // the shader wants the value in the same wrapped space as the limits.
-    let Some(active) = gizmo.active else {
-        return;
-    };
-    let Ok(handle) = handles.get(active) else {
-        return;
-    };
-    // `get_mut` hands back a change-detection guard, not a plain reference.
-    if let Some(mut material) = rings.get_mut(&handle.0) {
-        material.ring.current = gizmo.range.value(gizmo.value);
-    }
-}
-
-/// The sliding joint's bar, kept current the same way its ring counterpart is.
-fn drive_bar(
-    gizmo: Res<JointGizmo>,
-    mut bars: ResMut<Assets<JointBarMaterial>>,
-    handles: Query<&MeshMaterial3d<JointBarMaterial>>,
-) {
-    let Some(handle) = gizmo.active.and_then(|part| handles.get(part).ok()) else {
-        return;
-    };
-    if let Some(mut material) = bars.get_mut(&handle.0) {
-        material.bar.current = gizmo.range.value(gizmo.value);
     }
 }
 
@@ -775,10 +515,14 @@ fn spawn_label(mut commands: Commands) {
         ));
 }
 
+/// Places the label beside the joint's gizmo, reading where the gizmo is
+/// from the overlay — the same report a web host would place a DOM label
+/// from, so the two cannot disagree about where the gizmo is.
 fn place_label(
-    gizmo: Res<JointGizmo>,
-    bodies: Query<&GlobalTransform>,
-    cameras: Query<(Entity, &Camera, &GlobalTransform), With<OrbitCamera>>,
+    wanted: Res<WantedJoint>,
+    overlay: Res<Overlay>,
+    gizmos: Query<&JointGizmo>,
+    cameras: Query<Entity, With<OrbitCamera>>,
     mut labels: LabelQuery,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     mut commands: Commands,
@@ -786,50 +530,147 @@ fn place_label(
     let Ok((label, mut node, mut visibility, children, targeted)) = labels.single_mut() else {
         return;
     };
-    let Some((camera_entity, camera, camera_at)) = cameras.iter().next() else {
+    let Some(camera) = cameras.iter().next() else {
         return;
     };
     // UI draws to the primary window unless told otherwise, so a label left
     // untargeted is missing from every offscreen capture while looking fine on
     // screen.
     if !targeted {
-        commands.entity(label).insert(UiTargetCamera(camera_entity));
+        commands.entity(label).insert(UiTargetCamera(camera));
     }
-    let Some(anchor) = gizmo
-        .body
-        .and_then(|body| bodies.get(body).ok())
-        .map(|body| body.translation())
-    else {
-        return;
-    };
-    let Ok(screen) = camera.world_to_viewport(camera_at, anchor) else {
+    let joint = &wanted.joint;
+    let anchor = overlay
+        .0
+        .gizmos
+        .iter()
+        .find(|anchor| anchor.kind == GizmoKind::Joint && anchor.key == joint.name);
+    let (Some(anchor), Some(gizmo)) = (anchor, gizmos.iter().next()) else {
         *visibility = Visibility::Hidden;
         return;
     };
     *visibility = Visibility::Inherited;
-    // Clear of the ring rather than over it, so the handle stays legible. The
-    // ring's own screen size is what decides how far clear that is.
-    let edge = camera
-        .world_to_viewport(camera_at, anchor + camera_at.right() * HANDLE_RADIUS)
-        .map(|edge| (edge.x - screen.x).abs())
-        .unwrap_or(40.0);
-    node.left = Val::Px(screen.x + edge + 14.0);
-    node.top = Val::Px(screen.y - 10.0);
+    // Clear of the ring or bar rather than over it, so the handle stays
+    // legible.
+    node.left = Val::Px(anchor.screen.max_x + 14.0);
+    node.top = Val::Px(anchor.screen.y - 10.0);
 
-    let colour: Color = gizmo.joint.color.into();
+    let colour: Color = joint.color.into();
     for child in children.iter() {
         if let Ok((mut text, mut text_colour)) = texts.get_mut(child) {
             // Bevy's bundled fallback font carries ASCII only, so a degree
             // sign renders as tofu. A real build ships a font and can use one.
-            text.0 = if gizmo.joint.kind.is_angular() {
-                format!("{}   {:.1} deg", gizmo.joint.name, gizmo.value.to_degrees())
+            text.0 = if joint.kind.is_angular() {
+                format!("{}   {:.1} deg", joint.name, gizmo.value.to_degrees())
             } else {
                 // A sliding joint's value is a distance; reporting it in
                 // degrees is the same category error as rotating it.
-                format!("{}   {:.0} mm", gizmo.joint.name, gizmo.value * 1000.0)
+                format!("{}   {:.0} mm", joint.name, gizmo.value * 1000.0)
             };
             text_colour.0 = colour;
         }
+    }
+}
+
+/// What a held transform gizmo reads, one line to each axis, beside the
+/// gizmo: a host's own label, placed from the overlay as the joint's is.
+#[derive(Component)]
+struct Readout;
+
+/// One line of the readout, by its place in the stack.
+#[derive(Component)]
+struct ReadoutLine(usize);
+
+fn spawn_readout(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.09, 0.09, 0.11, 0.92)),
+            Visibility::Hidden,
+            Readout,
+        ))
+        .with_children(|readout| {
+            // A plane reads two axes; nothing reads more.
+            for line in 0..2 {
+                readout.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(13.0),
+                        ..default()
+                    },
+                    ReadoutLine(line),
+                ));
+            }
+        });
+}
+
+/// Shows a held transform gizmo's readings beside it, stacked, each in its
+/// axis's colour, and hides when no transform handle is held.
+fn place_readout(
+    overlay: Res<Overlay>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+    mut readouts: Query<(Entity, &mut Node, &mut Visibility, Has<UiTargetCamera>), With<Readout>>,
+    mut lines: Query<(&ReadoutLine, &mut Text, &mut TextColor, &mut Node), Without<Readout>>,
+    mut commands: Commands,
+) {
+    let Ok((readout, mut node, mut visibility, targeted)) = readouts.single_mut() else {
+        return;
+    };
+    if !targeted {
+        if let Some(camera) = cameras.iter().next() {
+            commands.entity(readout).insert(UiTargetCamera(camera));
+        }
+    }
+    let frame = &overlay.0;
+    let held = frame.pointer.as_ref().filter(|pointer| {
+        pointer.kind == GizmoKind::Transform && pointer.held && !pointer.readings.is_empty()
+    });
+    let anchor = held.and_then(|pointer| {
+        frame
+            .gizmos
+            .iter()
+            .find(|anchor| anchor.kind == GizmoKind::Transform && anchor.key == pointer.key)
+    });
+    let (Some(pointer), Some(anchor)) = (held, anchor) else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    visibility.set_if_neq(Visibility::Inherited);
+    node.left = Val::Px(anchor.screen.max_x + 14.0);
+    node.top = Val::Px(anchor.screen.min_y);
+    for (line, mut text, mut colour, mut line_node) in &mut lines {
+        let Some(reading) = pointer.readings.get(line.0) else {
+            line_node.display = Display::None;
+            continue;
+        };
+        line_node.display = Display::Flex;
+        text.0 = reading_text(reading);
+        colour.0 = reading
+            .axis
+            .map(|axis| arora_visuals::transform_gizmo::AXIS_COLOURS[axis])
+            .unwrap_or(Color::WHITE);
+    }
+}
+
+/// One reading as a line: its axis, its amount and its unit. Bevy's bundled
+/// fallback font carries ASCII only, so degrees are spelled out.
+fn reading_text(reading: &arora_visuals::overlay::Reading) -> String {
+    use arora_visuals::overlay::ReadingUnit;
+    let axis = match reading.axis {
+        Some(0) => "X",
+        Some(1) => "Y",
+        Some(2) => "Z",
+        _ => "",
+    };
+    match reading.unit {
+        ReadingUnit::Metres => format!("{axis}  {:+.3} m", reading.amount),
+        ReadingUnit::Degrees => format!("{axis}  {:+.1} deg", reading.amount),
+        ReadingUnit::Factor => format!("{axis}  x{:.2}", reading.amount),
     }
 }
 
@@ -841,7 +682,12 @@ fn place_label(
 /// would let either happen.
 ///
 /// `select` outlines those elements by their `RobotData` ids on every copy.
-pub fn mount_instances(app: &mut App, assets: &std::path::Path, robot_glb: &str, select: Vec<String>) {
+pub fn mount_instances(
+    app: &mut App,
+    assets: &std::path::Path,
+    robot_glb: &str,
+    select: Vec<arora_visuals::select::Selection>,
+) {
     let meta = match std::fs::read(assets.join(robot_glb))
         .map_err(anyhow::Error::from)
         .and_then(|bytes| arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes))
@@ -862,7 +708,7 @@ pub fn mount_instances(app: &mut App, assets: &std::path::Path, robot_glb: &str,
         let known: Vec<&str> = meta
             .elements
             .iter()
-            .filter(|e| select.contains(&e.id))
+            .filter(|e| select.iter().any(|selection| selection.element == e.id))
             .map(|e| e.id.as_str())
             .collect();
         if known.len() < select.len() {
@@ -1011,24 +857,42 @@ pub fn setup(
     }
 
     // Placed properly once the model's bounds are known; see `take_census`.
+    // Until then it stands well back from where a robot of ordinary size
+    // stands, at the options' angle, so a robot arriving before its bounds
+    // are known is seen whole and small rather than from inside, and the
+    // camera then approaches it. Lit and finished by `stage`, which reads
+    // what the host chose.
     let mut camera = commands.spawn((
         Camera3d::default(),
-        // Ambient light rides the camera in 0.19 rather than being a resource.
-        AmbientLight {
-            color: Color::WHITE,
-            brightness: 220.0,
+        above_floor(
+            standing(&opts, ORDINARY_CENTRE, STARTING_DISTANCE),
+            ORDINARY_CENTRE,
+            Some(CAMERA_FLOOR),
+        ),
+        // Bevy's controller, under Studio's bindings: left orbits, right pans,
+        // the wheel zooms. A gizmo's handle takes a press before the camera
+        // does. The world is Y-up, and the view never tips over the top.
+        PanOrbitCamera {
+            orbit_constraint: OrbitConstraint::Fixed {
+                up: DVec3::Y,
+                can_pass_tdc: false,
+            },
+            // Its pivot is where it stands back from, so a gesture before the
+            // robot is framed turns about the ordinary robot's middle.
+            last_anchor_depth: -f64::from(STARTING_DISTANCE),
             ..default()
         },
-        // three.js OrbitControls' bindings, which is what the scene's users
-        // already have in their hands: left orbits, right pans. The joint
-        // gizmo shares the left button and takes priority when the press
-        // lands on it.
-        PanOrbitCamera {
-            button_orbit: MouseButton::Left,
-            button_pan: MouseButton::Right,
+        CameraBindings {
+            floor: Some(CAMERA_FLOOR),
             ..default()
         },
         OrbitCamera,
+        // Studio's corner gizmo. Studio's world is Z-up, so its letters name
+        // the axes a Studio user knows rather than Bevy's.
+        ViewGizmo {
+            axes: ViewGizmo::Z_UP,
+            ..default()
+        },
     ));
     // Saving a frame implies rendering offscreen, because the window's own
     // swapchain cannot be read back here: a capture of it returns pure black
@@ -1050,74 +914,442 @@ pub fn setup(
         camera.insert(RenderTarget::Image(target.clone().into()));
         commands.insert_resource(OffscreenView(target));
     }
-
-    // A directional light is a direction, not a position, so this one needs no
-    // fitting — only its shadow cascades do, once the scale is known.
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 8_000.0,
-            shadow_maps_enabled: opts.shadows,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
 }
 
-/// Points the camera controller at the model, once its bounds are known.
+/// Where the camera is kept above, as Studio keeps its camera a centimetre
+/// above the floor, so the view never looks up from beneath it.
+pub const CAMERA_FLOOR: CameraFloor = CameraFloor {
+    up: Dir3::Y,
+    height: stage::FLOOR_HEIGHT + 0.01,
+};
+
+/// How far out a framed camera stands, in the model's bounding radii: far
+/// enough that its bounding sphere fits the view with a little air.
+const FRAMING_DISTANCE: f32 = 2.6;
+
+/// What the camera stands back from before a model's bounds are known: a
+/// robot of ordinary size standing on the floor, about a metre and a half
+/// tall.
+const ORDINARY_CENTRE: Vec3 = Vec3::new(0.0, 0.75, 0.0);
+const ORDINARY_RADIUS: f32 = 0.85;
+
+/// How much farther back than framing the camera starts: far enough that a
+/// robot well beyond ordinary size is still seen whole before it is framed.
+const STANDING_BACK: f32 = 2.0;
+
+/// How far the camera stands from the ordinary robot's middle before the
+/// model's bounds are known.
+const STARTING_DISTANCE: f32 = ORDINARY_RADIUS * FRAMING_DISTANCE * STANDING_BACK;
+
+/// How long the camera takes to approach the framed view: Studio's, as its
+/// scene's bounds fit takes.
+const GLIDE_SECONDS: f32 = 1.0;
+
+/// Where a camera stands to frame `centre` from `distance` away, at the
+/// options' angle round it and height above it, looking at it.
+fn standing(opts: &SceneOptions, centre: Vec3, distance: f32) -> Transform {
+    let toward = Vec3::new(
+        opts.angle.sin() * opts.pitch.cos(),
+        opts.pitch.sin(),
+        opts.angle.cos() * opts.pitch.cos(),
+    );
+    Transform::from_translation(centre + toward * distance).looking_at(centre, Vec3::Y)
+}
+
+/// `pose` raised onto `floor` where it stands below it, still looking at
+/// `centre`: a camera told to stand at a low angle stands on the floor
+/// instead, as the floor would put it.
+fn above_floor(pose: Transform, centre: Vec3, floor: Option<CameraFloor>) -> Transform {
+    let Some(floor) = floor else {
+        return pose;
+    };
+    let up = floor.up.as_vec3();
+    let below = floor.height - pose.translation.dot(up);
+    if below <= 0.0 {
+        return pose;
+    }
+    Transform::from_translation(pose.translation + up * below).looking_at(centre, up)
+}
+
+/// A camera easing from where it stood to the framed view.
+#[derive(Component)]
+struct Glide {
+    from: Transform,
+    to: Transform,
+    elapsed: f32,
+}
+
+impl Glide {
+    /// Where the camera stands now: quick to leave and slow to arrive, so
+    /// the view settles onto the framing rather than stopping on it — on
+    /// Studio's curve for its bounds fit.
+    fn at(&self) -> Transform {
+        let t = (self.elapsed / GLIDE_SECONDS).clamp(0.0, 1.0);
+        // The glide's last frame is the framing itself.
+        if t >= 1.0 {
+            return self.to;
+        }
+        // The curve passes one just before its end; held at one there, the
+        // camera never travels past the framing, which may stand on the
+        // floor, so it never dips below it.
+        let eased = (1.0 - (-5.0 * t).exp() + 0.007 * t).min(1.0);
+        Transform {
+            translation: self.from.translation.lerp(self.to.translation, eased),
+            rotation: self.from.rotation.slerp(self.to.rotation, eased),
+            scale: self.to.scale,
+        }
+    }
+}
+
+/// Frames the model once its bounds are known, and turns the view about it
+/// when the options ask for a moving camera.
 ///
-/// The controls themselves are `bevy_panorbit_camera`'s. A hand-rolled orbit
-/// gets drag direction wrong on trackpads and has no inertia, focus handling
-/// or zoom limits, and none of that is what this spike is measuring.
-///
-/// Orbit is on the right button and pan on the middle one, because the left
-/// belongs to the joint gizmo — a camera control and a joint control competing
-/// for one drag makes both feel broken.
+/// The controller works from wherever the camera stands, so framing is
+/// placing the camera: at the options' angle and height about the model's
+/// centre, far enough out that its bounding sphere fits the view with a little
+/// air, looking at the centre. A person watching sees it approach from where
+/// it stood; a capture or a measurement has it placed at once. The controller is told how deep that centre is,
+/// so a gesture begun over empty space anchors there rather than somewhere
+/// arbitrary.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn fit_orbit(
     opts: Res<SceneOptions>,
+    held: Res<OrbitHeld>,
     time: Res<Time>,
     framing: Res<Framing>,
-    mut cameras: Query<(&mut PanOrbitCamera, &mut Projection), With<OrbitCamera>>,
+    pointer: Option<Res<arora_visuals::transform_gizmo::GizmoPointer>>,
+    mut scrolls: MessageReader<MouseWheel>,
+    mut cameras: Query<
+        (
+            Entity,
+            &mut Transform,
+            &mut PanOrbitCamera,
+            &mut Projection,
+            &mut CameraBindings,
+            Option<&mut Glide>,
+        ),
+        With<OrbitCamera>,
+    >,
+    mut commands: Commands,
 ) {
+    // A scroll this frame: the zoom moves the camera itself, outside the
+    // controller's motion, so a glide must give way to it as to a gesture.
+    let scrolled = scrolls.read().count() > 0;
+    // A gizmo drag casts its ray from the camera, so a camera that turns
+    // under it would move the handle with the pointer standing still.
+    let dragging = pointer.is_some_and(|pointer| pointer.dragging.is_some());
     if !framing.fitted {
         return;
     }
-    // Far enough out that the bounding sphere fits the vertical field of view,
-    // with a little air around it.
-    let distance = framing.radius * 2.6;
-    for (mut orbit, mut projection) in &mut cameras {
+    let distance = framing.radius * FRAMING_DISTANCE;
+    for (camera, mut transform, mut controller, mut projection, mut bindings, glide) in &mut cameras
+    {
         if framing.is_changed() {
-            orbit.focus = framing.center;
-            orbit.target_focus = framing.center;
-            orbit.radius = Some(distance);
-            orbit.target_radius = distance;
-            orbit.yaw = Some(opts.angle);
-            orbit.target_yaw = opts.angle;
-            orbit.pitch = Some(opts.pitch);
-            orbit.target_pitch = opts.pitch;
-            orbit.zoom_lower_limit = framing.radius * 0.4;
-            orbit.zoom_upper_limit = Some(framing.radius * 20.0);
-            // The controller initialises itself from the camera's transform,
-            // and this camera has none worth reading; without this it keeps
-            // its own state and ignores everything set above.
-            orbit.force_update = true;
+            // Above the floor, as the pose it glides from is: a glide eases
+            // its height evenly between the two, so it never dips below.
+            let framed = above_floor(
+                standing(&opts, framing.center, distance),
+                framing.center,
+                bindings.floor,
+            );
+            // A capture or a measurement wants the framed view at once; a
+            // person watching gets there by a glide, not a jump.
+            if opts.offscreen || opts.screenshot.is_some() {
+                *transform = framed;
+            } else {
+                commands.entity(camera).insert(Glide {
+                    from: *transform,
+                    to: framed,
+                    elapsed: 0.0,
+                });
+            }
+            // Where the framed camera's pivot will be; while a glide carries
+            // the camera there, each step sets it from where the camera is.
+            controller.last_anchor_depth = -f64::from(distance);
+            // Near enough to look a part over, never into it; far enough to
+            // see the robot whole, never so far it shrinks to nothing.
+            bindings.min_distance = framing.radius * 0.4;
+            bindings.max_distance = framing.radius * 20.0;
 
             // The default near/far pair assumes a metre-scale world; a model in
-            // millimetres would sit entirely behind the far plane.
+            // millimetres would sit entirely behind the far plane. The far
+            // plane also has to reach the stage's ground most of the way to the
+            // horizon, or a band of whatever lies beyond shows beneath it.
             *projection = Projection::Perspective(PerspectiveProjection {
                 near: framing.radius * 0.01,
-                far: framing.radius * 40.0,
+                far: (framing.radius * 40.0).max(stage::GROUND_REACH),
                 ..default()
             });
         }
 
+        // A glide gives way at once to a gesture, a scroll or a gizmo drag —
+        // a drag casts its ray from the camera, so a gliding camera would
+        // carry the held handle with it — leaving the camera where it is;
+        // otherwise it eases on to the framed view.
+        if let Some(mut glide) = glide {
+            if controller.current_motion.is_moving() || scrolled || dragging {
+                commands.entity(camera).remove::<Glide>();
+            } else {
+                glide.elapsed += time.delta_secs();
+                *transform = glide.at();
+                // The pivot follows the camera in: how far along its view the
+                // model's centre stands now, so a gesture or a scroll that
+                // ends the glide on any frame turns, pans or zooms about the
+                // model rather than about where the camera will end up.
+                let depth = (framing.center - transform.translation).dot(*transform.forward());
+                controller.last_anchor_depth = -f64::from(depth.max(f32::EPSILON));
+                if glide.elapsed >= GLIDE_SECONDS {
+                    commands.entity(camera).remove::<Glide>();
+                }
+                continue;
+            }
+        }
+
         // A turning camera is what the frame-time measurement wants; a still
-        // one is what inspecting a joint wants. Driving the target rather than
-        // the angle leaves the controller free to take over mid-turn.
-        if !opts.still {
-            orbit.target_yaw = opts.angle + time.elapsed_secs() * 0.35;
+        // one is what inspecting a joint wants. It turns only while nobody is
+        // moving it, so a gesture is never fought, and not while a control
+        // over the view holds it.
+        if !opts.still && !held.0 && !controller.current_motion.is_moving() && !dragging {
+            transform.rotate_around(
+                framing.center,
+                Quat::from_rotation_y(time.delta_secs() * 0.35),
+            );
         }
     }
 }
+
+/// Ghosts each robot as it appears, when the options ask for it.
+fn ghost_robots(
+    opts: Res<SceneOptions>,
+    mut commands: Commands,
+    instances: Query<Entity, Added<arora_visuals::EntityInstance>>,
+) {
+    if !opts.ghost {
+        return;
+    }
+    for instance in &instances {
+        commands.entity(instance).insert(Ghost);
+    }
+}
+
+/// Whether something over the view is holding the camera's own turning
+/// still, as a panel being worked is: a view turning under a slider being
+/// dragged is the slider and the view changing at once. Set each frame by
+/// whatever holds it; gestures are kept off such controls by picking.
+#[derive(Resource, Default, PartialEq)]
+pub struct OrbitHeld(pub bool);
+
+/// How ghosts show: washed toward the theme's ink rather than white, and how
+/// strong their rim is on the light theme. The toggles change it, and the
+/// options set where it starts.
+#[derive(Resource, Default, Clone, Copy, PartialEq)]
+pub struct WashChoice {
+    pub theme: bool,
+    /// The rim's strength against Studio's on the light theme, where a dark
+    /// wash on a light ground holds its outline less than white on dark.
+    pub light_rim: f32,
+    /// Whether the options have been read into it yet.
+    started: bool,
+}
+
+/// Sets how ghosts show, from the theme and the choice.
+fn wash_ghosts(
+    opts: Res<SceneOptions>,
+    stage: Option<Res<stage::Stage>>,
+    mut choice: ResMut<WashChoice>,
+    mut look: ResMut<GhostLook>,
+) {
+    if !choice.started {
+        choice.theme = opts.ghost_wash_theme;
+        choice.light_rim = opts.ghost_rim;
+        choice.started = true;
+    }
+    let light = stage.is_some_and(|stage| stage.theme == stage::Theme::Light);
+    let wanted = if choice.theme && light {
+        GhostLook {
+            wash: stage::LIGHT_INK,
+            rim: choice.light_rim,
+        }
+    } else {
+        GhostLook::default()
+    };
+    if *look != wanted {
+        *look = wanted;
+    }
+}
+
+/// Hides a joint control while the body it moves is ghosted, as Studio does:
+/// a ghost shows where the robot is, not something to take hold of.
+/// Every gizmo, of either kind, with its visibility.
+type Controls<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static JointGizmo>,
+        Option<&'static TransformGizmo>,
+        &'static mut Visibility,
+    ),
+    Or<(With<JointGizmo>, With<TransformGizmo>)>,
+>;
+
+fn hide_controls_on_ghosts(
+    mut gizmos: Controls,
+    ghosts: Query<(), With<Ghost>>,
+    parents: Query<&ChildOf>,
+) {
+    for (joint, transform, mut visibility) in &mut gizmos {
+        let Some(target) = joint
+            .map(|gizmo| gizmo.target)
+            .or(transform.map(|gizmo| gizmo.target))
+        else {
+            continue;
+        };
+        let ghosted = std::iter::once(target)
+            .chain(parents.iter_ancestors(target))
+            .any(|entity| ghosts.contains(entity));
+        let wanted = if ghosted {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
+}
+
+/// Puts a transform gizmo on the first instance once there is one, when the
+/// options ask for it.
+fn attach_gizmo(
+    opts: Res<SceneOptions>,
+    mut commands: Commands,
+    instances: Query<(Entity, &arora_visuals::EntityInstance)>,
+    cameras: Query<Entity, With<OrbitCamera>>,
+    gizmos: Query<(), With<TransformGizmo>>,
+) {
+    let Some(modes) = opts.gizmo else {
+        return;
+    };
+    if !gizmos.is_empty() {
+        return;
+    }
+    let (Some((target, instance)), Some(camera)) = (instances.iter().next(), cameras.iter().next())
+    else {
+        return;
+    };
+    commands.spawn(TransformGizmo {
+        // Named in the overlay by the instance it moves.
+        key: instance.id.clone(),
+        modes,
+        space: opts.gizmo_space,
+        // Labelled as the view gizmo is, for Studio's Z-up world, so the two
+        // agree on which way each axis points.
+        axes: TransformGizmo::Z_UP,
+        ..TransformGizmo::new(target, camera)
+    });
+}
+
+/// While M, R or S is held, the gizmo shows only its moving, turning or
+/// scaling handles; otherwise it shows what the toggles chose.
+fn choose_gizmo_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    picked: Res<toggles::GizmoChoice>,
+    mut gizmos: Query<&mut TransformGizmo>,
+) {
+    let only = if keys.pressed(KeyCode::KeyM) {
+        Some(TransformMode::Translate)
+    } else if keys.pressed(KeyCode::KeyR) {
+        Some(TransformMode::Rotate)
+    } else if keys.pressed(KeyCode::KeyS) {
+        Some(TransformMode::Scale)
+    } else {
+        picked.0
+    };
+    for mut gizmo in &mut gizmos {
+        if gizmo.only != only {
+            gizmo.only = only;
+        }
+    }
+}
+
+/// Turns the camera toward a view the view gizmo asked for, with the
+/// controller's own `look_to`: it swings about its anchor until it faces the
+/// way the request names, from the side the request names, keeping the
+/// world's up where it can.
+///
+/// A view from beneath a camera's floor is declined: the camera could only
+/// reach it by passing below the floor, which raises it back every frame, so
+/// the turn and the floor would pull against each other without end.
+fn look_from(
+    look: On<LookFrom>,
+    cameras: Query<(&GlobalTransform, &PanOrbitCamera, Option<&CameraBindings>), With<OrbitCamera>>,
+    mut turns: MessageWriter<LookToTrigger>,
+    mut commands: Commands,
+) {
+    let Ok((at, controller, bindings)) = cameras.get(look.camera) else {
+        return;
+    };
+    let floor = bindings.and_then(|bindings| bindings.floor);
+    if floor.is_some_and(|floor| look.from.dot(*floor.up) < -0.5) {
+        return;
+    }
+    // A turn asked for ends the opening glide, as a gesture does, or the
+    // glide would set the camera over the turn every frame until it ended.
+    commands.entity(look.camera).remove::<Glide>();
+    // Looking from a side is facing back across from it.
+    let facing = -look.from.as_vec3().as_dvec3();
+    turns.write(LookToTrigger::auto_snap_up_direction(
+        facing,
+        look.camera,
+        &at.rotation().as_dquat(),
+        controller,
+    ));
+}
+
+/// The meshes a census counts: everything but the stage.
+type CensusMeshes<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Mesh3d,
+        &'static GlobalTransform,
+        Option<&'static Aabb>,
+        Option<&'static RenderLayers>,
+    ),
+    (
+        Without<stage::StageMesh>,
+        Without<OutlineOverlay>,
+        Without<GizmoPart>,
+    ),
+>;
+
+/// The meshes whose visibility is counted: everything but the stage.
+type VisibleMeshes<'w, 's> = Query<
+    'w,
+    's,
+    (&'static ViewVisibility, Option<&'static RenderLayers>),
+    (
+        With<Mesh3d>,
+        Without<stage::StageMesh>,
+        Without<OutlineOverlay>,
+        Without<GizmoPart>,
+    ),
+>;
+
+/// The robot's meshes with a material, its own or a ghost's in its place.
+type MaterialMeshes<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        Or<(
+            With<MeshMaterial3d<StandardMaterial>>,
+            With<MeshMaterial3d<arora_visuals::ghost::GhostMaterial>>,
+        )>,
+        Without<stage::StageMesh>,
+        Without<GizmoPart>,
+    ),
+>;
 
 /// Counts what the glTF actually brought in, and measures where it sits.
 ///
@@ -1128,13 +1360,8 @@ fn take_census(
     frames: Res<Frames>,
     mut census: ResMut<Census>,
     mut framing: ResMut<Framing>,
-    meshes: Query<(
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Aabb>,
-        Option<&RenderLayers>,
-    )>,
-    materials: Query<&MeshMaterial3d<StandardMaterial>>,
+    meshes: CensusMeshes,
+    materials: MaterialMeshes,
     assets: Res<Assets<Mesh>>,
 ) {
     if census.taken || frames.elapsed < 0.5 {
@@ -1238,10 +1465,7 @@ fn split_materials(
 
 /// Tracks how many meshes survived culling, which is the engine's own answer
 /// to "is the camera looking at the robot".
-fn count_visible(
-    mut census: ResMut<Census>,
-    meshes: Query<(&ViewVisibility, Option<&RenderLayers>), With<Mesh3d>>,
-) {
+fn count_visible(mut census: ResMut<Census>, meshes: VisibleMeshes) {
     let visible = meshes
         .iter()
         .filter(|(visible, layers)| visible.get() && !on_mounted_layer(*layers))
@@ -1367,5 +1591,186 @@ pub fn report(opts: &SceneOptions, frames: &Frames, census: &Census) {
                 n => format!(" / plus {n} face meshes on their own layer"),
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the view gizmo's request asks the controller to face, looking
+    /// from `from`.
+    fn facing_from(from: Dir3) -> DVec3 {
+        let mut app = App::new();
+        app.add_message::<LookToTrigger>().add_observer(look_from);
+        let camera = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                PanOrbitCamera {
+                    orbit_constraint: OrbitConstraint::Fixed {
+                        up: DVec3::Y,
+                        can_pass_tdc: false,
+                    },
+                    ..default()
+                },
+                OrbitCamera,
+            ))
+            .id();
+        app.world_mut().trigger(LookFrom { camera, from });
+        let turns = app.world().resource::<Messages<LookToTrigger>>();
+        let mut reader = turns.get_cursor();
+        let turn = reader.read(turns).next().expect("a turn was asked for");
+        assert_eq!(turn.camera, camera);
+        turn.target_facing_direction
+    }
+
+    /// A pose below the floor is raised onto it and still looks at its
+    /// centre; one above it, or with no floor, is left as it is.
+    #[test]
+    fn a_pose_below_the_floor_is_raised_onto_it() {
+        let centre = Vec3::new(0.0, 0.7, 0.0);
+        let low = Transform::from_xyz(0.0, -1.0, 3.0).looking_at(centre, Vec3::Y);
+        let raised = above_floor(low, centre, Some(CAMERA_FLOOR));
+        assert!((raised.translation.y - CAMERA_FLOOR.height).abs() < 1e-5);
+        let facing = (centre - raised.translation).normalize();
+        assert!(raised.forward().as_vec3().abs_diff_eq(facing, 1e-5));
+        let high = Transform::from_xyz(0.0, 2.0, 3.0).looking_at(centre, Vec3::Y);
+        assert_eq!(above_floor(high, centre, Some(CAMERA_FLOOR)), high);
+        assert_eq!(above_floor(low, centre, None), low);
+    }
+
+    /// No step of the glide travels past where it ends.
+    #[test]
+    fn the_glide_never_passes_its_end() {
+        let glide = |elapsed| Glide {
+            from: Transform::from_xyz(0.0, 2.0, 4.0),
+            to: Transform::from_xyz(0.0, 0.0, 2.0),
+            elapsed,
+        };
+        for step in 0..=1000 {
+            let at = glide(GLIDE_SECONDS * step as f32 / 1000.0).at();
+            assert!(at.translation.y >= 0.0, "below its end at step {step}");
+        }
+    }
+
+    /// The camera's own turning stops while something holds it, and
+    /// resumes when it lets go.
+    #[test]
+    fn a_held_orbit_does_not_turn() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<MouseWheel>()
+            // Placed at once rather than glided to, so the turning starts on
+            // the first frame.
+            .insert_resource(SceneOptions {
+                offscreen: true,
+                ..default()
+            })
+            .init_resource::<OrbitHeld>()
+            .insert_resource(Framing {
+                center: Vec3::ZERO,
+                radius: 1.0,
+                fitted: true,
+            })
+            .add_systems(Update, fit_orbit);
+        let camera = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 1.0, 3.0),
+                PanOrbitCamera::default(),
+                Projection::default(),
+                CameraBindings::default(),
+                OrbitCamera,
+            ))
+            .id();
+        let turned = |app: &mut App| {
+            let before = *app.world().get::<Transform>(camera).unwrap();
+            for _ in 0..3 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.update();
+            }
+            let after = *app.world().get::<Transform>(camera).unwrap();
+            !before.translation.abs_diff_eq(after.translation, 1e-6)
+        };
+        app.update();
+        app.world_mut().resource_mut::<OrbitHeld>().0 = true;
+        assert!(!turned(&mut app), "held");
+        app.world_mut().resource_mut::<OrbitHeld>().0 = false;
+        assert!(turned(&mut app), "let go");
+    }
+
+    /// A view asked for ends the opening glide.
+    #[test]
+    fn a_view_asked_for_ends_the_glide() {
+        let mut app = App::new();
+        app.add_message::<LookToTrigger>().add_observer(look_from);
+        let camera = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                PanOrbitCamera::default(),
+                OrbitCamera,
+                Glide {
+                    from: Transform::default(),
+                    to: Transform::default(),
+                    elapsed: 0.0,
+                },
+            ))
+            .id();
+        app.world_mut().trigger(LookFrom {
+            camera,
+            from: Dir3::X,
+        });
+        app.world_mut().flush();
+        assert!(app.world().get::<Glide>(camera).is_none());
+    }
+
+    /// With a floor, a view from beneath it is declined; every other view is
+    /// still turned to.
+    #[test]
+    fn a_view_from_beneath_the_floor_is_declined() {
+        let asked = |from: Dir3| {
+            let mut app = App::new();
+            app.add_message::<LookToTrigger>().add_observer(look_from);
+            let camera = app
+                .world_mut()
+                .spawn((
+                    GlobalTransform::default(),
+                    PanOrbitCamera::default(),
+                    CameraBindings {
+                        floor: Some(CAMERA_FLOOR),
+                        ..default()
+                    },
+                    OrbitCamera,
+                ))
+                .id();
+            app.world_mut().trigger(LookFrom { camera, from });
+            let turns = app.world().resource::<Messages<LookToTrigger>>();
+            turns.get_cursor().read(turns).count()
+        };
+        assert_eq!(asked(Dir3::NEG_Y), 0, "from beneath the floor");
+        assert_eq!(asked(Dir3::Y), 1, "from above");
+        assert_eq!(asked(Dir3::X), 1, "from a side");
+    }
+
+    /// Looking from a side faces back across from it, for every side, up and
+    /// down included.
+    #[test]
+    fn looking_from_a_side_faces_back_across_it() {
+        for from in [
+            Dir3::X,
+            Dir3::NEG_X,
+            Dir3::Z,
+            Dir3::NEG_Z,
+            Dir3::Y,
+            Dir3::NEG_Y,
+        ] {
+            let facing = facing_from(from);
+            assert!(
+                facing.abs_diff_eq(-from.as_vec3().as_dvec3(), 1e-9),
+                "{from:?} faces {facing:?}"
+            );
+        }
     }
 }

@@ -29,6 +29,17 @@ arora-visuals = { git = "https://github.com/semio-ai/arora-visuals", branch = "m
 
 bevy = { version = "0.20", default-features = false }
 
+# Iterating: Bevy and every other dependency fully optimised, which is paid
+# once, and this workspace's own code lightly, so a change rebuilds in
+# seconds and the window still runs near release speed. A release build
+# re-optimises the whole program on one core on every change, which takes
+# minutes; it is for shipping and for measuring size, not for trying things.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = "s"
 lto = true
