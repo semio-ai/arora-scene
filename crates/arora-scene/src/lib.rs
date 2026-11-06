@@ -1228,14 +1228,22 @@ fn choose_gizmo_mode(
 /// controller's own `look_to`: it swings about its anchor until it faces the
 /// way the request names, from the side the request names, keeping the
 /// world's up where it can.
+///
+/// A view from beneath a camera's floor is declined: the camera could only
+/// reach it by passing below the floor, which raises it back every frame, so
+/// the turn and the floor would pull against each other without end.
 fn look_from(
     look: On<LookFrom>,
-    cameras: Query<(&GlobalTransform, &PanOrbitCamera), With<OrbitCamera>>,
+    cameras: Query<(&GlobalTransform, &PanOrbitCamera, Option<&CameraBindings>), With<OrbitCamera>>,
     mut turns: MessageWriter<LookToTrigger>,
 ) {
-    let Ok((at, controller)) = cameras.get(look.camera) else {
+    let Ok((at, controller, bindings)) = cameras.get(look.camera) else {
         return;
     };
+    let floor = bindings.and_then(|bindings| bindings.floor);
+    if floor.is_some_and(|floor| look.from.dot(*floor.up) < -0.5) {
+        return;
+    }
     // Looking from a side is facing back across from it.
     let facing = -look.from.as_vec3().as_dvec3();
     turns.write(LookToTrigger::auto_snap_up_direction(
@@ -1563,6 +1571,34 @@ mod tests {
         let turn = reader.read(turns).next().expect("a turn was asked for");
         assert_eq!(turn.camera, camera);
         turn.target_facing_direction
+    }
+
+    /// With a floor, a view from beneath it is declined; every other view is
+    /// still turned to.
+    #[test]
+    fn a_view_from_beneath_the_floor_is_declined() {
+        let asked = |from: Dir3| {
+            let mut app = App::new();
+            app.add_message::<LookToTrigger>().add_observer(look_from);
+            let camera = app
+                .world_mut()
+                .spawn((
+                    GlobalTransform::default(),
+                    PanOrbitCamera::default(),
+                    CameraBindings {
+                        floor: Some(CAMERA_FLOOR),
+                        ..default()
+                    },
+                    OrbitCamera,
+                ))
+                .id();
+            app.world_mut().trigger(LookFrom { camera, from });
+            let turns = app.world().resource::<Messages<LookToTrigger>>();
+            turns.get_cursor().read(turns).count()
+        };
+        assert_eq!(asked(Dir3::NEG_Y), 0, "from beneath the floor");
+        assert_eq!(asked(Dir3::Y), 1, "from above");
+        assert_eq!(asked(Dir3::X), 1, "from a side");
     }
 
     /// Looking from a side faces back across from it, for every side, up and
