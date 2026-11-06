@@ -183,6 +183,7 @@ impl Plugin for ScenePlugin {
             TransformGizmoPlugin,
             OverlayPlugin,
             arora_visuals::ghost::GhostPlugin,
+            arora_visuals::fade::FadePlugin,
             arora_visuals::axes::FrameAxesPlugin,
             arora_visuals::active_area::ActiveAreaPlugin,
             toggles::TogglesPlugin,
@@ -965,7 +966,7 @@ impl Glide {
     }
 }
 
-/// Shows each robot once the view is framed on it.
+/// Shows each robot once the view is framed on it, fading it in.
 fn reveal_framed(
     framing: Res<Framing>,
     mut robots: Query<(Entity, &mut Visibility), With<AwaitingFrame>>,
@@ -976,7 +977,12 @@ fn reveal_framed(
     }
     for (robot, mut visibility) in &mut robots {
         *visibility = Visibility::Inherited;
-        commands.entity(robot).remove::<AwaitingFrame>();
+        // Faded in, quickly, as it arrives; only here, so a robot already
+        // shown never fades again and one added later fades in its turn.
+        commands
+            .entity(robot)
+            .remove::<AwaitingFrame>()
+            .insert(arora_visuals::fade::FadeIn::default());
     }
 }
 
