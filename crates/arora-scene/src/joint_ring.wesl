@@ -12,7 +12,7 @@
 // Reading those is both simpler and independent of which plane the mesh
 // happens to be built in.
 
-#import bevy_pbr::forward_io::VertexOutput
+import bevy_pbr::render::forward_io::VertexOutput;
 
 struct JointRing {
     // All angles in radians, normalised to [0, 2pi).
@@ -25,7 +25,7 @@ struct JointRing {
     background: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> ring: JointRing;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> ring: JointRing;
 
 const TAU: f32 = 6.28318530718;
 

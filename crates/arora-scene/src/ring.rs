@@ -7,7 +7,7 @@
 //! rather than a colour change.
 //!
 //! The shader itself ported across unchanged in substance; see
-//! `joint_ring.wgsl` for the one place the two engines differ.
+//! `joint_ring.wesl` for the one place the two engines differ.
 
 use bevy::asset::{embedded_asset, embedded_path, AssetPath};
 use bevy::pbr::{Material, MaterialPlugin};
@@ -56,7 +56,7 @@ pub struct JointRingMaterial {
 
 impl Material for JointRingMaterial {
     fn fragment_shader() -> ShaderRef {
-        embedded_shader!("joint_ring.wgsl")
+        embedded_shader!("joint_ring.wesl")
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -83,7 +83,7 @@ pub struct JointBarMaterial {
 
 impl Material for JointBarMaterial {
     fn fragment_shader() -> ShaderRef {
-        embedded_shader!("joint_bar.wgsl")
+        embedded_shader!("joint_bar.wesl")
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -101,8 +101,8 @@ impl Plugin for JointRingPlugin {
     fn build(&self, app: &mut App) {
         // Carried in the binary rather than loaded from the asset root, which
         // here is wherever the robot happens to live.
-        embedded_asset!(app, "joint_ring.wgsl");
-        embedded_asset!(app, "joint_bar.wgsl");
+        embedded_asset!(app, "joint_ring.wesl");
+        embedded_asset!(app, "joint_bar.wesl");
         app.add_plugins((
             MaterialPlugin::<JointRingMaterial>::default(),
             MaterialPlugin::<JointBarMaterial>::default(),

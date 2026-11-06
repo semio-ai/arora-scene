@@ -1,6 +1,6 @@
 // The sliding joint's bar, ported from Studio's `materials/prism-material.tsx`.
 //
-// The linear twin of `joint_ring.wgsl`, and the same idea stripped of what a
+// The linear twin of `joint_ring.wesl`, and the same idea stripped of what a
 // circle needs: a progress coordinate along the control compared against where
 // the joint stands. Travelled reads solid, the rest of the range reads dim.
 // Nothing wraps, because a slide has two ends.
@@ -10,7 +10,7 @@
 // the mesh's `uv.y`, which runs the same length — the fragment stage is handed
 // UVs rather than a local position, and the two say the same thing.
 
-#import bevy_pbr::forward_io::VertexOutput
+import bevy_pbr::render::forward_io::VertexOutput;
 
 struct JointBar {
     // The travel, in metres, and where the joint stands in it.
@@ -22,7 +22,7 @@ struct JointBar {
     background: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> bar: JointBar;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> bar: JointBar;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
