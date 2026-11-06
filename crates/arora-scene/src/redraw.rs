@@ -13,8 +13,8 @@
 //!   arriving. One rule rather than one per feature, so a new thing that
 //!   moves needs nothing added here;
 //! - **anything appeared or was restyled**: a mesh added, a mesh or material
-//!   or image asset added or changed, a visibility toggled, a selection or
-//!   stage choice changed;
+//!   or image asset added or changed, a visibility toggled (by value, as
+//!   transforms are), a selection or stage choice changed;
 //! - **work is still owed**: the camera has not been framed yet, a robot has
 //!   not spawned, or a pipeline is still compiling — each of which only
 //!   finishes on a later frame;
@@ -97,7 +97,9 @@ struct Owed<'w, 's> {
     moved: Query<'w, 's, (Entity, &'static GlobalTransform), Changed<GlobalTransform>>,
     /// Where each entity whose transform was written last stood.
     stood: Local<'s, bevy::ecs::entity::EntityHashMap<GlobalTransform>>,
-    shown: Query<'w, 's, (), Changed<Visibility>>,
+    shown: Query<'w, 's, (Entity, &'static Visibility), Changed<Visibility>>,
+    /// What each entity whose visibility was written was last set to.
+    was: Local<'s, bevy::ecs::entity::EntityHashMap<Visibility>>,
     added: Query<'w, 's, (), Added<Mesh3d>>,
     unspawned: Query<'w, 's, (), (With<WorldAssetRoot>, Without<Children>)>,
     stage: Res<'w, Stage>,
@@ -121,8 +123,21 @@ impl Owed<'_, '_> {
         moved
     }
 
+    /// Whether any written visibility actually changed, likewise by value:
+    /// a system that sets the same visibility every frame shows nothing new.
+    fn shown_any(&mut self) -> bool {
+        let mut shown = false;
+        for (entity, visibility) in &self.shown {
+            if self.was.insert(entity, *visibility) != Some(*visibility) {
+                shown = true;
+            }
+        }
+        shown
+    }
+
     fn any(&mut self) -> bool {
         let moved = self.moved_any();
+        let shown = self.shown_any();
         // Every reader is drained, so a change is seen once.
         let assets = self.meshes.read().count() + self.materials.read().count()
             + self.images.read().count()
@@ -132,7 +147,7 @@ impl Owed<'_, '_> {
             || self.pending.0.load(Ordering::Relaxed)
             || !self.glides.is_empty()
             || moved
-            || !self.shown.is_empty()
+            || shown
             || !self.added.is_empty()
             || !self.unspawned.is_empty()
             || self.stage.is_changed()
