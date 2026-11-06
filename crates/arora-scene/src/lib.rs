@@ -32,6 +32,7 @@ use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
 use bevy::gltf::GltfAssetLabel;
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
@@ -112,9 +113,12 @@ pub struct SceneOptions {
     /// A ghost's rim strength against Studio's on the light theme, when
     /// washing toward the theme.
     pub ghost_rim: f32,
-    /// Frame the view beside a panel covering its right side.
+    /// Frame the view beside the test window's stand-in panel at the start.
+    /// Acted on by [`toggles::TogglesPlugin`], which a host leaves out: a
+    /// host frames beside its own panels with an active area of its own.
     pub panel: bool,
-    /// Which reference frames show axes at the start.
+    /// Which reference frames show axes at the start, by the test window's
+    /// toggles.
     pub frames: toggles::Frames,
     /// How they are drawn.
     pub frame_style: toggles::FrameStyle,
@@ -185,9 +189,10 @@ impl Plugin for ScenePlugin {
             arora_visuals::ghost::GhostPlugin,
             arora_visuals::axes::FrameAxesPlugin,
             arora_visuals::active_area::ActiveAreaPlugin,
-            toggles::TogglesPlugin,
         ))
         .init_resource::<WashChoice>()
+        // Read by the scene's gizmo systems; the test window's toggles set it.
+        .init_resource::<toggles::GizmoChoice>()
         .add_systems(
             Update,
             (
@@ -986,6 +991,8 @@ fn fit_orbit(
     opts: Res<SceneOptions>,
     time: Res<Time>,
     framing: Res<Framing>,
+    pointer: Option<Res<arora_visuals::transform_gizmo::GizmoPointer>>,
+    mut scrolls: MessageReader<MouseWheel>,
     mut cameras: Query<
         (
             Entity,
@@ -999,6 +1006,12 @@ fn fit_orbit(
     >,
     mut commands: Commands,
 ) {
+    // A scroll this frame: the zoom moves the camera itself, outside the
+    // controller's motion, so a glide must give way to it as to a gesture.
+    let scrolled = scrolls.read().count() > 0;
+    // A gizmo drag casts its ray from the camera, so a camera that turns
+    // under it would move the handle with the pointer standing still.
+    let dragging = pointer.is_some_and(|pointer| pointer.dragging.is_some());
     if !framing.fitted {
         return;
     }
@@ -1038,7 +1051,7 @@ fn fit_orbit(
         // A glide gives way to a gesture at once, leaving the camera where
         // the person took it; otherwise it eases on to the framed view.
         if let Some(mut glide) = glide {
-            if controller.current_motion.is_moving() {
+            if controller.current_motion.is_moving() || scrolled {
                 commands.entity(camera).remove::<Glide>();
             } else {
                 glide.elapsed += time.delta_secs();
@@ -1053,7 +1066,7 @@ fn fit_orbit(
         // A turning camera is what the frame-time measurement wants; a still
         // one is what inspecting a joint wants. It turns only while nobody is
         // moving it, so a gesture is never fought.
-        if !opts.still && !controller.current_motion.is_moving() {
+        if !opts.still && !controller.current_motion.is_moving() && !dragging {
             transform.rotate_around(
                 framing.center,
                 Quat::from_rotation_y(time.delta_secs() * 0.35),

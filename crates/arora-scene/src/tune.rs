@@ -48,7 +48,7 @@ enum Knob {
 impl Knob {
     fn label(self) -> &'static str {
         match self {
-            Knob::Floor => "floor grey (#000000 to #333333)",
+            Knob::Floor => "floor grey (#000000 to #ffffff)",
             Knob::Midpoint => "gradient midpoint (degrees)",
             Knob::HorizonRed => "horizon red",
             Knob::HorizonGreen => "horizon green",
@@ -66,7 +66,8 @@ impl Knob {
 
     fn range(self) -> (f32, f32, f32) {
         match self {
-            Knob::Floor => (0.0, 51.0, 1.0),
+            // The whole range, so either theme's floor sits within it.
+            Knob::Floor => (0.0, 255.0, 1.0),
             Knob::Midpoint => (0.5, 30.0, 0.1),
             Knob::HorizonRed | Knob::HorizonGreen | Knob::HorizonBlue => (0.0, 255.0, 1.0),
             Knob::AuroraBrightness => (0.0, 2.0, 0.01),

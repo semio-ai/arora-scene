@@ -382,6 +382,10 @@ fn main() {
     if cli.screen {
         arora_scene::mount_screen(&mut app, &assets, &glb);
     }
+    // The test window's panels: clickable toggles for every option, and a
+    // stand-in for a sidebar. The binary's, not the scene's, so a host
+    // embedding the scene keeps its own controls and framing.
+    app.add_plugins(arora_scene::toggles::TogglesPlugin);
     if cli.tune {
         app.add_plugins(arora_scene::tune::TunePlugin);
     }
