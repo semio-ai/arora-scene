@@ -984,12 +984,14 @@ impl Glide {
     /// Studio's curve for its bounds fit.
     fn at(&self) -> Transform {
         let t = (self.elapsed / GLIDE_SECONDS).clamp(0.0, 1.0);
-        // The curve stops just short of one; the glide's last frame is the
-        // framing itself.
+        // The glide's last frame is the framing itself.
         if t >= 1.0 {
             return self.to;
         }
-        let eased = 1.0 - (-5.0 * t).exp() + 0.007 * t;
+        // The curve passes one just before its end; held at one there, the
+        // camera never travels past the framing, which may stand on the
+        // floor, so it never dips below it.
+        let eased = (1.0 - (-5.0 * t).exp() + 0.007 * t).min(1.0);
         Transform {
             translation: self.from.translation.lerp(self.to.translation, eased),
             rotation: self.from.rotation.slerp(self.to.rotation, eased),
@@ -1626,6 +1628,20 @@ mod tests {
         let high = Transform::from_xyz(0.0, 2.0, 3.0).looking_at(centre, Vec3::Y);
         assert_eq!(above_floor(high, centre, Some(CAMERA_FLOOR)), high);
         assert_eq!(above_floor(low, centre, None), low);
+    }
+
+    /// No step of the glide travels past where it ends.
+    #[test]
+    fn the_glide_never_passes_its_end() {
+        let glide = |elapsed| Glide {
+            from: Transform::from_xyz(0.0, 2.0, 4.0),
+            to: Transform::from_xyz(0.0, 0.0, 2.0),
+            elapsed,
+        };
+        for step in 0..=1000 {
+            let at = glide(GLIDE_SECONDS * step as f32 / 1000.0).at();
+            assert!(at.translation.y >= 0.0, "below its end at step {step}");
+        }
     }
 
     /// A view asked for ends the opening glide.
