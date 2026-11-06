@@ -251,8 +251,11 @@ fn parse_selection(arg: &str) -> Result<Selection, String> {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = <Cli as clap::Parser>::parse();
-    if cli.offscreen && cli.seconds <= 0.0 {
-        log::error!("--offscreen needs --seconds: with no window, nothing else ends the run");
+    // A length that never comes to pass — zero, infinite, or not a number,
+    // which no elapsed time is ever past — would leave a run with no window
+    // going for good.
+    if cli.offscreen && !(cli.seconds.is_finite() && cli.seconds > 0.0) {
+        log::error!("--offscreen needs a finite, positive --seconds: with no window, nothing else ends the run");
         std::process::exit(2);
     }
 
