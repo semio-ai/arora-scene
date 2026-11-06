@@ -221,7 +221,6 @@ dependencies = [
  "anyhow",
  "arora-visuals",
  "bevy",
- "bevy_panorbit_camera",
  "clap",
  "env_logger",
  "log",
@@ -232,7 +231,7 @@ dependencies = [
 [[package]]
 name = "arora-visuals"
 version = "0.0.0"
-source = "git+https://github.com/semio-ai/arora-visuals?branch=main#478b997688571c16ced4848844593a6fbc6a1da9"
+source = "git+https://github.com/semio-ai/arora-visuals?branch=main#40df0a09ddbe4b1b17448632eb47b81235ec0309"
 dependencies = [
  "anyhow",
  "bevy",
@@ -591,6 +590,32 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.21",
  "wgpu-types",
+]
+
+[[package]]
+name = "bevy_camera_controller"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d7e5d5c0b4f65ff3c8be38fde3d371747d30ef9fa571d382acde9fb8ccacf0a"
+dependencies = [
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_core_pipeline",
+ "bevy_curve",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_image",
+ "bevy_input",
+ "bevy_log",
+ "bevy_math",
+ "bevy_picking",
+ "bevy_platform",
+ "bevy_render",
+ "bevy_time",
+ "bevy_transform",
+ "bevy_window",
 ]
 
 [[package]]
@@ -972,6 +997,7 @@ dependencies = [
  "bevy_app",
  "bevy_asset",
  "bevy_camera",
+ "bevy_camera_controller",
  "bevy_color",
  "bevy_core_pipeline",
  "bevy_curve",
@@ -1009,6 +1035,7 @@ dependencies = [
  "bevy_transform",
  "bevy_ui",
  "bevy_ui_render",
+ "bevy_ui_widgets",
  "bevy_utils",
  "bevy_window",
  "bevy_winit",
@@ -1159,15 +1186,6 @@ name = "bevy_mikktspace"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
-
-[[package]]
-name = "bevy_panorbit_camera"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af273e956e0f7a54874e51fc79aa3535da55e7eb84afdd627758a7d7d6da0c9f"
-dependencies = [
- "bevy",
-]
 
 [[package]]
 name = "bevy_pbr"
@@ -1718,6 +1736,33 @@ dependencies = [
  "indexmap",
  "smallvec",
  "tracing",
+]
+
+[[package]]
+name = "bevy_ui_widgets"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41147a5459b0eaa5534e0a2c4f73999608bd21b369632cf5f3039e0d7d90e2d3"
+dependencies = [
+ "accesskit",
+ "bevy_a11y",
+ "bevy_app",
+ "bevy_camera",
+ "bevy_ecs",
+ "bevy_input",
+ "bevy_input_focus",
+ "bevy_log",
+ "bevy_math",
+ "bevy_picking",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_text",
+ "bevy_time",
+ "bevy_ui",
+ "bevy_window",
+ "parley",
+ "smol_str",
+ "web-sys",
 ]
 
 [[package]]
