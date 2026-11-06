@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use arora_scene::instance::{RobotMeta, Selected};
+use arora_scene::stage::Environment;
 use arora_scene::{OrbitCamera, RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
 use arora_visuals::select::Selection;
@@ -61,6 +62,9 @@ struct Options {
     /// Render at this many physical pixels per CSS pixel instead of the
     /// page's `devicePixelRatio`.
     scale_factor: Option<f32>,
+    /// `"sky"` for the sky environment, which under the dark theme shows the
+    /// aurora; anything else is the plain ground colour.
+    environment: Option<String>,
 }
 
 static FRAME_START: AtomicU64 = AtomicU64::new(0);
@@ -132,6 +136,10 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
         still: opts.still,
         shadows: opts.shadows.unwrap_or(true),
         gizmo: opts.gizmo.then_some(TransformModes::ALL),
+        environment: match opts.environment.as_deref() {
+            Some("sky") => Environment::Sky,
+            _ => Environment::Plain,
+        },
         ..default()
     })
     .insert_resource(RobotSpec { glb, copies })

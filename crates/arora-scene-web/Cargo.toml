@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 # One backend per build: Bevy chooses its wgpu backend at compile time.
 webgl2 = ["bevy/webgl2"]
 webgpu = ["bevy/webgpu"]
+# Bevy's spans for every system and render step, which the browser's
+# performance timeline records: per-system attribution for a profile, at the
+# cost of a mark and a measure per span. `debug` gives the spans their names.
+profile = ["bevy/trace", "bevy/debug"]
 
 [dependencies]
 arora-scene = { path = "../arora-scene", default-features = false }
