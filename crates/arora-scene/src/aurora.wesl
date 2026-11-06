@@ -103,5 +103,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let edge = mix(1.0, smoothstep(0.0, 0.6, facing), aurora.edge_fade);
     let strength = aurora.brightness * lower_edge * fade_upward * ends * rays * edge
         * above_hills(dir);
-    return vec4(colour * strength, strength);
+    // Light added to whatever is behind, which is all an aurora is: the
+    // material draws with Bevy's premultiplied blend, which keeps
+    // `1 - alpha` of what is behind, so alpha is nought — a strength there
+    // would dim the stars and the curtains behind instead of adding to them.
+    return vec4(colour * strength, 0.0);
 }
