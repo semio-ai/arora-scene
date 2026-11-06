@@ -863,11 +863,7 @@ pub fn setup(
     // what the host chose.
     let mut camera = commands.spawn((
         Camera3d::default(),
-        standing(
-            &opts,
-            ORDINARY_CENTRE,
-            ORDINARY_RADIUS * FRAMING_DISTANCE * STANDING_BACK,
-        ),
+        standing(&opts, ORDINARY_CENTRE, STARTING_DISTANCE),
         // Bevy's controller, under Studio's bindings: left orbits, right pans,
         // the wheel zooms. A gizmo's handle takes a press before the camera
         // does. The world is Y-up, and the view never tips over the top.
@@ -876,6 +872,9 @@ pub fn setup(
                 up: DVec3::Y,
                 can_pass_tdc: false,
             },
+            // Its pivot is where it stands back from, so a gesture before the
+            // robot is framed turns about the ordinary robot's middle.
+            last_anchor_depth: -f64::from(STARTING_DISTANCE),
             ..default()
         },
         CameraBindings {
@@ -932,6 +931,10 @@ const ORDINARY_RADIUS: f32 = 0.85;
 /// How much farther back than framing the camera starts: far enough that a
 /// robot well beyond ordinary size is still seen whole before it is framed.
 const STANDING_BACK: f32 = 2.0;
+
+/// How far the camera stands from the ordinary robot's middle before the
+/// model's bounds are known.
+const STARTING_DISTANCE: f32 = ORDINARY_RADIUS * FRAMING_DISTANCE * STANDING_BACK;
 
 /// How long the camera takes to approach the framed view: Studio's, as its
 /// scene's bounds fit takes.
@@ -1031,6 +1034,8 @@ fn fit_orbit(
                     elapsed: 0.0,
                 });
             }
+            // Where the framed camera's pivot will be; while a glide carries
+            // the camera there, each step sets it from where the camera is.
             controller.last_anchor_depth = -f64::from(distance);
             // Near enough to look a part over, never into it; far enough to
             // see the robot whole, never so far it shrinks to nothing.
@@ -1058,6 +1063,12 @@ fn fit_orbit(
             } else {
                 glide.elapsed += time.delta_secs();
                 *transform = glide.at();
+                // The pivot follows the camera in: how far along its view the
+                // model's centre stands now, so a gesture or a scroll that
+                // ends the glide on any frame turns, pans or zooms about the
+                // model rather than about where the camera will end up.
+                let depth = (framing.center - transform.translation).dot(*transform.forward());
+                controller.last_anchor_depth = -f64::from(depth.max(f32::EPSILON));
                 if glide.elapsed >= GLIDE_SECONDS {
                     commands.entity(camera).remove::<Glide>();
                 }
