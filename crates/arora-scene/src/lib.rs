@@ -226,17 +226,23 @@ impl Plugin for ScenePlugin {
         .add_systems(
             Update,
             (
-                take_census,
+                take_census.run_if(|census: Res<Census>| !census.taken),
                 split_materials,
                 spawn_marker,
                 fit_orbit,
-                count_visible,
+                count_visible.run_if(reports),
                 capture,
                 measure,
             )
                 .chain(),
         );
     }
+}
+
+/// Whether this run ends in a report: only then are frame times and the
+/// visible-mesh peak worth collecting, every frame, for the length of the run.
+fn reports(opts: Res<SceneOptions>) -> bool {
+    opts.seconds > 0.0
 }
 
 /// Frame durations, collected after a warm-up so shader compilation and asset
@@ -1547,7 +1553,7 @@ fn measure(
     let dt = time.delta_secs();
     frames.elapsed += dt;
     frames.count += 1;
-    if frames.elapsed > WARMUP_SECONDS {
+    if frames.elapsed > WARMUP_SECONDS && opts.seconds > 0.0 {
         frames.samples.push(dt * 1000.0);
     }
     if opts.seconds > 0.0 && frames.elapsed >= opts.seconds && !frames.reported {
