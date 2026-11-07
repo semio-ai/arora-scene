@@ -4,9 +4,12 @@
 #   crates/arora-scene-web/build.sh            # webgpu and webgl2
 #   crates/arora-scene-web/build.sh webgl2     # one backend
 #
-# Release profile (the workspace's: opt "s", fat LTO, one codegen unit), since
-# the download size and the compiled code are both part of what is measured.
-# Each backend has its own target directory, so switching does not rebuild.
+# The workspace's `web` profile (opt "z", fat LTO, one codegen unit), since
+# the download size and the compiled code are both part of what is measured,
+# then binaryen's `wasm-opt -Oz` when WASM_OPT names it (or it is on PATH):
+# that pass shrinks the module by a fifth and, after opt "z", makes it faster
+# rather than slower. Each backend has its own target directory, so switching
+# does not rebuild.
 #
 # A variant builds the same backend another way, side by side with the plain
 # build, so the two can be served and measured together:
@@ -25,12 +28,13 @@ root="$(cd "$here/../.." && pwd)"
 bindgen="${WASM_BINDGEN:-wasm-bindgen}"
 variant="${VARIANT:-}"
 extra="${FEATURES:-}"
+wasm_opt="${WASM_OPT:-$(command -v wasm-opt || true)}"
 backends=("$@")
 [ ${#backends[@]} -eq 0 ] && backends=(webgpu webgl2)
 for backend in "${backends[@]}"; do
   echo "== $backend"
   start=$(date +%s)
-  cargo build --release --target wasm32-unknown-unknown -p arora-scene-web \
+  cargo build --profile web --target wasm32-unknown-unknown -p arora-scene-web \
     --features "$backend${extra:+,$extra}" --target-dir "$root/target/web-$backend$variant" \
     --manifest-path "$root/Cargo.toml"
   echo "cargo build: $(( $(date +%s) - start ))s"
@@ -42,6 +46,14 @@ for backend in "${backends[@]}"; do
   [ -n "${KEEP_NAMES:-}" ] && strip=()
   "$bindgen" --target web --no-typescript ${strip[@]+"${strip[@]}"} \
     --out-dir "$out" \
-    "$root/target/web-$backend$variant/wasm32-unknown-unknown/release/arora_scene_web.wasm"
+    "$root/target/web-$backend$variant/wasm32-unknown-unknown/web/arora_scene_web.wasm"
+  if [ -n "$wasm_opt" ] && [ -z "${KEEP_NAMES:-}" ]; then
+    # The features rustc's wasm32 target emits by default; wasm-opt must be
+    # told, or it refuses the module.
+    "$wasm_opt" -Oz --enable-bulk-memory --enable-mutable-globals \
+      --enable-nontrapping-float-to-int --enable-sign-ext \
+      --enable-reference-types --enable-multivalue \
+      "$out/arora_scene_web_bg.wasm" -o "$out/arora_scene_web_bg.wasm"
+  fi
   ls -l "$out"
 done

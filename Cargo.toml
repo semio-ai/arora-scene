@@ -44,3 +44,12 @@ opt-level = 3
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# The browser build. Size first, because it is downloaded: "z" is 14% smaller
+# than "s" once compressed, and slower on its own, but binaryen's wasm-opt
+# run over it afterwards (see build.sh) makes it both the smallest of the
+# combinations measured and the fastest. wasm32-unknown-unknown already
+# aborts on panic, so there is no unwinding to turn off.
+[profile.web]
+inherits = "release"
+opt-level = "z"
