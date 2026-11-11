@@ -74,9 +74,20 @@ struct Options {
     /// The camera's starting height above the model, in radians; negative
     /// looks up from below its middle.
     pitch: Option<f32>,
+    /// The camera's starting yaw about the model, in radians.
+    angle: Option<f32>,
     /// Draw every frame, as a game loop does, instead of only frames in
     /// which something changed.
     continuous: bool,
+    /// Draw every mesh into every view, the shadow cascades among them,
+    /// without testing its bounds against the view first.
+    no_culling: bool,
+    /// Build each frame's per-mesh data on the CPU instead of in a compute
+    /// pass, as a platform without compute shaders does.
+    cpu_preprocess: bool,
+    /// Hold every light's shadows to one cascade reaching this far from the
+    /// camera, instead of the scene's reach that follows the framing.
+    shadow_reach: Option<f32>,
 }
 
 static FRAME_START: AtomicU64 = AtomicU64::new(0);
@@ -144,6 +155,10 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
                 // round trip per asset.
                 meta_check: AssetMetaCheck::Never,
                 ..default()
+            })
+            .set(bevy::pbr::PbrPlugin {
+                use_gpu_instance_buffer_builder: !opts.cpu_preprocess,
+                ..default()
             }),
     )
     .add_plugins(ScenePlugin)
@@ -156,6 +171,7 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
             _ => Environment::Plain,
         },
         pitch: opts.pitch.unwrap_or(SceneOptions::default().pitch),
+        angle: opts.angle.unwrap_or(SceneOptions::default().angle),
         ..default()
     })
     .insert_resource(RobotSpec { glb, copies })
@@ -177,6 +193,17 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
     }
     app.add_systems(Startup, keep_waker)
         .add_systems(Update, take_pushed.before(ApplyValues));
+    app.add_systems(Last, record_camera);
+    if opts.no_culling {
+        app.add_systems(PostUpdate, never_cull);
+    }
+    if let Some(reach) = opts.shadow_reach {
+        app.insert_resource(ShadowReach(reach)).add_systems(
+            PostUpdate,
+            hold_shadow_reach
+                .before(bevy::light::SimulationLightSystems::UpdateDirectionalLightCascades),
+        );
+    }
     if let Some([x, y, w, h]) = opts.panel {
         app.insert_resource(Panel(Rect::new(x, y, x + w, y + h)))
             .add_systems(Update, place_panel);
@@ -199,6 +226,60 @@ pub fn start(canvas: String, glb: String, bytes: Vec<u8>, options: String) -> Re
 
 #[derive(Resource)]
 struct Panel(Rect);
+
+/// The orbit camera's position as last updated, then its near and far
+/// planes, for a page to read back.
+static CAMERA: Mutex<[f32; 5]> = Mutex::new([0.0; 5]);
+
+fn record_camera(cameras: Query<(&GlobalTransform, &Projection), With<OrbitCamera>>) {
+    if let Ok((camera, projection)) = cameras.single() {
+        let [x, y, z] = camera.translation().to_array();
+        let (near, far) = match projection {
+            Projection::Perspective(p) => (p.near, p.far),
+            Projection::Orthographic(o) => (o.near, o.far),
+            _ => (f32::NAN, f32::NAN),
+        };
+        *CAMERA.lock().unwrap() = [x, y, z, near, far];
+    }
+}
+
+/// The orbit camera's position in world space, then its near and far planes.
+#[wasm_bindgen]
+pub fn camera_position() -> Vec<f32> {
+    CAMERA.lock().unwrap().to_vec()
+}
+
+fn never_cull(
+    meshes: Query<Entity, (With<Mesh3d>, Without<bevy::camera::visibility::NoFrustumCulling>)>,
+    mut commands: Commands,
+) {
+    for mesh in &meshes {
+        commands
+            .entity(mesh)
+            .insert(bevy::camera::visibility::NoFrustumCulling);
+    }
+}
+
+#[derive(Resource)]
+struct ShadowReach(f32);
+
+fn hold_shadow_reach(
+    reach: Res<ShadowReach>,
+    mut lights: Query<&mut bevy::light::CascadeShadowConfig>,
+) {
+    let held = bevy::light::CascadeShadowConfigBuilder {
+        num_cascades: 1,
+        minimum_distance: 0.0,
+        maximum_distance: reach.0,
+        ..default()
+    }
+    .build();
+    for mut config in &mut lights {
+        if config.bounds != held.bounds {
+            *config = held.clone();
+        }
+    }
+}
 
 fn place_panel(
     panel: Res<Panel>,
