@@ -58,7 +58,9 @@ use std::f32::consts::PI;
 use bevy::asset::{embedded_asset, embedded_path, AssetPath};
 use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::light::{
+    CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
+};
 use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -66,7 +68,7 @@ use bevy::shader::ShaderRef;
 
 use arora_visuals::outline::OutlineView;
 
-use crate::{OrbitCamera, SceneOptions};
+use crate::{Framing, OrbitCamera, SceneOptions};
 
 /// Light or dark, as the host's own theme is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -416,6 +418,7 @@ impl Plugin for StagePlugin {
                 stage_keys,
                 apply_look.run_if(resource_changed::<Stage>.or_else(resource_changed::<Palette>)),
                 apply_lighting.run_if(resource_changed::<Stage>),
+                reach_shadows,
             )
                 .chain(),
         );
@@ -581,11 +584,57 @@ fn apply_lighting(
                     shadow_maps_enabled: lamp.shadows && opts.shadows,
                     ..default()
                 },
+                one_cascade(SHADOW_REACH_UNFRAMED),
                 aimed(lamp.from),
                 RigLight,
             ));
         }
     });
+}
+
+/// How far shadows reach before the robot is framed.
+const SHADOW_REACH_UNFRAMED: f32 = 10.0;
+
+/// A rig light's shadows as a single cascade out to `reach` from the camera.
+///
+/// One cascade, not Bevy's four: a scene holding one robot, or a few, spans a
+/// narrow band of depth, which one map covers at full resolution. On WebGPU
+/// four cascades are each a shadow pass recorded and submitted every frame,
+/// and with many robots on screen the browser's command stream falls behind
+/// and stalls the frame; a single cascade removes that. Its reach follows the
+/// camera, so the robot and the floor around it stay inside it however far
+/// the view zooms.
+fn one_cascade(reach: f32) -> CascadeShadowConfig {
+    CascadeShadowConfigBuilder {
+        num_cascades: 1,
+        minimum_distance: 0.0,
+        maximum_distance: reach,
+        ..default()
+    }
+    .build()
+}
+
+/// Keeps each rig light's single cascade reaching just past the framed robot
+/// from wherever the camera stands, rebuilt only when that reach moves by
+/// more than a twentieth, so a still camera writes nothing.
+fn reach_shadows(
+    framing: Res<Framing>,
+    cameras: Query<&GlobalTransform, With<OrbitCamera>>,
+    mut lights: Query<&mut CascadeShadowConfig, With<RigLight>>,
+) {
+    if !framing.fitted {
+        return;
+    }
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let reach = (camera.translation().distance(framing.center) + 2.0 * framing.radius).max(1.0);
+    for mut config in &mut lights {
+        let current = config.bounds.last().copied().unwrap_or(0.0);
+        if (current - reach).abs() > reach * 0.05 {
+            *config = one_cascade(reach);
+        }
+    }
 }
 
 #[cfg(test)]
