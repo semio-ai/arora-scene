@@ -39,8 +39,10 @@ none there.
 which allows one event loop per page and never hands it back. So the package
 starts the scene once and moves its canvas between the containers that show
 it: unmounting `<Scene>` parks the canvas, still running and drawing nothing,
-and mounting it again brings the same scene back. The scene keeps the robot it
-started with; swapping robots in a running scene is the next piece of work.
+and mounting it again brings the same scene back. A different robot swaps into
+the running scene (`loadRobot`, or a new `glb` on `<Scene>`): the old robot
+goes, with its joint and element controls and its selection, and the new one
+is measured and framed afresh. Goals stay.
 
 The workspace patches `bevy_pbr` so `StandardMaterial` draws on Safari's
 WebGPU; the root `Cargo.toml` says why and when to drop it.

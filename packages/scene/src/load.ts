@@ -12,6 +12,7 @@ interface Module {
   mount: (canvas: string, glb: Uint8Array, options: string) => void;
   set_value: (target: string, feature: string, values: Float32Array) => void;
   control: (command: string) => void;
+  load_robot: (glb: Uint8Array) => void;
   set_event_handler: (handler: (event: SceneEvent) => void) => void;
 }
 
@@ -58,6 +59,12 @@ export interface SceneHandle {
    * and the driver writes the change.
    */
   control(command: ControlCommand): void;
+  /**
+   * Replaces the robot with the one in `glb`, in the same running scene. The
+   * old robot's joint and element controls go with it, and goals stay. Throws,
+   * keeping the old robot, if `glb` is not a robot the scene can read.
+   */
+  loadRobot(glb: Uint8Array): void;
   /** Sets where the scene's events go, replacing any earlier handler. */
   onEvent(handler: (event: SceneEvent) => void): void;
 }
@@ -90,9 +97,9 @@ function parking(): HTMLElement {
 
 /**
  * Shows the page's scene in `container`, starting it with `glb` and `options`
- * the first time. Later calls move the running scene into their container,
- * and their `glb` and `options` are ignored: the scene keeps drawing the
- * robot it started with.
+ * the first time. Later calls move the running scene into their container and
+ * swap in their `glb` if it is a different robot; their `options` are
+ * ignored, the scene having started with the first call's.
  */
 export function mountScene(
   container: HTMLElement,
@@ -115,11 +122,12 @@ export function mountScene(
       running = undefined;
     });
   } else {
-    if (glb !== running.glb)
-      console.warn(
-        "@semio/scene: the scene keeps the robot it started with; a different robot was ignored",
-      );
     container.append(running.canvas);
+    if (glb !== running.glb) {
+      const wanted = glb;
+      running.glb = wanted;
+      void running.handle.then((scene) => scene.loadRobot(wanted));
+    }
   }
   return running.handle;
 }
@@ -158,6 +166,10 @@ async function start(
     },
     control(command) {
       wasm.control(JSON.stringify(command));
+    },
+    loadRobot(glb) {
+      wasm.load_robot(glb);
+      if (running) running.glb = glb;
     },
     onEvent(handler) {
       wasm.set_event_handler(handler);

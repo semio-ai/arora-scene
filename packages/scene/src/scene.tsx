@@ -5,11 +5,11 @@ import type { Backend, SceneEvent, SceneOptions } from "./types";
 
 export interface SceneProps {
   /**
-   * The robot's GLB. The page's scene draws the robot it started with, so
-   * only the first `<Scene>` on a page decides it.
+   * The robot's GLB. A different one swaps the robot in the running scene; the
+   * old robot's joint and element controls go with it.
    */
   glb: Uint8Array;
-  /** How the scene starts. Read when the page's scene starts, as `glb` is. */
+  /** How the scene starts. Read once, when the page's scene starts. */
   options?: SceneOptions;
   /** Force a backend instead of choosing by what the browser supports. */
   backend?: Backend;
@@ -62,6 +62,20 @@ export function Scene({
       unmountScene(el);
     };
   }, []);
+
+  // A new robot swaps into the running scene; a robot the scene cannot read
+  // is refused and the old one kept.
+  const loaded = useRef(glb);
+  useEffect(() => {
+    if (!scene || glb === loaded.current) return;
+    loaded.current = glb;
+    try {
+      scene.loadRobot(glb);
+    } catch (error) {
+      if (onError) onError(error);
+      else console.error(error);
+    }
+  }, [scene, glb, onError]);
 
   // Events go to the shown `<Scene>` only: a parked scene must not call into
   // a component that is gone.

@@ -43,9 +43,55 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "bench")]
 mod bench;
 
-/// The asset source the robot is served from, and its path within it.
+/// The asset source the robot is served from, and the first robot's path
+/// within it.
 const SOURCE: &str = "memory";
 const ROBOT: &str = "robot.glb";
+
+/// The memory the robots are served from, and the path of the one showing.
+static ROBOTS: Mutex<Option<(Dir, String)>> = Mutex::new(None);
+/// How many robots have been loaded, which names each new one: a fresh path
+/// per robot, so the asset server never answers with the one it replaced.
+static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// A robot waiting for the next frame to take the old one's place.
+static NEXT: Mutex<Option<arora_scene::NextRobot>> = Mutex::new(None);
+
+/// Replaces the robot the scene shows with the one in `glb`. The old robot's
+/// joint and element controls go with it; goals stay. Refused, and the old
+/// robot kept, if `glb` is not a robot the scene can read.
+#[wasm_bindgen]
+pub fn load_robot(glb: Vec<u8>) -> Result<(), JsValue> {
+    let meta = arora_visuals::meta::AssetMeta::from_glb_bytes(&glb)
+        .map_err(|e| error(format!("{e:#}")))?;
+    let joints = arora_scene::robot::find_joints(&glb).unwrap_or_else(|e| {
+        log::warn!("could not read the robot's joints: {e:#}");
+        Vec::new()
+    });
+    let mut robots = ROBOTS.lock().unwrap();
+    let Some((dir, showing)) = robots.as_mut() else {
+        return Err(error("the scene is not mounted yet"));
+    };
+    let path = format!("robot-{}.glb", LOADED.fetch_add(1, Ordering::SeqCst) + 1);
+    dir.insert_asset(Path::new(&path), glb);
+    // The old robot's bytes, once its replacement is in: the asset server
+    // already holds what it loaded from them.
+    dir.remove_asset(Path::new(showing));
+    *showing = path.clone();
+    *NEXT.lock().unwrap() = Some(arora_scene::NextRobot {
+        glb: format!("{SOURCE}://{path}"),
+        meta,
+        joints,
+    });
+    wake();
+    Ok(())
+}
+
+/// Hands a robot the page loaded to the scene, which swaps it in.
+fn take_next_robot(mut commands: Commands) {
+    if let Some(next) = NEXT.lock().unwrap().take() {
+        commands.insert_resource(next);
+    }
+}
 
 /// How the scene starts, as JSON from the page. Every field is optional.
 #[derive(Deserialize, Default)]
@@ -126,6 +172,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
 
     let robot = Dir::default();
     robot.insert_asset(Path::new(ROBOT), glb);
+    *ROBOTS.lock().unwrap() = Some((robot.clone(), ROBOT.to_string()));
 
     let mut resolution = WindowResolution::default();
     if let Some(sf) = opts.scale_factor {
@@ -209,6 +256,9 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     .add_systems(Update, take_pushed.before(ApplyValues))
     // Before Update, where the scene carries control commands out.
     .add_systems(PreUpdate, take_controls)
+    // Before the scene's own PreUpdate swap, so a robot loaded between
+    // frames is swapped in on the next one.
+    .add_systems(First, take_next_robot)
     .add_systems(Last, emit_events);
 
     #[cfg(feature = "bench")]

@@ -65,7 +65,9 @@ function Example() {
   return <Running glb={glb} />;
 }
 
-function Running({ glb }: { glb: Uint8Array }) {
+function Running({ glb: first }: { glb: Uint8Array }) {
+  // A different robot here swaps it in the running scene.
+  const [glb, setGlb] = useState(first);
   const [scene, setScene] = useState<SceneHandle>();
   const [overlay, setOverlay] = useState<OverlayFrame>();
   const [log, setLog] = useState<string[]>([]);
@@ -182,6 +184,24 @@ function Running({ glb }: { glb: Uint8Array }) {
             Write value
           </button>
         </form>
+        <h4>Robot</h4>
+        <div style={{ display: "grid", gap: 8 }}>
+          <input
+            type="file"
+            accept=".glb,model/gltf-binary"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (file) setGlb(new Uint8Array(await file.arrayBuffer()));
+            }}
+          />
+          <button
+            type="button"
+            disabled={!scene}
+            onClick={() => setGlb(new Uint8Array(glb))}
+          >
+            Load this robot again
+          </button>
+        </div>
         <h4>Controls</h4>
         <form onSubmit={addControl} style={{ display: "grid", gap: 8 }}>
           <input

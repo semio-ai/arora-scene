@@ -226,6 +226,7 @@ impl Plugin for ScenePlugin {
         .init_resource::<OrbitHeld>()
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
+        .add_systems(PreUpdate, swap_robot)
         .add_systems(
             Update,
             (
@@ -294,6 +295,9 @@ pub struct Census {
     visible_peak: usize,
     /// A mounted asset's own meshes, counted apart from the robot's.
     mounted_meshes: usize,
+    /// When the robot being counted was spawned, in seconds since the app
+    /// started: a robot swapped in later waits its own settling time.
+    since: f32,
 }
 
 /// Whether an entity belongs to an asset mounted on a screen rather than to
@@ -868,17 +872,7 @@ pub fn setup(
         spec.glb,
         if opts.uncapped { "uncapped" } else { "vsync" }
     );
-    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(spec.glb.clone()));
-    // A square-ish grid, spaced by roughly a robot's width. The exact spacing
-    // does not matter — the camera fits whatever bounds result.
-    let stride = (spec.copies as f32).sqrt().ceil().max(1.0) as u32;
-    for i in 0..spec.copies.max(1) {
-        let (x, z) = ((i % stride) as f32, (i / stride) as f32);
-        commands.spawn((
-            WorldAssetRoot(scene.clone()),
-            Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
-        ));
-    }
+    spawn_robot(&mut commands, &assets, &spec);
 
     // Placed properly once the model's bounds are known; see `take_census`.
     // Until then it stands well back from where a robot of ordinary size
@@ -938,6 +932,85 @@ pub fn setup(
         camera.insert(RenderTarget::Image(target.clone().into()));
         commands.insert_resource(OffscreenView(target));
     }
+}
+
+/// Spawns the robot `spec` names, `spec.copies` times.
+fn spawn_robot(commands: &mut Commands, assets: &AssetServer, spec: &RobotSpec) {
+    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(spec.glb.clone()));
+    // A square-ish grid, spaced by roughly a robot's width. The exact spacing
+    // does not matter — the camera fits whatever bounds result.
+    let stride = (spec.copies as f32).sqrt().ceil().max(1.0) as u32;
+    for i in 0..spec.copies.max(1) {
+        let (x, z) = ((i % stride) as f32, (i / stride) as f32);
+        commands.spawn((
+            WorldAssetRoot(scene.clone()),
+            Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
+        ));
+    }
+}
+
+/// A robot to put in place of the one the scene is showing: where its GLB is
+/// served from, and what it declares. A host inserts it; the scene swaps the
+/// robot on the next frame and removes it.
+#[derive(Resource)]
+pub struct NextRobot {
+    pub glb: String,
+    pub meta: arora_visuals::meta::AssetMeta,
+    pub joints: Vec<robot::Joint>,
+}
+
+/// Replaces the robot with the one [`NextRobot`] names.
+///
+/// Everything bound to the old robot goes with it: its entities, the controls
+/// on its joints and elements, and the selection made of its element ids,
+/// which mean nothing on another robot. Goals stay, being nobody's. The new
+/// robot is spawned as the first was, and measured and framed afresh once it
+/// has had its own time to settle.
+#[allow(clippy::too_many_arguments)]
+fn swap_robot(
+    next: Option<Res<NextRobot>>,
+    mut commands: Commands,
+    roots: Query<Entity, With<WorldAssetRoot>>,
+    children: Query<&Children>,
+    transform_gizmos: Query<(Entity, &TransformGizmo)>,
+    joint_gizmos: Query<(Entity, &JointGizmo)>,
+    assets: Res<AssetServer>,
+    mut spec: ResMut<RobotSpec>,
+    frames: Res<Frames>,
+    mut census: ResMut<Census>,
+    mut framing: ResMut<Framing>,
+    mut selections: ResMut<arora_visuals::select::Selections>,
+) {
+    let Some(next) = next else {
+        return;
+    };
+    let mut old = std::collections::HashSet::new();
+    for root in &roots {
+        old.insert(root);
+        old.extend(children.iter_descendants(root));
+        commands.entity(root).despawn();
+    }
+    for (gizmo, control) in &transform_gizmos {
+        if old.contains(&control.target) {
+            commands.entity(gizmo).despawn();
+        }
+    }
+    for (gizmo, control) in &joint_gizmos {
+        if old.contains(&control.target) {
+            commands.entity(gizmo).despawn();
+        }
+    }
+    selections.0.clear();
+    commands.insert_resource(instance::Selected(Vec::new()));
+    commands.insert_resource(instance::RobotMeta(next.meta.clone()));
+    commands.insert_resource(joints::RobotJoints(next.joints.clone()));
+    spec.glb = next.glb.clone();
+    spawn_robot(&mut commands, &assets, &spec);
+    census.taken = false;
+    census.since = frames.elapsed;
+    framing.fitted = false;
+    commands.remove_resource::<NextRobot>();
+    log::info!("swapping in {}", next.glb);
 }
 
 /// Where the camera is kept above, as Studio keeps its camera a centimetre
@@ -1388,7 +1461,7 @@ fn take_census(
     materials: MaterialMeshes,
     assets: Res<Assets<Mesh>>,
 ) {
-    if census.taken || frames.elapsed < 0.5 {
+    if census.taken || frames.elapsed - census.since < 0.5 {
         return;
     }
     let mut count = 0;

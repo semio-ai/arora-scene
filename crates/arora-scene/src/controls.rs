@@ -205,6 +205,9 @@ impl Plugin for ControlsPlugin {
     }
 }
 
+/// Either kind of gizmo a control spawns.
+type AnyGizmo = Or<(With<TransformGizmo>, With<JointGizmo>)>;
+
 #[allow(clippy::too_many_arguments)]
 fn carry_out(
     mut pending: ResMut<ControlCommands>,
@@ -216,8 +219,12 @@ fn carry_out(
     parents: Query<&ChildOf>,
     globals: Query<&GlobalTransform>,
     mut transforms: Query<&mut Transform>,
+    gizmos: Query<(), AnyGizmo>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
+    // A control whose gizmo is gone went with the robot it was on, when the
+    // robot was swapped; its key is free again.
+    controls.0.retain(|_, placed| gizmos.contains(placed.gizmo));
     if pending.0.is_empty() {
         return;
     }
@@ -574,6 +581,36 @@ mod tests {
         assert_eq!(
             app.world().get::<Visibility>(gizmo),
             Some(&Visibility::Hidden)
+        );
+    }
+
+    #[test]
+    fn a_control_whose_gizmo_went_with_its_robot_is_forgotten() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint,
+            },
+        );
+        let gizmo = only::<JointGizmo>(&mut app).unwrap();
+        // What a robot swap does to the controls on the old robot.
+        app.world_mut().despawn(gizmo);
+        send(
+            &mut app,
+            ControlCommand::Show {
+                key: TILT.into(),
+                visible: false,
+            },
+        );
+        // Neither shown on a dead entity nor applied: it waits, as for a
+        // control not yet added, until the driver adds the key again.
+        assert_eq!(
+            app.world().resource::<ControlCommands>().0.len(),
+            1,
+            "the show waits for an add"
         );
     }
 
