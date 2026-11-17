@@ -110,6 +110,12 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     let opts: Options = serde_json::from_str(&options).map_err(error)?;
     let meta = arora_visuals::meta::AssetMeta::from_glb_bytes(&glb)
         .map_err(|e| error(format!("{e:#}")))?;
+    // A robot whose joints cannot be read still draws; its joints just stay
+    // where the GLB put them.
+    let joints = arora_scene::robot::find_joints(&glb).unwrap_or_else(|e| {
+        log::warn!("could not read the robot's joints: {e:#}");
+        Vec::new()
+    });
     mark("meta-parsed");
     // Claimed only once the inputs are known good, so a mount refused for bad
     // options or a bad robot leaves the page free to mount again.
@@ -195,6 +201,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     })
     // What `arora_scene::mount_instances` does from a file, done from bytes.
     .insert_resource(RobotMeta(meta))
+    .insert_resource(arora_scene::joints::RobotJoints(joints))
     .insert_resource(Selected(opts.select.iter().map(Selection::of).collect()))
     .add_systems(Update, arora_scene::instance::index_instances)
     .add_systems(Startup, keep_waker)

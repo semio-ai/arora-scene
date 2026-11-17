@@ -20,6 +20,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::mesh::morph::MorphWeights;
 use bevy::prelude::*;
 
+use crate::joints::{JointBinding, JointRig, RobotJoints};
 use crate::OrbitCamera;
 
 /// What the robot's GLB declares, read before the app runs.
@@ -41,14 +42,17 @@ pub struct SpawnedScene<'w, 's> {
     names: Query<'w, 's, &'static Name>,
     meshes: Query<'w, 's, Entity, With<Mesh3d>>,
     morphs: Query<'w, 's, Entity, With<MorphWeights>>,
+    transforms: Query<'w, 's, &'static Transform>,
 }
 
 /// Joins each spawned robot's elements to its entities, once its scene exists.
 ///
 /// Runs until each root is indexed, because a glTF scene spawns
 /// asynchronously and there is no event that says all of it has arrived.
+#[allow(clippy::too_many_arguments)]
 pub fn index_instances(
     meta: Res<RobotMeta>,
+    joints: Option<Res<RobotJoints>>,
     selected: Res<Selected>,
     mut selections: ResMut<arora_visuals::select::Selections>,
     camera: Query<Entity, With<OrbitCamera>>,
@@ -152,11 +156,29 @@ pub fn index_instances(
             }
         }
 
+        // Every joint whose value is animated, bound to the body it moves
+        // as that body stands now: the rest every pose is taken from.
+        let mut rig = JointRig::default();
+        for joint in joints.iter().flat_map(|joints| joints.0.iter()) {
+            let (Some(animatable), Some(body)) = (
+                &joint.animatable,
+                elements.get(&joint.child).map(|e| e.node),
+            ) else {
+                continue;
+            };
+            let Ok(rest) = scene.transforms.get(body) else {
+                continue;
+            };
+            if let Some(binding) = JointBinding::new(joint, body, *rest) {
+                rig.0.entry(animatable.clone()).or_default().push(binding);
+            }
+        }
+
         let id = format!("robot-{copy}");
         if !selected.0.is_empty() {
             selections.0.insert(id.clone(), selected.0.clone());
         }
-        commands.entity(root).insert(EntityInstance {
+        commands.entity(root).insert(rig).insert(EntityInstance {
             id,
             asset_path: String::new(),
             meta: meta.0.clone(),

@@ -21,6 +21,7 @@
 
 pub mod aurora;
 pub mod instance;
+pub mod joints;
 pub mod redraw;
 pub mod robot;
 pub mod stage;
@@ -698,16 +699,27 @@ pub fn mount_instances(
     robot_glb: &str,
     select: Vec<arora_visuals::select::Selection>,
 ) {
-    let meta = match std::fs::read(assets.join(robot_glb))
-        .map_err(anyhow::Error::from)
-        .and_then(|bytes| arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes))
-    {
+    let bytes = match std::fs::read(assets.join(robot_glb)) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::error!("could not read {robot_glb}: {error:#}");
+            return;
+        }
+    };
+    let meta = match arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes) {
         Ok(meta) => meta,
         Err(error) => {
             log::error!("could not read what {robot_glb} declares: {error:#}");
             return;
         }
     };
+    // A robot whose joints cannot be read still draws; its joints just stay
+    // where the GLB put them.
+    let joints = robot::find_joints(&bytes).unwrap_or_else(|error| {
+        log::warn!("could not read the robot's joints: {error:#}");
+        Vec::new()
+    });
+    app.insert_resource(joints::RobotJoints(joints));
     log::info!(
         "{} declares {} elements and {} animatables",
         robot_glb,

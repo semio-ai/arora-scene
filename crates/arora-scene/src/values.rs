@@ -10,6 +10,9 @@
 
 use arora_visuals::binding::SceneBinding;
 use arora_visuals::instance::EntityInstance;
+use arora_visuals::joint_gizmo::JointGizmo;
+
+use crate::joints::JointRig;
 use arora_visuals::meta::FeatureKind;
 use arora_visuals::value::Decoded;
 use bevy::mesh::morph::MorphWeights;
@@ -60,11 +63,12 @@ pub struct OwnMaterials(bevy::platform::collections::HashSet<Entity>);
 pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
     mut applied: ResMut<AppliedValues>,
-    instances: Query<&EntityInstance>,
+    instances: Query<(&EntityInstance, Option<&JointRig>)>,
     mut transforms: Query<&mut Transform>,
     mut weights: Query<&mut MorphWeights>,
     mut material_handles: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut joint_gizmos: Query<&mut JointGizmo>,
     mut own: Local<OwnMaterials>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
@@ -77,8 +81,29 @@ pub fn apply_values(
     }
     let mut count = 0;
     for write in writes.0.drain(..) {
-        for instance in &instances {
+        for (instance, rig) in &instances {
             if write.instance.as_ref().is_some_and(|id| *id != instance.id) {
+                continue;
+            }
+            // A joint's value poses the bodies it moves, and any joint gizmo
+            // on them shows it, so a control and the robot never disagree.
+            if let Some(joints) = rig.and_then(|rig| rig.0.get(&write.target)) {
+                let value = match write.value {
+                    Decoded::Scalar(s) => s,
+                    Decoded::Triple(v) => v[0],
+                };
+                for joint in joints {
+                    let at = joint.joint_value(value);
+                    if let Ok(mut transform) = transforms.get_mut(joint.body) {
+                        *transform = joint.pose(at);
+                        count += 1;
+                    }
+                    for mut gizmo in &mut joint_gizmos {
+                        if gizmo.target == joint.body && gizmo.value != at {
+                            gizmo.value = at;
+                        }
+                    }
+                }
                 continue;
             }
             let bindings = &instance.bindings;
