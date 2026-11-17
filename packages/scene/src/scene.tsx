@@ -74,13 +74,13 @@ export function Scene({
     container.current !== null &&
     handle.canvas.parentElement === container.current;
 
-  // A `glb` other than the robot showing swaps into the running scene. A
-  // robot that cannot be read or loaded reaches `onError`, the old one kept;
-  // the same bytes are not tried again, but a new array is.
+  // A `glb` other than the robot last asked for swaps into the running scene,
+  // including the robot showing when another is still loading, which it then
+  // replaces. A robot that cannot be read or loaded reaches `onError`, the old
+  // one kept; the same bytes are not tried again, but a new array is.
   const asked = useRef<Uint8Array>(undefined);
   useEffect(() => {
-    if (!scene || glb === scene.glb || glb === asked.current || !owns(scene))
-      return;
+    if (!scene || glb === (asked.current ?? scene.glb) || !owns(scene)) return;
     asked.current = glb;
     scene
       .loadRobot(glb)

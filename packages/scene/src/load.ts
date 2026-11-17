@@ -65,7 +65,10 @@ export interface SceneHandle {
    * Resolves once the new robot is showing; the old robot's joint and element
    * controls have gone with it, and goals stay. Rejects, keeping the old
    * robot, if `glb` is not a robot the scene can read or fails to load. A
-   * later call replaces a robot still loading, whose promise rejects.
+   * later call replaces a robot still loading, whose promise rejects; that
+   * holds for the robot showing too, so asking for it again while another is
+   * loading keeps it. Asking for the robot showing, with none loading, or for
+   * the one loading, changes nothing.
    */
   loadRobot(glb: Uint8Array): Promise<void>;
   /** The GLB of the robot showing. */
@@ -120,7 +123,7 @@ export function mountScene(
   options: SceneOptions & { backend?: Backend } = {},
 ): Promise<SceneHandle> {
   return showScene(container, glb, options).then(async (scene) => {
-    if (scene.glb !== glb) await scene.loadRobot(glb);
+    await scene.loadRobot(glb);
     return scene;
   });
 }
@@ -212,7 +215,14 @@ async function start(
       wasm.control(JSON.stringify(command));
     },
     loadRobot(next) {
-      if (running?.loading?.glb === next) return running.loading.done;
+      // Compared with the robot last asked for, not only the one showing: a
+      // request for the robot showing while another loads must replace that
+      // one, or the robot asked for last would not be the one left showing.
+      if (running?.loading) {
+        if (running.loading.glb === next) return running.loading.done;
+      } else if (next === (running?.glb ?? glb)) {
+        return Promise.resolve();
+      }
       let id: string;
       try {
         id = wasm.load_robot(next);

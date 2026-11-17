@@ -998,6 +998,10 @@ struct PendingRobot {
     roots: Vec<Entity>,
 }
 
+/// The error a swap reports when a robot asked for later replaced it before
+/// it finished loading.
+pub const REPLACED: &str = "replaced by a later robot before it finished loading";
+
 /// Starts loading the robot [`NextRobot`] names, hidden beside the one
 /// showing, which stays until the new one has loaded. A robot asked for while
 /// another is still loading replaces that one.
@@ -1018,7 +1022,7 @@ fn begin_swap(
         }
         outcomes.0.push(Err((
             earlier.glb.clone(),
-            "replaced by a later robot before it finished loading".into(),
+            REPLACED.into(),
         )));
     }
     let roots = spawn_robot_roots(

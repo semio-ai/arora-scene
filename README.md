@@ -91,7 +91,9 @@ same without React; `chooseBackend()` says which backend a page would get.
   and rejects with the reason it could not be read or loaded; `<Scene>`
   passes that reason to `onError`, and does not retry the same bytes. A robot
   asked for while another is still loading replaces it, and the earlier
-  promise rejects. `scene.glb` is the robot showing.
+  promise rejects. **The robot asked for last is the one left showing**, the
+  one already showing included: asking for it again while another loads
+  replaces the one loading. `scene.glb` is the robot showing.
 - **The scene idles.** It draws a frame only when something changed, and its
   camera moves only when the user moves it. WebGPU is used when the browser
   can give the page an adapter, WebGL2 otherwise; **WebGL2 draws shadows from

@@ -15,8 +15,8 @@
 
 use std::cell::RefCell;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arora_scene::controls::{ControlCommand, ControlCommands, ControlEvent, ControlEvents};
 use arora_scene::instance::{RobotMeta, Selected};
@@ -30,9 +30,9 @@ use arora_visuals::overlay::Overlay;
 use arora_visuals::pick::Picks;
 use arora_visuals::select::Selection;
 use arora_visuals::value::Decoded;
-use bevy::asset::io::memory::{Dir, MemoryAssetReader};
-use bevy::asset::io::AssetSourceBuilder;
 use bevy::asset::AssetMetaCheck;
+use bevy::asset::io::AssetSourceBuilder;
+use bevy::asset::io::memory::{Dir, MemoryAssetReader};
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
@@ -52,8 +52,10 @@ static ROBOTS: Mutex<Option<(Dir, String)>> = Mutex::new(None);
 /// How many robots have been loaded, which names each new one: a fresh path
 /// per robot, so the asset server never answers with the one it replaced.
 static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-/// A robot waiting for the next frame to take the old one's place.
-static NEXT: Mutex<Option<arora_scene::NextRobot>> = Mutex::new(None);
+/// Robots asked for since the last frame, oldest first. The last takes the
+/// old one's place; every earlier one is answered as replaced, since the page
+/// holds a promise for each.
+static NEXT: Mutex<Vec<arora_scene::NextRobot>> = Mutex::new(Vec::new());
 
 /// Starts replacing the robot the scene shows with the one in `glb`, and
 /// returns the id the swap's `robot` event will name. Refused at once if
@@ -82,7 +84,7 @@ pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
     dir.remove_asset(Path::new(showing));
     *showing = path.clone();
     let glb = format!("{SOURCE}://{path}");
-    *NEXT.lock().unwrap() = Some(arora_scene::NextRobot {
+    NEXT.lock().unwrap().push(arora_scene::NextRobot {
         glb: glb.clone(),
         meta,
         joints,
@@ -91,11 +93,19 @@ pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
     Ok(glb)
 }
 
-/// Hands a robot the page loaded to the scene, which swaps it in.
-fn take_next_robot(mut commands: Commands) {
-    if let Some(next) = NEXT.lock().unwrap().take() {
-        commands.insert_resource(next);
+/// Hands the latest robot the page loaded to the scene, which swaps it in,
+/// and reports any asked for before it in the same frame as replaced.
+fn take_next_robot(mut commands: Commands, mut outcomes: ResMut<arora_scene::RobotOutcomes>) {
+    let mut asked = std::mem::take(&mut *NEXT.lock().unwrap());
+    let Some(next) = asked.pop() else {
+        return;
+    };
+    for earlier in asked {
+        outcomes
+            .0
+            .push(Err((earlier.glb, arora_scene::REPLACED.into())));
     }
+    commands.insert_resource(next);
 }
 
 /// How the scene starts, as JSON from the page. Every field is optional.
