@@ -26,6 +26,12 @@
 //! view, so the two read identically until the camera moves. The key casts
 //! shadows under either.
 //!
+//! **The camera rig is the default, as it is in Studio.** It keeps the key's
+//! shadow falling the same way on screen, out to the side of the content and
+//! in view from every angle. Under the world rig the shadow stays put while
+//! the viewer goes round, so from the side the light comes from it lies behind
+//! the content and the content hides it, in part or whole.
+//!
 //! Every choice can change while the scene runs. [`Stage`] holds the current
 //! one and the scene follows it; in a window the toggles in the corner and
 //! the keys they name change it.
@@ -89,9 +95,9 @@ pub enum Environment {
 pub enum Lighting {
     /// Fixed in the world, so the light stays put while the viewer moves round
     /// the content.
-    #[default]
     World,
     /// Fixed to the camera, so the side being looked at is the lit one.
+    #[default]
     Camera,
 }
 
