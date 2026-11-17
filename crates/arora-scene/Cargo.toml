@@ -11,7 +11,11 @@ default = ["cli"]
 # The desktop command line: flag parsing, a window, and the two things only a
 # desktop process can do — resolving assets from a directory and writing a PNG
 # to disk. A wasm or editor host replaces exactly this, and takes the library.
-cli = ["test_window", "dep:clap", "dep:env_logger"]
+# On Linux, winit builds only with a display backend chosen, and choosing one
+# is the binary's call, so it is here rather than on the library. X11 also
+# reaches Wayland desktops through XWayland; the feature does nothing on macOS
+# or Windows.
+cli = ["test_window", "dep:clap", "dep:env_logger", "bevy/x11"]
 # The test window's tuning panel, built from Bevy's UI widgets. A host has
 # controls of its own, so it leaves the widgets, and their input-focus
 # plugins, out.
