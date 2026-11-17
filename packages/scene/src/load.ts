@@ -90,7 +90,15 @@ export function mountScene(
     canvas.style.cssText =
       "display:block;width:100%;height:100%;outline:none;touch-action:none";
     container.append(canvas);
-    running = { canvas, glb, handle: start(canvas, glb, options) };
+    const handle = start(canvas, glb, options);
+    running = { canvas, glb, handle };
+    // A start that fails (a module that did not download, a robot the scene
+    // refused) never reached the event loop, so the next call may try again.
+    handle.catch(() => {
+      if (running?.handle !== handle) return;
+      canvas.remove();
+      running = undefined;
+    });
   } else {
     if (glb !== running.glb)
       console.warn(

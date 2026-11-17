@@ -51,6 +51,11 @@ impl Plugin for ValuesPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApplyValues;
 
+/// Meshes given a material of their own, so a write addressed to one element
+/// changes that element alone.
+#[derive(Default)]
+pub struct OwnMaterials(bevy::platform::collections::HashSet<Entity>);
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
@@ -58,12 +63,16 @@ pub fn apply_values(
     instances: Query<&EntityInstance>,
     mut transforms: Query<&mut Transform>,
     mut weights: Query<&mut MorphWeights>,
-    material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
+    mut material_handles: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut own: Local<OwnMaterials>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     applied.0 = 0;
-    if writes.0.is_empty() {
+    // Before the robot has spawned there is nowhere for a write to land, and
+    // a host may well write as soon as the scene starts: keep the writes for
+    // the frame the robot arrives in, rather than dropping them.
+    if writes.0.is_empty() || instances.is_empty() {
         return;
     }
     let mut count = 0;
@@ -74,22 +83,38 @@ pub fn apply_values(
             }
             let bindings = &instance.bindings;
             let landing: Vec<SceneBinding> = match bindings.by_id.get(&write.target) {
+                // An animatable lands on every element it drives, sharing a
+                // material where they share one: that is what it declares.
                 Some(found) => found.clone(),
                 None => match bindings.elements.get(&write.target) {
-                    Some(element) => vec![SceneBinding {
-                        entity: match &write.feature {
-                            FeatureKind::Translation | FeatureKind::Rotation | FeatureKind::Scale => {
-                                element.node
-                            }
+                    Some(element) => {
+                        let entity = match &write.feature {
+                            FeatureKind::Translation
+                            | FeatureKind::Rotation
+                            | FeatureKind::Scale => element.node,
                             _ => match element.mesh {
                                 Some(mesh) => mesh,
                                 None => continue,
                             },
-                        },
-                        feature: write.feature.clone(),
-                        axis: None,
-                        morph_index: None,
-                    }],
+                        };
+                        // An element written directly is one element, but
+                        // the GLB may share its material with others, which a
+                        // material write would change too. It gets a copy of
+                        // its own the first time.
+                        if is_material(&write.feature) && own.0.insert(entity) {
+                            if let Ok(mut handle) = material_handles.get_mut(entity) {
+                                if let Some(copy) = materials.get(&handle.0).cloned() {
+                                    handle.0 = materials.add(copy);
+                                }
+                            }
+                        }
+                        vec![SceneBinding {
+                            entity,
+                            feature: write.feature.clone(),
+                            axis: None,
+                            morph_index: None,
+                        }]
+                    }
                     None => continue,
                 },
             };
@@ -113,13 +138,25 @@ pub fn apply_values(
     }
 }
 
+/// Whether a feature is written onto a material rather than a transform or
+/// morph weights.
+fn is_material(feature: &FeatureKind) -> bool {
+    !matches!(
+        feature,
+        FeatureKind::Translation
+            | FeatureKind::Rotation
+            | FeatureKind::Scale
+            | FeatureKind::Morph(_)
+    )
+}
+
 /// One value onto one place; whether it landed.
 fn apply(
     binding: &SceneBinding,
     value: Decoded,
     transforms: &mut Query<&mut Transform>,
     weights: &mut Query<&mut MorphWeights>,
-    material_handles: &Query<&MeshMaterial3d<StandardMaterial>>,
+    material_handles: &Query<&mut MeshMaterial3d<StandardMaterial>>,
     materials: &mut Assets<StandardMaterial>,
 ) -> bool {
     let triple = |current: [f32; 3]| match value {
@@ -164,7 +201,8 @@ fn apply(
             true
         }
         FeatureKind::Morph(_) => {
-            let (Some(index), Ok(mut weights)) = (binding.morph_index, weights.get_mut(binding.entity))
+            let (Some(index), Ok(mut weights)) =
+                (binding.morph_index, weights.get_mut(binding.entity))
             else {
                 return false;
             };

@@ -13,9 +13,9 @@
 //! — silently, because a name collision is a successful lookup. The walk here
 //! is over one root's descendants.
 
-use arora_visuals::binding::{ElementTargets, SceneBindings};
+use arora_visuals::binding::{ElementTargets, SceneBinding, SceneBindings};
 use arora_visuals::instance::EntityInstance;
-use arora_visuals::meta::AssetMeta;
+use arora_visuals::meta::{AssetMeta, FeatureKind};
 use bevy::ecs::system::SystemParam;
 use bevy::mesh::morph::MorphWeights;
 use bevy::prelude::*;
@@ -82,7 +82,10 @@ pub fn index_instances(
                 ElementTargets {
                     node,
                     mesh: scene.meshes.get(node).ok().or_else(|| {
-                        scene.children.iter_descendants(node).find(|e| scene.meshes.contains(*e))
+                        scene
+                            .children
+                            .iter_descendants(node)
+                            .find(|e| scene.meshes.contains(*e))
                     }),
                     morph: own.into_iter().find(|e| scene.morphs.contains(*e)),
                 },
@@ -106,6 +109,49 @@ pub fn index_instances(
             meta.0.elements.len()
         );
 
+        // Every place each animatable lands: its nodes for a transform
+        // feature, the mesh at or under each node for a material one.
+        let mut by_id: std::collections::HashMap<String, Vec<SceneBinding>> =
+            std::collections::HashMap::new();
+        for (animatable, binding) in &meta.0.animatables {
+            // A morph target is found by name among a mesh's targets, which
+            // this scene does not read; a robot's declaration carries none.
+            if matches!(binding.feature, FeatureKind::Morph(_)) {
+                continue;
+            }
+            let transform = matches!(
+                binding.feature,
+                FeatureKind::Translation | FeatureKind::Rotation | FeatureKind::Scale
+            );
+            for node_name in &binding.node_names {
+                let Some(&node) = by_name.get(node_name) else {
+                    continue;
+                };
+                let entity = if transform {
+                    node
+                } else {
+                    match scene.meshes.get(node).ok().or_else(|| {
+                        scene
+                            .children
+                            .iter_descendants(node)
+                            .find(|e| scene.meshes.contains(*e))
+                    }) {
+                        Some(mesh) => mesh,
+                        None => continue,
+                    }
+                };
+                by_id
+                    .entry(animatable.clone())
+                    .or_default()
+                    .push(SceneBinding {
+                        entity,
+                        feature: binding.feature.clone(),
+                        axis: binding.axis,
+                        morph_index: None,
+                    });
+            }
+        }
+
         let id = format!("robot-{copy}");
         if !selected.0.is_empty() {
             selections.0.insert(id.clone(), selected.0.clone());
@@ -115,7 +161,7 @@ pub fn index_instances(
             asset_path: String::new(),
             meta: meta.0.clone(),
             bindings: SceneBindings {
-                by_id: std::collections::HashMap::new(),
+                by_id,
                 elements,
                 indexed: true,
             },

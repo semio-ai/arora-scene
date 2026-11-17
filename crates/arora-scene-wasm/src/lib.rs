@@ -103,7 +103,7 @@ static MOUNTED: AtomicBool = AtomicBool::new(false);
 #[wasm_bindgen]
 pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    if MOUNTED.swap(true, Ordering::SeqCst) {
+    if MOUNTED.load(Ordering::SeqCst) {
         return Err(error("the scene is already mounted; a page holds one"));
     }
     mark("start");
@@ -111,6 +111,11 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     let meta = arora_visuals::meta::AssetMeta::from_glb_bytes(&glb)
         .map_err(|e| error(format!("{e:#}")))?;
     mark("meta-parsed");
+    // Claimed only once the inputs are known good, so a mount refused for bad
+    // options or a bad robot leaves the page free to mount again.
+    if MOUNTED.swap(true, Ordering::SeqCst) {
+        return Err(error("the scene is already mounted; a page holds one"));
+    }
 
     let robot = Dir::default();
     robot.insert_asset(Path::new(ROBOT), glb);
@@ -296,7 +301,14 @@ pub fn set_value(target: String, feature: String, values: Vec<f32>) -> Result<()
 #[wasm_bindgen]
 pub fn set_event_handler(handler: js_sys::Function) {
     HANDLER.with(|h| *h.borrow_mut() = Some(handler));
+    // A new handler starts with the overlay as it stands, which an idle scene
+    // would otherwise not send until something on screen moved.
+    SNAPSHOT.store(true, Ordering::SeqCst);
+    wake();
 }
+
+/// Whether the next frame sends the overlay even though it did not change.
+static SNAPSHOT: AtomicBool = AtomicBool::new(false);
 
 /// An event for the page, serialised as the object its handler receives.
 #[derive(Serialize)]
@@ -337,7 +349,7 @@ fn send(event: &SceneEvent) {
 /// does not get a backlog.
 fn emit_events(overlay: Res<Overlay>, mut picks: ResMut<Picks>) {
     let picks = std::mem::take(&mut picks.0);
-    if overlay.is_changed() {
+    if SNAPSHOT.swap(false, Ordering::SeqCst) || overlay.is_changed() {
         send(&SceneEvent::Overlay(&overlay.0));
     }
     for pick in &picks {
