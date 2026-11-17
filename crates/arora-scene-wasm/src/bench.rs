@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use arora_scene::values::{AppliedValues, ApplyValues};
 use arora_scene::OrbitCamera;
 use bevy::pbr::{PendingMeshMaterialQueues, SpecializedMaterialPipelineCache};
 use bevy::prelude::*;
@@ -38,8 +39,11 @@ use crate::now;
 pub struct Options {
     /// How many copies of the robot to draw.
     pub copies: u32,
-    /// Hold the camera still instead of letting it settle on the framing.
+    /// Hold the camera still instead of turning it about the robot.
     pub still: bool,
+    /// A transform gizmo on the robot that moves it as it is dragged: what
+    /// the benchmark's gizmo scenario draws and times.
+    pub gizmo: bool,
     /// Draw every frame, as a game loop does, instead of only frames in
     /// which something changed.
     pub continuous: bool,
@@ -71,9 +75,14 @@ pub fn mark(name: &str) {
     MARKS.lock().unwrap().push((name.to_string(), t));
 }
 
-/// Notes that a push made at `at` is applied in the current frame.
-pub fn applying(at: f64) {
-    APPLYING.lock().unwrap().push(at);
+/// Notes each write that landed this frame, by when it was pushed. A write
+/// still waiting for the robot, or one that landed nowhere, is not counted,
+/// so a latency covers the wait and never a write that changed nothing.
+fn record_applied(applied: Res<AppliedValues>) {
+    APPLYING
+        .lock()
+        .unwrap()
+        .extend(applied.stamps.iter().copied());
 }
 
 /// Frame records as a flat array of `[start, cpu]` pairs, emptied by reading.
@@ -106,6 +115,7 @@ pub fn camera_position() -> Vec<f32> {
 pub fn install(app: &mut App, opts: &Options) -> bool {
     COPIES.store(opts.copies.max(1), Ordering::Relaxed);
     app.add_systems(First, frame_begins)
+        .add_systems(Update, record_applied.after(ApplyValues))
         .add_systems(Last, record_camera)
         .add_observer(|_: On<WorldInstanceReady>| {
             let n = ROOTS_READY.fetch_add(1, Ordering::Relaxed) + 1;

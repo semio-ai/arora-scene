@@ -13,8 +13,6 @@ export interface SceneOptions {
   environment?: "plain" | "sky";
   /** Element ids to select from the start. */
   select?: string[];
-  /** Show the transform gizmo. */
-  gizmo?: boolean;
   /**
    * The part of the canvas left visible beside the host's panels,
    * `[x, y, width, height]` in CSS pixels. The camera frames the robot in it.
@@ -130,7 +128,13 @@ export type ControlCommand =
   | { op: "remove"; key: string }
   | { op: "show"; key: string; visible: boolean }
   /** Moves a transform control's target to `pose`, in the world. */
-  | { op: "setPose"; key: string; pose: Pose };
+  | {
+      op: "setPose";
+      key: string;
+      pose: Pose;
+      /** The target's scale along its own axes; kept as it is when absent. */
+      scale?: [number, number, number];
+    };
 
 /**
  * A drag on a control: what it asks its target to become. **Nothing has

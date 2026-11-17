@@ -29,7 +29,6 @@ use arora_visuals::meta::FeatureKind;
 use arora_visuals::overlay::Overlay;
 use arora_visuals::pick::Picks;
 use arora_visuals::select::Selection;
-use arora_visuals::transform_gizmo::TransformModes;
 use arora_visuals::value::Decoded;
 use bevy::asset::io::memory::{Dir, MemoryAssetReader};
 use bevy::asset::io::AssetSourceBuilder;
@@ -106,8 +105,6 @@ struct Options {
     environment: Option<String>,
     /// Element ids to select from the start.
     select: Vec<String>,
-    /// Show the transform gizmo.
-    gizmo: bool,
     /// The part of the canvas left visible beside the host's panels,
     /// `[x, y, width, height]` in CSS pixels; the camera frames the robot in
     /// it. The whole canvas when absent.
@@ -180,13 +177,20 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     }
 
     #[cfg(feature = "bench")]
-    let (copies, still, cpu_preprocess) = (
+    let (copies, still, cpu_preprocess, gizmo) = (
         opts.bench.copies.max(1),
         opts.bench.still,
         opts.bench.cpu_preprocess,
+        opts.bench
+            .gizmo
+            .then_some(arora_visuals::transform_gizmo::TransformModes::ALL),
     );
+    // A still camera: one that turns by itself asks for a frame every frame,
+    // and a scene in a page has to go idle. Only the benchmark turns it, to
+    // measure a moving view. Nor is there a gizmo of the scene's own: every
+    // control on a page is a driver's, added through `control`.
     #[cfg(not(feature = "bench"))]
-    let (copies, still, cpu_preprocess) = (1, false, false);
+    let (copies, still, cpu_preprocess, gizmo) = (1, true, false, None);
 
     let mut app = App::new();
     // Sources are built when the asset plugin is added, so this comes first.
@@ -230,7 +234,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     .insert_resource(SceneOptions {
         still,
         shadows: opts.shadows.unwrap_or(true),
-        gizmo: opts.gizmo.then_some(TransformModes::ALL),
+        gizmo,
         theme: match opts.theme.as_deref() {
             Some("light") => Theme::Light,
             _ => Theme::Dark,
@@ -316,17 +320,12 @@ fn keep_waker(proxy: Res<EventLoopProxyWrapper>) {
     });
 }
 
-/// Writes waiting for the next frame, each with when it was written.
-static PUSHED: Mutex<Vec<(ValueWrite, f64)>> = Mutex::new(Vec::new());
+/// Writes waiting for the next frame, each stamped with when it was written.
+static PUSHED: Mutex<Vec<ValueWrite>> = Mutex::new(Vec::new());
 
 /// Hands the page's writes to the scene's one place for applied values.
 fn take_pushed(mut writes: ResMut<ValueWrites>) {
-    let pushed = std::mem::take(&mut *PUSHED.lock().unwrap());
-    for (write, _at) in pushed {
-        writes.0.push(write);
-        #[cfg(feature = "bench")]
-        bench::applying(_at);
-    }
+    writes.0.append(&mut PUSHED.lock().unwrap());
 }
 
 /// Writes one value, one number or three, to `target`: an animatable's id as
@@ -349,15 +348,14 @@ pub fn set_value(target: String, feature: String, values: Vec<f32>) -> Result<()
         [x, y, z] => Decoded::Triple([*x, *y, *z]),
         _ => return Err(error("a value is one number or three")),
     };
-    PUSHED.lock().unwrap().push((
-        ValueWrite {
-            instance: None,
-            target,
-            feature,
-            value,
-        },
-        now(),
-    ));
+    PUSHED.lock().unwrap().push(ValueWrite {
+        instance: None,
+        target,
+        feature,
+        value,
+        // When it was written, which the scene hands back once it lands.
+        stamp: Some(now()),
+    });
     wake();
     Ok(())
 }

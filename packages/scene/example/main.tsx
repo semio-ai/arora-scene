@@ -95,7 +95,12 @@ function Running({ glb: first }: { glb: Uint8Array }) {
     if (!scene || !writeBack.current) return;
     if (event.value !== undefined) scene.setValue(event.key, event.value);
     if (event.pose)
-      scene.control({ op: "setPose", key: event.key, pose: event.pose });
+      scene.control({
+        op: "setPose",
+        key: event.key,
+        pose: event.pose,
+        scale: event.scale,
+      });
   }, []);
 
   const ready = (handle: SceneHandle) => {

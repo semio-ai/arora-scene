@@ -31,16 +31,25 @@ pub struct ValueWrite {
     /// feature to name.
     pub feature: Option<FeatureKind>,
     pub value: Decoded,
+    /// A time the host attached, handed back in [`AppliedValues`] once the
+    /// write lands: what a host measuring push-to-drawn latency times from.
+    pub stamp: Option<f64>,
 }
 
 /// Writes waiting for the next frame, in the order they were pushed.
 #[derive(Resource, Default)]
 pub struct ValueWrites(pub Vec<ValueWrite>);
 
-/// How many writes the last frame applied: what a host reads to know a push
-/// has reached the world.
+/// What the last frame applied: what a host reads to know a push has reached
+/// the world. A write that landed nowhere (an unknown id, a feature its
+/// target lacks) is in neither field.
 #[derive(Resource, Default)]
-pub struct AppliedValues(pub usize);
+pub struct AppliedValues {
+    /// How many places took a value.
+    pub count: usize,
+    /// The stamp of each write that landed somewhere.
+    pub stamps: Vec<f64>,
+}
 
 pub struct ValuesPlugin;
 
@@ -72,10 +81,12 @@ pub fn apply_values(
     mut material_handles: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut joint_gizmos: Query<&mut JointGizmo>,
+    children: Query<&Children>,
     mut own: Local<OwnMaterials>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
-    applied.0 = 0;
+    applied.count = 0;
+    applied.stamps.clear();
     // Before the robot has spawned there is nowhere for a write to land, and
     // a host may well write as soon as the scene starts: keep the writes for
     // the frame the robot arrives in, rather than dropping them.
@@ -84,6 +95,7 @@ pub fn apply_values(
     }
     let mut count = 0;
     for write in writes.0.drain(..) {
+        let before = count;
         for (instance, rig) in &instances {
             if write.instance.as_ref().is_some_and(|id| *id != instance.id) {
                 continue;
@@ -119,32 +131,40 @@ pub fn apply_values(
                         let Some(feature) = &write.feature else {
                             continue;
                         };
-                        let entity = match feature {
-                            FeatureKind::Translation
-                            | FeatureKind::Rotation
-                            | FeatureKind::Scale => element.node,
-                            _ => match element.mesh {
-                                Some(mesh) => mesh,
-                                None => continue,
-                            },
-                        };
-                        // An element written directly is one element, but
-                        // the GLB may share its material with others, which a
-                        // material write would change too. It gets a copy of
-                        // its own the first time.
-                        if is_material(feature) && own.0.insert(entity) {
-                            if let Ok(mut handle) = material_handles.get_mut(entity) {
-                                if let Some(copy) = materials.get(&handle.0).cloned() {
-                                    handle.0 = materials.add(copy);
+                        let entities = if is_material(feature) {
+                            let mut meshes = primitives(element.node, &children, |e| {
+                                material_handles.contains(e)
+                            });
+                            if meshes.is_empty() {
+                                meshes.extend(element.mesh);
+                            }
+                            // An element written directly is one element,
+                            // but the GLB may share its materials with
+                            // others, which a material write would change
+                            // too. Each mesh gets a copy of its own the first
+                            // time.
+                            for &mesh in &meshes {
+                                if own.0.insert(mesh) {
+                                    if let Ok(mut handle) = material_handles.get_mut(mesh) {
+                                        if let Some(copy) = materials.get(&handle.0).cloned() {
+                                            handle.0 = materials.add(copy);
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        vec![SceneBinding {
-                            entity,
-                            feature: feature.clone(),
-                            axis: None,
-                            morph_index: None,
-                        }]
+                            meshes
+                        } else {
+                            vec![element.node]
+                        };
+                        entities
+                            .into_iter()
+                            .map(|entity| SceneBinding {
+                                entity,
+                                feature: feature.clone(),
+                                axis: None,
+                                morph_index: None,
+                            })
+                            .collect()
                     }
                     None => continue,
                 },
@@ -162,11 +182,33 @@ pub fn apply_values(
                 }
             }
         }
+        if count > before {
+            applied.stamps.extend(write.stamp);
+        }
     }
-    applied.0 = count;
+    applied.count = count;
     if count > 0 {
         redraw.write(RequestRedraw);
     }
+}
+
+/// The meshes a glTF node draws with: the node itself if it carries a mesh,
+/// otherwise its direct children that do, which is where a node with several
+/// primitives keeps one mesh, and one material, per primitive. Only direct
+/// children, because a deeper mesh belongs to a child node, which is another
+/// element.
+pub fn primitives(
+    node: Entity,
+    children: &Query<&Children>,
+    is_mesh: impl Fn(Entity) -> bool,
+) -> Vec<Entity> {
+    if is_mesh(node) {
+        return vec![node];
+    }
+    children
+        .get(node)
+        .map(|c| c.iter().filter(|&e| is_mesh(e)).collect())
+        .unwrap_or_default()
 }
 
 /// Whether a feature is written onto a material rather than a transform or

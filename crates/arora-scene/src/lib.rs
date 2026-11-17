@@ -1285,6 +1285,7 @@ type Controls<'w, 's> = Query<
         Option<&'static JointGizmo>,
         Option<&'static TransformGizmo>,
         &'static mut Visibility,
+        Has<controls::HiddenByDriver>,
     ),
     Or<(With<JointGizmo>, With<TransformGizmo>)>,
 >;
@@ -1294,7 +1295,7 @@ fn hide_controls_on_ghosts(
     ghosts: Query<(), With<Ghost>>,
     parents: Query<&ChildOf>,
 ) {
-    for (joint, transform, mut visibility) in &mut gizmos {
+    for (joint, transform, mut visibility, hidden_by_driver) in &mut gizmos {
         let Some(target) = joint
             .map(|gizmo| gizmo.target)
             .or(transform.map(|gizmo| gizmo.target))
@@ -1304,7 +1305,8 @@ fn hide_controls_on_ghosts(
         let ghosted = std::iter::once(target)
             .chain(parents.iter_ancestors(target))
             .any(|entity| ghosts.contains(entity));
-        let wanted = if ghosted {
+        // Shown only when neither the ghosting nor the driver hides it.
+        let wanted = if ghosted || hidden_by_driver {
             Visibility::Hidden
         } else {
             Visibility::Inherited

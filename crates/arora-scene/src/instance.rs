@@ -131,28 +131,24 @@ pub fn index_instances(
                 let Some(&node) = by_name.get(node_name) else {
                     continue;
                 };
-                let entity = if transform {
-                    node
+                // A material feature lands on every primitive the node draws
+                // with, each of which has a material of its own.
+                let entities = if transform {
+                    vec![node]
                 } else {
-                    match scene.meshes.get(node).ok().or_else(|| {
-                        scene
-                            .children
-                            .iter_descendants(node)
-                            .find(|e| scene.meshes.contains(*e))
-                    }) {
-                        Some(mesh) => mesh,
-                        None => continue,
-                    }
+                    crate::values::primitives(node, &scene.children, |e| scene.meshes.contains(e))
                 };
-                by_id
-                    .entry(animatable.clone())
-                    .or_default()
-                    .push(SceneBinding {
-                        entity,
-                        feature: binding.feature.clone(),
-                        axis: binding.axis,
-                        morph_index: None,
-                    });
+                for entity in entities {
+                    by_id
+                        .entry(animatable.clone())
+                        .or_default()
+                        .push(SceneBinding {
+                            entity,
+                            feature: binding.feature.clone(),
+                            axis: binding.axis,
+                            morph_index: None,
+                        });
+                }
             }
         }
 

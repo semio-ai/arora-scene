@@ -45,50 +45,153 @@ The package's `exports` carry a `source` condition, so a bundler set to read
 it builds from `src/` rather than `dist/`. Either way the `wasm/` modules
 must be built first: they are generated, not committed.
 
-Open the example with `?glb=<url>`, or choose a robot GLB on the page. It
-starts on WebGPU when the browser can give it an adapter and falls back to
-WebGL2. **WebGL2 draws shadows from one light only**, so the fill light casts
-none there.
-
-**A page runs one scene for its whole life.** Bevy's windowing runs on winit,
-which allows one event loop per page and never hands it back. So the package
-starts the scene once and moves its canvas between the containers that show
-it: unmounting `<Scene>` parks the canvas, still running and drawing nothing,
-and mounting it again brings the same scene back. A different robot swaps into
-the running scene (`loadRobot`, or a new `glb` on `<Scene>`): the old robot
-goes, with its joint and element controls and its selection, and the new one
-is measured and framed afresh. Goals stay.
+Open the example with `?glb=<url>` (and `&backend=webgl2` to force WebGL2),
+or choose a robot GLB on the page. It plays a driver: it writes values, adds
+joint controls and goals, writes their drags back, and swaps robots.
 
 The workspace patches `bevy_pbr` so `StandardMaterial` draws on Safari's
 WebGPU; the root `Cargo.toml` says why and when to drop it.
 
-## Driving it
+## The JavaScript API
 
-The scene draws what it is told and reports what the user does; a driver (a
-device, Studio's World, an IK solver) decides what either means.
+```ts
+import { Scene, type SceneHandle, type SceneEvent } from "@semio/scene";
 
-- **Values in.** `setValue(id, value)` writes an animatable by the id
-  `RobotData` gives it, and the scene moves wherever the robot binds it. A
-  joint's value is an animatable like any other: it turns or slides the body
-  the joint moves, from the pose the GLB gave it.
-- **Controls, by the driver's keys.** `control({op: "add", key, control})`
-  adds a joint control (keyed by the joint's value animatable) or a transform
-  control on the robot, an element, or a goal: a pose with nothing drawn but
-  the control, which is what an IK target is. `remove`, `show` and `setPose`
-  take the same key.
-- **A drag moves nothing.** It arrives as a `control` event with the value or
-  pose it asks for, and the driver writes it back if it wants it, through the
-  same `setValue` and `setPose` every other change uses. What the driver holds
-  and what the scene shows cannot disagree.
-- **Poses are Z up**, in metres, with quaternions as `[x, y, z, w]`: the frame
-  a robot is described in. The scene converts to Bevy's Y up at the boundary.
+<Scene
+  glb={bytes}                       // the robot's GLB, as a Uint8Array
+  options={{ environment: "sky" }}  // SceneOptions, read once
+  onReady={(scene) => drive(scene)} // the SceneHandle
+  onEvent={(event) => hear(event)}  // overlay, pick and control events
+  style={{ height: "100%" }}        // the scene fills this element
+/>;
+```
+
+`mountScene(container, glb, options)` and `unmountScene(container)` do the
+same without React; `chooseBackend()` says which backend a page would get.
+
+### The scene's life
+
+- **A page runs one scene for its whole life.** Bevy's windowing runs on winit,
+  which allows one event loop per page and never hands it back. The package
+  starts the scene once and moves its canvas into whichever `<Scene>` mounts:
+  unmounting parks it, still running and drawing nothing, and mounting again
+  brings the same scene back.
+- **Show one `<Scene>` at a time.** A second one mounted takes the canvas, and
+  from then on the first neither drives the scene nor receives its events.
+- **`options` are read once**, when the page's scene first starts. A later
+  `<Scene>`'s options are ignored.
+- **A different `glb` swaps the robot** in the running scene, as
+  `scene.loadRobot(glb)` does. The old robot goes, with every control on it
+  (joint controls, and transform controls on the robot or its elements) and
+  its selection; the new one is measured and framed afresh. Goals stay. A GLB
+  the scene cannot read is refused, and the old robot kept.
+- **The scene idles.** It draws a frame only when something changed, and its
+  camera moves only when the user moves it. WebGPU is used when the browser
+  can give the page an adapter, WebGL2 otherwise; **WebGL2 draws shadows from
+  one light only.**
+
+### Writing values
+
+`scene.setValue(target, value, feature?)` writes `value`, one number or
+three, in the next frame.
+
+- **`target` an animatable's id**, as the robot's `RobotData` declares it:
+  the value lands wherever the robot binds that animatable, and an animatable
+  carries its own feature, so `feature` is left out. Elements that share a
+  material share its animatables, and one write changes all of them.
+- **A joint's value is an animatable like any other.** It turns or slides the
+  body the joint moves from the pose the GLB gave it, a mimic joint follows
+  its leader scaled and offset, and **a limited joint stops at its limits**:
+  a value past them poses it at the stop.
+- **`target` an element's id** writes one element directly, and needs the
+  `feature` (`"translation"`, `"rotation"`, `"scale"`, `"color"`,
+  `"opacity"`, `"emissive"`, ...). A material write changes that element
+  alone, across every primitive mesh it has, even where the GLB shares the
+  material with other elements.
+- **A write made before the robot has arrived waits for it**, so a driver can
+  write from `onReady`. A write to an id the robot does not have changes
+  nothing.
+
+### Controls
+
+The scene does not decide what a control means. A driver (a device, Studio's
+World, an IK solver) adds controls under keys of its own, hears each drag as a
+`control` event, and writes back what the drag should change.
+
+```ts
+// A ring on a joint, keyed by the joint's value animatable.
+scene.control({ op: "add", key: tiltValueId, control: { kind: "joint" } });
+// An IK goal: a pose with nothing drawn but its handles.
+scene.control({
+  op: "add",
+  key: "left-hand-goal",
+  control: { kind: "transform", target: { kind: "goal", pose: { position: [0.3, 0, 1.2] } } },
+});
+scene.control({ op: "show", key: "left-hand-goal", visible: false });
+scene.control({ op: "remove", key: "left-hand-goal" });
+```
+
+- **A drag moves nothing.** It arrives as `{ type: "control", key, phase,
+  value | pose, scale }` with what it asks for, and **the driver writes the
+  change** through the path every other change takes: `setValue(key, value)`
+  for a joint control, `control({ op: "setPose", key, pose, scale })` for a
+  transform control. What the driver holds and what the scene shows cannot
+  disagree. `phase` is `"start"`, `"move"` or `"end"`.
+- **A transform control's target** is `{ kind: "robot" }`,
+  `{ kind: "element", id }` or `{ kind: "goal", pose }`. It offers moving,
+  turning and scaling unless `modes` names fewer, along the world's axes unless
+  `local` is set.
+- **Commands made before the robot has arrived wait for it**, in order;
+  `remove` cancels anything still waiting under its key, and `setPose` on a
+  goal added in the same frame applies once the goal exists.
+- **`show` is the driver's.** The scene also hides controls on its own account
+  (on a ghosted robot), and shows one only when neither wants it hidden.
+
+### Events
+
+- **`overlay`**: element and gizmo boxes on screen, and the gizmo under the
+  pointer with its readings, for drawing labels and tooltips. Sent each frame
+  it changes, and at once to a newly set handler.
+- **`pick`**: a press released on the robot, with the element under it, or
+  `null` for none. The scene needs the pointer's position before the press,
+  which a real pointer always gives it.
+- **`control`**: a drag on a control, as above.
+
+### Poses
+
+**Poses are Z up**, in metres, with quaternions as `[x, y, z, w]`: the frame a
+robot is described in. The scene converts to and from Bevy's Y up at the
+boundary, in both directions, so a driver never sees the scene's own axes.
+
+## Embedding the Rust library
+
+`crates/arora-scene` is the same scene for a native or editor host, and the
+wasm host is the reference for wiring it.
+
+- **Start it.** Add Bevy's `DefaultPlugins` and `ScenePlugin`, and insert
+  `SceneOptions` and `RobotSpec { glb, copies }`, where `glb` is an asset path
+  the asset server can load.
+- **Declare the robot.** `mount_instances` reads the GLB from disk and
+  registers `instance::index_instances`. A host holding the bytes instead
+  inserts `instance::RobotMeta`, `joints::RobotJoints` and
+  `instance::Selected` itself and adds `index_instances` to `Update`, as the
+  wasm host does.
+- **Write values** by pushing `values::ValueWrite`s onto
+  `values::ValueWrites` before the `values::ApplyValues` set. Each write may
+  carry a `stamp`, which `values::AppliedValues` hands back once the write has
+  landed.
+- **Drive controls** by pushing `controls::ControlCommand`s onto
+  `controls::ControlCommands`, and draining `controls::ControlEvents`. Poses
+  there are the same Z-up `controls::Pose`.
+- **Swap the robot** by inserting `NextRobot { glb, meta, joints }`; the scene
+  swaps it in on its next frame.
 
 ## Running it natively
 
 No robot ships with this repo. Point it at a Semio robot GLB of your own:
 
 ```
-cargo run -- path/to/robot.glb --joint tilt_joint --ring-active --screen
+cargo run -p arora-scene -- path/to/robot.glb --joint tilt_joint --ring-active --screen
 ```
 
 The path is taken relative to where you run the command, and the file's own
@@ -160,10 +263,15 @@ Three rules hold the model together:
 - **Nothing fills the screen yet.** The Vizij face renderer is not on
   `arora-visuals`, so `mount_screen` hands back a texture no one writes. The
   seam works; the content does not arrive through it yet.
-- **Assets load before the app runs.** `mount_screen` and `mount_joint` both
-  read the GLB from disk up front, which is why they are the host's to call.
-  Making these asset-driven is what lets a running scene gain, swap and lose
-  assets — and it is the same change either way.
+- **The native tool's screen and joint mounts read the GLB up front.**
+  `mount_screen` and `mount_joint` read it from disk before the app runs, so
+  they describe the robot the tool started with, not one swapped in later. The
+  browser package uses neither: its joint controls come from the robot being
+  shown.
+- **A control can be shown or hidden, not made inert.** Studio's controls can
+  be visible but not draggable; these cannot yet.
+- **Morph targets are not bound.** A robot's declaration carries none, and a
+  morph animatable writes nothing.
 
 ## Licence
 

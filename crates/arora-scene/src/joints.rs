@@ -38,6 +38,9 @@ pub struct JointBinding {
     /// A mimic joint stands at `value * multiplier + offset` of the
     /// animatable it follows.
     pub mimic: Option<(f32, f32)>,
+    /// The stops a limited joint holds to, `(min, max)`; `None` for a joint
+    /// that turns without end.
+    pub limits: Option<(f32, f32)>,
 }
 
 impl JointBinding {
@@ -54,13 +57,21 @@ impl JointBinding {
             axis: Dir3::new(joint.axis).unwrap_or(Dir3::Y),
             motion,
             mimic: joint.mimic,
+            limits: joint.is_limited().then_some((joint.min, joint.max)),
         })
     }
 
-    /// The value this joint stands at when its animatable holds `value`.
+    /// The value this joint stands at when its animatable holds `value`: the
+    /// mimic's scale and offset applied, then held to the joint's own stops.
+    /// A robot cannot stand past its limits, so a value written past them
+    /// poses it at the stop rather than through it.
     pub fn joint_value(&self, value: f32) -> f32 {
-        match self.mimic {
+        let value = match self.mimic {
             Some((multiplier, offset)) => value * multiplier + offset,
+            None => value,
+        };
+        match self.limits {
+            Some((min, max)) => value.clamp(min, max),
             None => value,
         }
     }
@@ -165,6 +176,22 @@ mod tests {
     fn a_mimic_joint_follows_its_leader_scaled_and_offset() {
         let binding = bind(JointKind::Revolute, 0.0, Some((-2.0, 0.1))).unwrap();
         assert!((binding.joint_value(0.5) - -0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_limited_joint_stops_at_its_limits_after_the_mimic() {
+        let plain = bind(JointKind::Revolute, 0.0, None).unwrap();
+        assert_eq!(plain.joint_value(2.0), 1.0);
+        assert_eq!(plain.joint_value(-3.0), -1.0);
+        // 0.8 * -2 + 0.1 is -1.5: past the stop the mimic itself would reach.
+        let mimic = bind(JointKind::Revolute, 0.0, Some((-2.0, 0.1))).unwrap();
+        assert_eq!(mimic.joint_value(0.8), -1.0);
+    }
+
+    #[test]
+    fn a_continuous_joint_turns_without_end() {
+        let binding = bind(JointKind::Continuous, 0.0, None).unwrap();
+        assert_eq!(binding.joint_value(7.0), 7.0);
     }
 
     #[test]

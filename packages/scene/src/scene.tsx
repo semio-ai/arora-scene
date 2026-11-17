@@ -63,11 +63,18 @@ export function Scene({
     };
   }, []);
 
+  // Whether this `<Scene>` is the one showing the page's scene. Another one
+  // mounted later takes the canvas, and from then on this one neither drives
+  // the scene nor hears from it.
+  const owns = (handle: SceneHandle) =>
+    container.current !== null &&
+    handle.canvas.parentElement === container.current;
+
   // A new robot swaps into the running scene; a robot the scene cannot read
   // is refused and the old one kept.
   const loaded = useRef(glb);
   useEffect(() => {
-    if (!scene || glb === loaded.current) return;
+    if (!scene || glb === loaded.current || !owns(scene)) return;
     loaded.current = glb;
     try {
       scene.loadRobot(glb);
@@ -77,12 +84,19 @@ export function Scene({
     }
   }, [scene, glb, onError]);
 
-  // Events go to the shown `<Scene>` only: a parked scene must not call into
-  // a component that is gone.
+  // Events go to the `<Scene>` showing the scene, and only while it does: a
+  // parked scene, or one another `<Scene>` has taken, must not call into this
+  // one, and this one's cleanup must not clear the other's handler.
   useEffect(() => {
-    if (!scene || !onEvent) return;
-    scene.onEvent(onEvent);
-    return () => scene.onEvent(() => {});
+    if (!scene || !onEvent || !owns(scene)) return;
+    let live = true;
+    scene.onEvent((event) => {
+      if (live && owns(scene)) onEvent(event);
+    });
+    return () => {
+      live = false;
+      if (owns(scene)) scene.onEvent(() => {});
+    };
   }, [scene, onEvent]);
 
   return (

@@ -127,12 +127,33 @@ pub enum ControlCommand {
         key: String,
         visible: bool,
     },
-    /// Moves a transform control's target to `pose`, in the world.
+    /// Moves a transform control's target to `pose`, in the world, and, given
+    /// `scale`, stretches it along its own axes: what a driver writes back
+    /// after a drag on the move, turn or scale handles.
     SetPose {
         key: String,
         pose: Pose,
+        #[serde(default)]
+        scale: Option<[f32; 3]>,
     },
 }
+
+impl ControlCommand {
+    fn key(&self) -> &str {
+        match self {
+            Self::Add { key, .. }
+            | Self::Remove { key }
+            | Self::Show { key, .. }
+            | Self::SetPose { key, .. } => key,
+        }
+    }
+}
+
+/// On a control the driver has hidden. The scene also hides controls on its
+/// own account (on a ghosted robot, say), and it shows a control again only
+/// when neither wants it hidden.
+#[derive(Component)]
+pub struct HiddenByDriver;
 
 /// Instructions waiting for the next frame. One that cannot be carried out
 /// yet, because the robot has not spawned, waits for the frame that can.
@@ -334,25 +355,38 @@ fn carry_out(
                 if let Some(old) = controls.0.remove(&key) {
                     despawn(&mut commands, old);
                 }
+                // Whatever the driver asked of this key that is still
+                // waiting goes too, or an add made before the robot arrived
+                // would bring back a control the driver has since removed.
+                waiting.retain(|waiting| waiting.key() != key);
             }
             ControlCommand::Show { key, visible } => match controls.0.get(&key) {
                 Some(placed) => {
-                    commands.entity(placed.gizmo).insert(if visible {
-                        Visibility::Inherited
+                    let mut gizmo = commands.entity(placed.gizmo);
+                    if visible {
+                        gizmo
+                            .remove::<HiddenByDriver>()
+                            .insert(Visibility::Inherited);
                     } else {
-                        Visibility::Hidden
-                    });
+                        gizmo.insert((HiddenByDriver, Visibility::Hidden));
+                    }
                 }
                 // Shown or hidden before it was added: the add is waiting
                 // too, so this waits behind it.
                 None => waiting.push(ControlCommand::Show { key, visible }),
             },
-            ControlCommand::SetPose { key, pose } => {
-                let Some(target) = controls.0.get(&key).and_then(|p| p.target) else {
-                    if controls.0.contains_key(&key) {
+            ControlCommand::SetPose { key, pose, scale } => {
+                let target = controls.0.get(&key).and_then(|p| p.target);
+                // A goal added this frame is spawned at the end of it, so it
+                // has no transform yet; the pose waits a frame for it, as one
+                // set before the add would.
+                let Some((target, mut transform)) =
+                    target.and_then(|t| transforms.get_mut(t).ok().map(|tr| (t, tr)))
+                else {
+                    if target.is_none() && controls.0.contains_key(&key) {
                         log::warn!("{key:?} is a joint control; write its value instead");
                     } else {
-                        waiting.push(ControlCommand::SetPose { key, pose });
+                        waiting.push(ControlCommand::SetPose { key, pose, scale });
                     }
                     continue;
                 };
@@ -368,9 +402,10 @@ fn carry_out(
                     None => world.compute_affine(),
                 };
                 let (_, rotation, translation) = local.to_scale_rotation_translation();
-                if let Ok(mut transform) = transforms.get_mut(target) {
-                    transform.translation = translation;
-                    transform.rotation = rotation;
+                transform.translation = translation;
+                transform.rotation = rotation;
+                if let Some(scale) = scale {
+                    transform.scale = Vec3::from(scale);
                 }
             }
         }
@@ -657,14 +692,105 @@ mod tests {
             ControlCommand::SetPose {
                 key: "goal".into(),
                 pose,
+                scale: Some([2.0, 1.0, 1.0]),
             },
         );
-        let moved = app.world().get::<Transform>(goal).unwrap().translation;
-        assert!(moved.abs_diff_eq(asked.translation, 1e-5));
+        let moved = app.world().get::<Transform>(goal).unwrap();
+        assert!(moved.translation.abs_diff_eq(asked.translation, 1e-5));
+        assert_eq!(moved.scale, Vec3::new(2.0, 1.0, 1.0));
 
         send(&mut app, ControlCommand::Remove { key: "goal".into() });
         assert!(app.world().get_entity(gizmo).is_err());
         assert!(app.world().get_entity(goal).is_err());
+    }
+
+    fn goal_at(position: [f32; 3]) -> Control {
+        Control::Transform {
+            target: Target::Goal {
+                pose: Pose {
+                    position,
+                    rotation: no_turn(),
+                },
+            },
+            modes: None,
+            local: false,
+        }
+    }
+
+    #[test]
+    fn a_pose_set_in_the_frame_a_goal_is_added_is_not_lost() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let moved_to = Pose {
+            position: [0.0, 0.0, 2.0],
+            rotation: no_turn(),
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            ControlCommand::Add {
+                key: "goal".into(),
+                control: goal_at([0.0, 0.0, 1.0]),
+            },
+            ControlCommand::SetPose {
+                key: "goal".into(),
+                pose: moved_to,
+                scale: None,
+            },
+        ]);
+        app.update();
+        app.update();
+        let gizmo = only::<TransformGizmo>(&mut app).unwrap();
+        let goal = app.world().get::<TransformGizmo>(gizmo).unwrap().target;
+        let at = app.world().get::<Transform>(goal).unwrap();
+        assert!(at
+            .translation
+            .abs_diff_eq(moved_to.to_scene().translation, 1e-5));
+    }
+
+    #[test]
+    fn a_control_removed_before_the_robot_arrives_never_appears() {
+        let (mut app, body) = scene();
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint,
+            },
+            ControlCommand::Show {
+                key: TILT.into(),
+                visible: false,
+            },
+        ]);
+        app.update();
+        send(&mut app, ControlCommand::Remove { key: TILT.into() });
+        robot(&mut app, body);
+        app.update();
+        assert!(only::<JointGizmo>(&mut app).is_none());
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    #[test]
+    fn a_hidden_control_is_marked_as_the_driver_s_doing() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint,
+            },
+        );
+        let gizmo = only::<JointGizmo>(&mut app).unwrap();
+        let show = |visible| ControlCommand::Show {
+            key: TILT.into(),
+            visible,
+        };
+        send(&mut app, show(false));
+        assert!(app.world().get::<HiddenByDriver>(gizmo).is_some());
+        send(&mut app, show(true));
+        assert!(app.world().get::<HiddenByDriver>(gizmo).is_none());
+        assert_eq!(
+            app.world().get::<Visibility>(gizmo),
+            Some(&Visibility::Inherited)
+        );
     }
 
     #[test]
