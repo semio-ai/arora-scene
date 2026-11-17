@@ -1,0 +1,44 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      # Bevy's windowing and input crates link these system libraries on
+      # Linux; without them the native tooling fails to build, not to test.
+      - name: Install Bevy's Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libudev-dev libasound2-dev libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy, native
+        run: cargo clippy --locked -p arora-scene --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked -p arora-scene
+
+      # Both backends, since each is its own build of the module the npm
+      # package ships, and with the benchmark's hooks, which are only built
+      # when asked for.
+      - name: Clippy, wasm
+        run: |
+          for features in webgpu webgl2 webgpu,bench; do
+            cargo clippy --locked -p arora-scene-wasm --target wasm32-unknown-unknown \
+              --features "$features" -- -D warnings
+          done
