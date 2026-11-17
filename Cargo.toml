@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/arora-scene"]
+members = ["crates/arora-scene", "crates/arora-scene-wasm"]
 resolver = "2"
 
 [workspace.package]
@@ -29,6 +29,17 @@ arora-visuals = { git = "https://github.com/semio-ai/arora-visuals", branch = "m
 
 bevy = { version = "0.20", default-features = false }
 
+# Bevy's PBR shaders bind each material texture and sampler to a `let` before
+# sampling it. That needs WGSL's optional `texture_and_sampler_let` extension,
+# which Safari's WebGPU lacks, so there `StandardMaterial` draws nothing. This
+# copy of `bevy_pbr` 0.20.1 samples them by name instead; its README covers the
+# change. Drop the patch once a Bevy release samples them without `let`s.
+#
+# A `[patch]` applies only in the workspace being built, which for the browser
+# is this one: the wasm module is linked here.
+[patch.crates-io]
+bevy_pbr = { git = "https://github.com/semio-ai/bevy_pbr-safari-fixed", rev = "ae917f3" }
+
 # Iterating: Bevy and every other dependency fully optimised, which is paid
 # once, and this workspace's own code lightly, so a change rebuilds in
 # seconds and the window still runs near release speed. A release build
@@ -44,3 +55,12 @@ opt-level = 3
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# The browser build. Size first, because it is downloaded: "z" is 14% smaller
+# than "s" once compressed, and slower on its own, but binaryen's wasm-opt
+# run over it afterwards (see build.sh) makes it both the smallest of the
+# combinations measured and the fastest. wasm32-unknown-unknown already
+# aborts on panic, so there is no unwinding to turn off.
+[profile.web]
+inherits = "release"
+opt-level = "z"

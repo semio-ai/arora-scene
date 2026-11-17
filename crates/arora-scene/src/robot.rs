@@ -103,6 +103,14 @@ pub struct Joint {
     /// glTF node `GltfNode{index}`, which is the only join back to the spawned
     /// scene — a robot's nodes carry no names of their own.
     pub child_node: usize,
+    /// The `RobotData` id of that body: the element a joint's pose lands on.
+    pub child: String,
+    /// The animatable the joint's value is written under, when it is
+    /// animated. A host writes this id to move the joint.
+    pub animatable: Option<String>,
+    /// A mimic joint follows another joint's animatable: it stands at
+    /// `value * multiplier + offset` of that value.
+    pub mimic: Option<(f32, f32)>,
     pub min: f32,
     pub max: f32,
     pub default: f32,
@@ -184,11 +192,10 @@ pub fn find_joints(bytes: &[u8]) -> Result<Vec<Joint>> {
         else {
             continue;
         };
-        let Some(&child_node) = data
-            .get("child")
-            .and_then(Json::as_str)
-            .and_then(|id| by_id.get(id))
-        else {
+        let Some(child) = data.get("child").and_then(Json::as_str) else {
+            continue;
+        };
+        let Some(&child_node) = by_id.get(child) else {
             continue;
         };
 
@@ -216,6 +223,20 @@ pub fn find_joints(bytes: &[u8]) -> Result<Vec<Joint>> {
             kind,
             axis: axis.normalize_or(Vec3::Y),
             child_node,
+            child: child.to_string(),
+            animatable: data
+                .pointer("/features/jointValue")
+                .filter(|feature| feature.get("animated").and_then(Json::as_bool) == Some(true))
+                .and_then(|feature| feature.pointer("/value/id"))
+                .and_then(Json::as_str)
+                .map(str::to_string),
+            mimic: data.get("mimicTransform").map(|mimic| {
+                let at = |k: &str| mimic.get(k).and_then(Json::as_f64);
+                (
+                    at("multiplier").unwrap_or(1.0) as f32,
+                    at("offset").unwrap_or(0.0) as f32,
+                )
+            }),
             min: number("/constraints/min").unwrap_or(f32::NEG_INFINITY),
             max: number("/constraints/max").unwrap_or(f32::INFINITY),
             default: number("/default").unwrap_or_default(),
@@ -327,6 +348,9 @@ mod tests {
             kind,
             axis: Vec3::Z,
             child_node: 0,
+            child: "body".into(),
+            animatable: None,
+            mimic: None,
             min,
             max,
             default: 0.0,

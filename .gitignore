@@ -3,3 +3,11 @@
 /fixtures
 # A local [patch] pointing at a sibling checkout is one machine's business.
 /.cargo/
+
+# Built by crates/arora-scene-wasm/build.sh and by the package build.
+/packages/scene/wasm/
+/packages/scene/dist/
+node_modules/
+/packages/scene/LICENSE
+# Robots a developer drops in to try the example; none ship.
+/packages/scene/example/public/

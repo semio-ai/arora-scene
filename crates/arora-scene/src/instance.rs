@@ -13,13 +13,14 @@
 //! — silently, because a name collision is a successful lookup. The walk here
 //! is over one root's descendants.
 
-use arora_visuals::binding::{ElementTargets, SceneBindings};
+use arora_visuals::binding::{ElementTargets, SceneBinding, SceneBindings};
 use arora_visuals::instance::EntityInstance;
-use arora_visuals::meta::AssetMeta;
+use arora_visuals::meta::{AssetMeta, FeatureKind};
 use bevy::ecs::system::SystemParam;
 use bevy::mesh::morph::MorphWeights;
 use bevy::prelude::*;
 
+use crate::joints::{JointBinding, JointRig, RobotJoints};
 use crate::OrbitCamera;
 
 /// What the robot's GLB declares, read before the app runs.
@@ -41,18 +42,30 @@ pub struct SpawnedScene<'w, 's> {
     names: Query<'w, 's, &'static Name>,
     meshes: Query<'w, 's, Entity, With<Mesh3d>>,
     morphs: Query<'w, 's, Entity, With<MorphWeights>>,
+    transforms: Query<'w, 's, &'static Transform>,
 }
+
+/// A robot root not indexed yet. An incoming robot is indexed once its swap
+/// is finished, so until then values, controls and picks keep addressing the
+/// robot that is showing.
+type Unindexed = (
+    With<WorldAssetRoot>,
+    Without<EntityInstance>,
+    Without<crate::Incoming>,
+);
 
 /// Joins each spawned robot's elements to its entities, once its scene exists.
 ///
 /// Runs until each root is indexed, because a glTF scene spawns
 /// asynchronously and there is no event that says all of it has arrived.
+#[allow(clippy::too_many_arguments)]
 pub fn index_instances(
     meta: Res<RobotMeta>,
+    joints: Option<Res<RobotJoints>>,
     selected: Res<Selected>,
     mut selections: ResMut<arora_visuals::select::Selections>,
     camera: Query<Entity, With<OrbitCamera>>,
-    roots: Query<Entity, (With<WorldAssetRoot>, Without<EntityInstance>)>,
+    roots: Query<Entity, Unindexed>,
     scene: SpawnedScene,
     mut commands: Commands,
 ) {
@@ -82,7 +95,10 @@ pub fn index_instances(
                 ElementTargets {
                     node,
                     mesh: scene.meshes.get(node).ok().or_else(|| {
-                        scene.children.iter_descendants(node).find(|e| scene.meshes.contains(*e))
+                        scene
+                            .children
+                            .iter_descendants(node)
+                            .find(|e| scene.meshes.contains(*e))
                     }),
                     morph: own.into_iter().find(|e| scene.morphs.contains(*e)),
                 },
@@ -106,16 +122,73 @@ pub fn index_instances(
             meta.0.elements.len()
         );
 
+        // Every place each animatable lands: its nodes for a transform
+        // feature, the mesh at or under each node for a material one.
+        let mut by_id: std::collections::HashMap<String, Vec<SceneBinding>> =
+            std::collections::HashMap::new();
+        for (animatable, binding) in &meta.0.animatables {
+            // A morph target is found by name among a mesh's targets, which
+            // this scene does not read; a robot's declaration carries none.
+            if matches!(binding.feature, FeatureKind::Morph(_)) {
+                continue;
+            }
+            let transform = matches!(
+                binding.feature,
+                FeatureKind::Translation | FeatureKind::Rotation | FeatureKind::Scale
+            );
+            for node_name in &binding.node_names {
+                let Some(&node) = by_name.get(node_name) else {
+                    continue;
+                };
+                // A material feature lands on every primitive the node draws
+                // with, each of which has a material of its own.
+                let entities = if transform {
+                    vec![node]
+                } else {
+                    crate::values::primitives(node, &scene.children, |e| scene.meshes.contains(e))
+                };
+                for entity in entities {
+                    by_id
+                        .entry(animatable.clone())
+                        .or_default()
+                        .push(SceneBinding {
+                            entity,
+                            feature: binding.feature.clone(),
+                            axis: binding.axis,
+                            morph_index: None,
+                        });
+                }
+            }
+        }
+
+        // Every joint whose value is animated, bound to the body it moves
+        // as that body stands now: the rest every pose is taken from.
+        let mut rig = JointRig::default();
+        for joint in joints.iter().flat_map(|joints| joints.0.iter()) {
+            let (Some(animatable), Some(body)) = (
+                &joint.animatable,
+                elements.get(&joint.child).map(|e| e.node),
+            ) else {
+                continue;
+            };
+            let Ok(rest) = scene.transforms.get(body) else {
+                continue;
+            };
+            if let Some(binding) = JointBinding::new(joint, body, *rest) {
+                rig.0.entry(animatable.clone()).or_default().push(binding);
+            }
+        }
+
         let id = format!("robot-{copy}");
         if !selected.0.is_empty() {
             selections.0.insert(id.clone(), selected.0.clone());
         }
-        commands.entity(root).insert(EntityInstance {
+        commands.entity(root).insert(rig).insert(EntityInstance {
             id,
             asset_path: String::new(),
             meta: meta.0.clone(),
             bindings: SceneBindings {
-                by_id: std::collections::HashMap::new(),
+                by_id,
                 elements,
                 indexed: true,
             },

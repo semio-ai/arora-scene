@@ -20,14 +20,20 @@
 //! viewport feel bad, and the 99th is what a person notices.
 
 pub mod aurora;
+pub mod controls;
 pub mod instance;
+pub mod joints;
+pub mod redraw;
 pub mod robot;
 pub mod stage;
 pub mod toggles;
+#[cfg(feature = "test_window")]
 pub mod tune;
+pub mod values;
 
 use std::path::PathBuf;
 
+use bevy::asset::RecursiveDependencyLoadState;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
@@ -189,7 +195,9 @@ impl Plugin for ScenePlugin {
             arora_visuals::ghost::GhostPlugin,
             arora_visuals::axes::FrameAxesPlugin,
             arora_visuals::active_area::ActiveAreaPlugin,
+            values::ValuesPlugin,
         ))
+        .add_plugins(controls::ControlsPlugin)
         .init_resource::<WashChoice>()
         // Read by the scene's gizmo systems; the test window's toggles set it.
         .init_resource::<toggles::GizmoChoice>()
@@ -219,20 +227,28 @@ impl Plugin for ScenePlugin {
         .init_resource::<OrbitHeld>()
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
+        .init_resource::<RobotOutcomes>()
+        .add_systems(PreUpdate, (begin_swap, finish_swap).chain())
         .add_systems(
             Update,
             (
-                take_census,
+                take_census.run_if(|census: Res<Census>| !census.taken),
                 split_materials,
                 spawn_marker,
                 fit_orbit,
-                count_visible,
+                count_visible.run_if(reports),
                 capture,
                 measure,
             )
                 .chain(),
         );
     }
+}
+
+/// Whether this run ends in a report: only then are frame times and the
+/// visible-mesh peak worth collecting, every frame, for the length of the run.
+fn reports(opts: Res<SceneOptions>) -> bool {
+    opts.seconds > 0.0
 }
 
 /// Frame durations, collected after a warm-up so shader compilation and asset
@@ -281,6 +297,9 @@ pub struct Census {
     visible_peak: usize,
     /// A mounted asset's own meshes, counted apart from the robot's.
     mounted_meshes: usize,
+    /// When the robot being counted was spawned, in seconds since the app
+    /// started: a robot swapped in later waits its own settling time.
+    since: f32,
 }
 
 /// Whether an entity belongs to an asset mounted on a screen rather than to
@@ -294,10 +313,10 @@ fn on_mounted_layer(layers: Option<&RenderLayers>) -> bool {
 /// guess renders an empty frame that still reports a healthy frame rate — so
 /// the camera is fitted to the bounds the meshes report.
 #[derive(Resource, Default)]
-struct Framing {
+pub(crate) struct Framing {
     center: Vec3,
     radius: f32,
-    fitted: bool,
+    pub(crate) fitted: bool,
 }
 
 const WARMUP_SECONDS: f32 = 2.0;
@@ -688,16 +707,27 @@ pub fn mount_instances(
     robot_glb: &str,
     select: Vec<arora_visuals::select::Selection>,
 ) {
-    let meta = match std::fs::read(assets.join(robot_glb))
-        .map_err(anyhow::Error::from)
-        .and_then(|bytes| arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes))
-    {
+    let bytes = match std::fs::read(assets.join(robot_glb)) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::error!("could not read {robot_glb}: {error:#}");
+            return;
+        }
+    };
+    let meta = match arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes) {
         Ok(meta) => meta,
         Err(error) => {
             log::error!("could not read what {robot_glb} declares: {error:#}");
             return;
         }
     };
+    // A robot whose joints cannot be read still draws; its joints just stay
+    // where the GLB put them.
+    let joints = robot::find_joints(&bytes).unwrap_or_else(|error| {
+        log::warn!("could not read the robot's joints: {error:#}");
+        Vec::new()
+    });
+    app.insert_resource(joints::RobotJoints(joints));
     log::info!(
         "{} declares {} elements and {} animatables",
         robot_glb,
@@ -844,17 +874,7 @@ pub fn setup(
         spec.glb,
         if opts.uncapped { "uncapped" } else { "vsync" }
     );
-    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(spec.glb.clone()));
-    // A square-ish grid, spaced by roughly a robot's width. The exact spacing
-    // does not matter — the camera fits whatever bounds result.
-    let stride = (spec.copies as f32).sqrt().ceil().max(1.0) as u32;
-    for i in 0..spec.copies.max(1) {
-        let (x, z) = ((i % stride) as f32, (i / stride) as f32);
-        commands.spawn((
-            WorldAssetRoot(scene.clone()),
-            Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
-        ));
-    }
+    spawn_robot(&mut commands, &assets, &spec);
 
     // Placed properly once the model's bounds are known; see `take_census`.
     // Until then it stands well back from where a robot of ordinary size
@@ -916,6 +936,198 @@ pub fn setup(
     }
 }
 
+/// Spawns the robot `spec` names, `spec.copies` times.
+fn spawn_robot(commands: &mut Commands, assets: &AssetServer, spec: &RobotSpec) {
+    spawn_robot_roots(commands, assets, &spec.glb, spec.copies, ());
+}
+
+/// Spawns `copies` roots of the robot at `glb`, each with `extra`, and
+/// returns them.
+fn spawn_robot_roots(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    glb: &str,
+    copies: u32,
+    extra: impl Bundle + Clone,
+) -> Vec<Entity> {
+    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(glb.to_string()));
+    // A square-ish grid, spaced by roughly a robot's width. The exact spacing
+    // does not matter — the camera fits whatever bounds result.
+    let stride = (copies as f32).sqrt().ceil().max(1.0) as u32;
+    (0..copies.max(1))
+        .map(|i| {
+            let (x, z) = ((i % stride) as f32, (i / stride) as f32);
+            commands
+                .spawn((
+                    WorldAssetRoot(scene.clone()),
+                    Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
+                    extra.clone(),
+                ))
+                .id()
+        })
+        .collect()
+}
+
+/// A robot to put in place of the one the scene is showing: where its GLB is
+/// served from, and what it declares. A host inserts it; the scene starts
+/// loading it on the next frame and removes it.
+#[derive(Resource)]
+pub struct NextRobot {
+    pub glb: String,
+    pub meta: arora_visuals::meta::AssetMeta,
+    pub joints: Vec<robot::Joint>,
+}
+
+/// How a robot swap ended, for the host that asked for it: `Ok` with the
+/// robot's `glb` once it is showing, `Err` with the `glb` and why it could not
+/// be loaded, the old robot still showing.
+#[derive(Resource, Default)]
+pub struct RobotOutcomes(pub Vec<Result<String, (String, String)>>);
+
+/// A robot loading in the background to replace the one showing. It is not
+/// indexed, drawn or driven until it has loaded whole.
+#[derive(Component, Clone)]
+pub struct Incoming;
+
+/// The swap under way: the robot's declaration, and the roots loading it.
+#[derive(Resource)]
+struct PendingRobot {
+    glb: String,
+    meta: arora_visuals::meta::AssetMeta,
+    joints: Vec<robot::Joint>,
+    roots: Vec<Entity>,
+}
+
+/// The error a swap reports when a robot asked for later replaced it before
+/// it finished loading.
+pub const REPLACED: &str = "replaced by a later robot before it finished loading";
+
+/// Starts loading the robot [`NextRobot`] names, hidden beside the one
+/// showing, which stays until the new one has loaded. A robot asked for while
+/// another is still loading replaces that one.
+fn begin_swap(
+    next: Option<Res<NextRobot>>,
+    pending: Option<Res<PendingRobot>>,
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    spec: Res<RobotSpec>,
+    mut outcomes: ResMut<RobotOutcomes>,
+) {
+    let Some(next) = next else {
+        return;
+    };
+    if let Some(earlier) = pending {
+        for &root in &earlier.roots {
+            commands.entity(root).despawn();
+        }
+        outcomes.0.push(Err((
+            earlier.glb.clone(),
+            REPLACED.into(),
+        )));
+    }
+    let roots = spawn_robot_roots(
+        &mut commands,
+        &assets,
+        &next.glb,
+        spec.copies,
+        (Incoming, Visibility::Hidden),
+    );
+    commands.insert_resource(PendingRobot {
+        glb: next.glb.clone(),
+        meta: next.meta.clone(),
+        joints: next.joints.clone(),
+        roots,
+    });
+    commands.remove_resource::<NextRobot>();
+    log::info!("loading {} to swap in", next.glb);
+}
+
+/// Finishes a swap once the incoming robot has loaded whole and spawned, or
+/// abandons it, keeping the old robot, if it failed to load.
+///
+/// Everything bound to the old robot goes with it: its entities, the controls
+/// on its joints and elements, and the selection made of its element ids,
+/// which mean nothing on another robot. Goals stay, being nobody's. The new
+/// robot is measured and framed afresh once it has had its own time to
+/// settle.
+#[allow(clippy::too_many_arguments)]
+fn finish_swap(
+    pending: Option<Res<PendingRobot>>,
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    showing: Query<Entity, (With<WorldAssetRoot>, Without<Incoming>)>,
+    incoming: Query<(&WorldAssetRoot, Has<Children>), With<Incoming>>,
+    children: Query<&Children>,
+    transform_gizmos: Query<(Entity, &TransformGizmo)>,
+    joint_gizmos: Query<(Entity, &JointGizmo)>,
+    mut spec: ResMut<RobotSpec>,
+    frames: Res<Frames>,
+    mut census: ResMut<Census>,
+    mut framing: ResMut<Framing>,
+    mut selections: ResMut<arora_visuals::select::Selections>,
+    mut outcomes: ResMut<RobotOutcomes>,
+) {
+    let Some(pending) = pending else {
+        return;
+    };
+    let mut spawned = true;
+    for &root in &pending.roots {
+        let Ok((scene, has_children)) = incoming.get(root) else {
+            return;
+        };
+        if let Some(RecursiveDependencyLoadState::Failed(error)) =
+            assets.get_recursive_dependency_load_state(scene.0.id())
+        {
+            log::warn!("could not load {}: {error}", pending.glb);
+            for &root in &pending.roots {
+                commands.entity(root).despawn();
+            }
+            outcomes.0.push(Err((pending.glb.clone(), error.to_string())));
+            commands.remove_resource::<PendingRobot>();
+            return;
+        }
+        spawned &= has_children;
+    }
+    // Loaded whole and spawned: a scene spawns its entities once everything
+    // it depends on has arrived.
+    if !spawned {
+        return;
+    }
+    let mut old = std::collections::HashSet::new();
+    for root in &showing {
+        old.insert(root);
+        old.extend(children.iter_descendants(root));
+        commands.entity(root).despawn();
+    }
+    for (gizmo, control) in &transform_gizmos {
+        if old.contains(&control.target) {
+            commands.entity(gizmo).despawn();
+        }
+    }
+    for (gizmo, control) in &joint_gizmos {
+        if old.contains(&control.target) {
+            commands.entity(gizmo).despawn();
+        }
+    }
+    for &root in &pending.roots {
+        commands
+            .entity(root)
+            .remove::<Incoming>()
+            .insert(Visibility::Inherited);
+    }
+    selections.0.clear();
+    commands.insert_resource(instance::Selected(Vec::new()));
+    commands.insert_resource(instance::RobotMeta(pending.meta.clone()));
+    commands.insert_resource(joints::RobotJoints(pending.joints.clone()));
+    spec.glb = pending.glb.clone();
+    census.taken = false;
+    census.since = frames.elapsed;
+    framing.fitted = false;
+    outcomes.0.push(Ok(pending.glb.clone()));
+    commands.remove_resource::<PendingRobot>();
+    log::info!("swapped in {}", pending.glb);
+}
+
 /// Where the camera is kept above, as Studio keeps its camera a centimetre
 /// above the floor, so the view never looks up from beneath it.
 pub const CAMERA_FLOOR: CameraFloor = CameraFloor {
@@ -973,7 +1185,7 @@ fn above_floor(pose: Transform, centre: Vec3, floor: Option<CameraFloor>) -> Tra
 
 /// A camera easing from where it stood to the framed view.
 #[derive(Component)]
-struct Glide {
+pub(crate) struct Glide {
     from: Transform,
     to: Transform,
     elapsed: f32,
@@ -1188,6 +1400,7 @@ type Controls<'w, 's> = Query<
         Option<&'static JointGizmo>,
         Option<&'static TransformGizmo>,
         &'static mut Visibility,
+        Has<controls::HiddenByDriver>,
     ),
     Or<(With<JointGizmo>, With<TransformGizmo>)>,
 >;
@@ -1197,7 +1410,7 @@ fn hide_controls_on_ghosts(
     ghosts: Query<(), With<Ghost>>,
     parents: Query<&ChildOf>,
 ) {
-    for (joint, transform, mut visibility) in &mut gizmos {
+    for (joint, transform, mut visibility, hidden_by_driver) in &mut gizmos {
         let Some(target) = joint
             .map(|gizmo| gizmo.target)
             .or(transform.map(|gizmo| gizmo.target))
@@ -1207,7 +1420,8 @@ fn hide_controls_on_ghosts(
         let ghosted = std::iter::once(target)
             .chain(parents.iter_ancestors(target))
             .any(|entity| ghosts.contains(entity));
-        let wanted = if ghosted {
+        // Shown only when neither the ghosting nor the driver hides it.
+        let wanted = if ghosted || hidden_by_driver {
             Visibility::Hidden
         } else {
             Visibility::Inherited
@@ -1364,7 +1578,7 @@ fn take_census(
     materials: MaterialMeshes,
     assets: Res<Assets<Mesh>>,
 ) {
-    if census.taken || frames.elapsed < 0.5 {
+    if census.taken || frames.elapsed - census.since < 0.5 {
         return;
     }
     let mut count = 0;
@@ -1543,7 +1757,7 @@ fn measure(
     let dt = time.delta_secs();
     frames.elapsed += dt;
     frames.count += 1;
-    if frames.elapsed > WARMUP_SECONDS {
+    if frames.elapsed > WARMUP_SECONDS && opts.seconds > 0.0 {
         frames.samples.push(dt * 1000.0);
     }
     if opts.seconds > 0.0 && frames.elapsed >= opts.seconds && !frames.reported {

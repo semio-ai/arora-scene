@@ -10,16 +10,17 @@
 //! from the default view they recede down the line toward the hills.
 //!
 //! The ribbons sway mostly side to side, with a little rise and fall. That
-//! motion is applied to their vertices on the CPU each frame — a few hundred
-//! of them — which costs less to keep right than a vertex shader of its own
-//! would. Their light comes from `aurora.wesl`, drawn additively.
+//! motion is the vertex shader's, from the time the view already carries and
+//! the curtain's shape in its material: the mesh is only a strip of `uv`s,
+//! uploaded once, so a swaying curtain costs the CPU nothing per frame. Each
+//! curtain's bounds cover everywhere its sway can carry it, so the engine's
+//! own frustum culling decides what is in view. Their light comes from
+//! `aurora.wesl` too, drawn additively.
 //!
 //! [`Aurora`] holds what is tuned by eye; the tuning panel moves it.
 
-use std::f32::consts::TAU;
-
 use bevy::asset::{embedded_asset, embedded_path, AssetPath, RenderAssetUsages};
-use bevy::camera::visibility::NoFrustumCulling;
+use bevy::camera::primitives::Aabb;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
@@ -187,6 +188,15 @@ pub struct AuroraUniform {
     pub colour_speed: f32,
     pub colour_lift: f32,
     pub _padding: Vec3,
+    /// The curtain's [`Curtain::offset`], `from`, `to` and `lift`.
+    pub place: Vec4,
+    /// Its `height`, `bend`, `bends` and `phase`.
+    pub form: Vec4,
+    /// [`Aurora::wave`], `speed` and `altitude`, and nought.
+    pub motion: Vec4,
+    /// The way the curtains run, and the way they are spaced; see [`ahead`].
+    pub forward: Vec4,
+    pub right: Vec4,
 }
 
 /// A curtain's material; see `aurora.wesl`.
@@ -197,6 +207,12 @@ pub struct AuroraMaterial {
 }
 
 impl Material for AuroraMaterial {
+    fn vertex_shader() -> ShaderRef {
+        ShaderRef::Path(
+            AssetPath::from_path_buf(embedded_path!("aurora.wesl")).with_source("embedded"),
+        )
+    }
+
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Path(
             AssetPath::from_path_buf(embedded_path!("aurora.wesl")).with_source("embedded"),
@@ -221,7 +237,37 @@ impl Material for AuroraMaterial {
 
 /// A curtain, by its index in [`shapes`].
 #[derive(Component)]
-struct AuroraCurtain(usize);
+pub(crate) struct AuroraCurtain {
+    index: usize,
+}
+
+/// The box a curtain can reach anywhere in its sway, with the aurora as tuned
+/// and the scene opening the way it does.
+///
+/// Taken from the bounds of every term in [`wave`] rather than from the
+/// ribbon as it stands, so it holds for the whole run without being
+/// remeasured: the box a mesh is given once is otherwise the box it was
+/// spawned with.
+fn reach(shape: &Curtain, aurora: &Aurora, opts: &SceneOptions) -> Aabb {
+    let (forward, right) = ahead(opts);
+    // Side to side: the bend, and the two waves at full stretch together.
+    let side = shape.bend.abs() + 1.5 * aurora.wave.abs();
+    let rise = 0.2 * aurora.wave.abs();
+    let low = aurora.altitude + shape.lift - rise;
+    let high = aurora.altitude + shape.lift + rise + shape.height;
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for along in [shape.from, shape.to] {
+        for across in [shape.offset - side, shape.offset + side] {
+            for up in [low, high] {
+                let corner = forward * along + right * across + Vec3::Y * up;
+                min = min.min(corner);
+                max = max.max(corner);
+            }
+        }
+    }
+    Aabb::from_min_max(min, max)
+}
 
 pub struct AuroraPlugin;
 
@@ -235,8 +281,7 @@ impl Plugin for AuroraPlugin {
                 Update,
                 (
                     show_at_night.run_if(resource_changed::<Stage>),
-                    tint.run_if(resource_changed::<Aurora>),
-                    wave,
+                    (tint, bound).run_if(resource_changed::<Aurora>),
                 ),
             );
     }
@@ -254,13 +299,15 @@ fn ahead(opts: &SceneOptions) -> (Vec3, Vec3) {
 
 fn hang_curtains(
     mut commands: Commands,
+    aurora: Res<Aurora>,
+    opts: Res<SceneOptions>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<AuroraMaterial>>,
 ) {
-    for (index, _) in shapes().iter().enumerate() {
+    for (index, shape) in shapes().iter().enumerate() {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            RenderAssetUsages::RENDER_WORLD,
         );
         let columns = SEGMENTS + 1;
         let mut uvs = Vec::with_capacity(columns * 2);
@@ -275,6 +322,8 @@ fn hang_curtains(
             let (next_low, next_high) = (low + 2, high + 2);
             indices.extend([low, next_low, high, high, next_low, next_high]);
         }
+        // Placed by the vertex shader from `uv`; the positions and normals
+        // are only there for the vertex layout the material pipeline expects.
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; columns * 2]);
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_NORMAL,
@@ -288,13 +337,13 @@ fn hang_curtains(
             MeshMaterial3d(materials.add(AuroraMaterial::default())),
             Transform::IDENTITY,
             Visibility::Hidden,
-            // Its bounds are measured once, from the empty ribbon it starts as,
-            // and the wave never updates them.
-            NoFrustumCulling,
+            // Given rather than measured: measured, they would be the empty
+            // ribbon's, and the wave never remeasures them.
+            reach(shape, &aurora, &opts),
             NotShadowCaster,
             NotShadowReceiver,
             StageMesh,
-            AuroraCurtain(index),
+            AuroraCurtain { index },
         ));
     }
 }
@@ -311,15 +360,18 @@ fn show_at_night(stage: Res<Stage>, mut curtains: Query<&mut Visibility, With<Au
     }
 }
 
-/// Gives each curtain its colours and its share of the brightness.
+/// Gives each curtain its colours, its share of the brightness, and the shape
+/// and motion the vertex shader sways it by.
 fn tint(
     aurora: Res<Aurora>,
+    opts: Res<SceneOptions>,
     curtains: Query<(&AuroraCurtain, &MeshMaterial3d<AuroraMaterial>)>,
     mut materials: ResMut<Assets<AuroraMaterial>>,
 ) {
     let shapes = shapes();
+    let (forward, right) = ahead(&opts);
     for (curtain, handle) in &curtains {
-        let shape = &shapes[curtain.0];
+        let shape = &shapes[curtain.index];
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.aurora = AuroraUniform {
                 colours: aurora
@@ -330,67 +382,26 @@ fn tint(
                 colour_scale: aurora.colour_scale,
                 colour_speed: aurora.colour_speed,
                 colour_lift: aurora.colour_lift,
+                place: Vec4::new(shape.offset, shape.from, shape.to, shape.lift),
+                form: Vec4::new(shape.height, shape.bend, shape.bends, shape.phase),
+                motion: Vec4::new(aurora.wave, aurora.speed, aurora.altitude, 0.0),
+                forward: forward.extend(0.0),
+                right: right.extend(0.0),
                 ..default()
             };
         }
     }
 }
 
-/// Moves every ribbon's vertices to where the wave has them now.
-///
-/// The ribbon sways side to side, in two waves of different lengths along it
-/// travelling in opposite directions, and its lower edge rises and falls a
-/// little. The top lags the bottom, so the curtain folds rather than moving
-/// as a flat sheet.
-fn wave(
-    time: Res<Time>,
+/// Keeps each curtain's bounds over its whole sway when the aurora is
+/// retuned: a wider wave or a higher altitude moves where it can reach.
+fn bound(
     aurora: Res<Aurora>,
     opts: Res<SceneOptions>,
-    curtains: Query<(&AuroraCurtain, &Mesh3d, &Visibility)>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut curtains: Query<(&AuroraCurtain, &mut Aabb)>,
 ) {
     let shapes = shapes();
-    let (forward, right) = ahead(&opts);
-    let t = time.elapsed_secs() * aurora.speed * TAU;
-    for (curtain, handle, visibility) in &curtains {
-        if *visibility == Visibility::Hidden {
-            continue;
-        }
-        let shape = &shapes[curtain.0];
-        let Some(mut mesh) = meshes.get_mut(&handle.0) else {
-            continue;
-        };
-        let mut positions = Vec::with_capacity((SEGMENTS + 1) * 2);
-        let mut normals = Vec::with_capacity((SEGMENTS + 1) * 2);
-        for i in 0..=SEGMENTS {
-            let along = i as f32 / SEGMENTS as f32;
-            let ahead = shape.from + (shape.to - shape.from) * along;
-            let sway = |lag: f32| {
-                aurora.wave * (TAU * 2.3 * along + t + shape.phase + lag).sin()
-                    + 0.5 * aurora.wave * (TAU * 5.1 * along - 0.7 * t + shape.phase).sin()
-            };
-            let rise = 0.2 * aurora.wave * (TAU * 3.7 * along - 1.3 * t + shape.phase).sin();
-            let bent = shape.offset
-                + shape.bend * (std::f32::consts::PI * shape.bends * along + shape.phase).sin();
-            let base = forward * ahead + Vec3::Y * (aurora.altitude + shape.lift + rise);
-            let bottom = base + right * (bent + sway(0.0));
-            let top = base + right * (bent + sway(0.5)) + Vec3::Y * shape.height;
-            positions.push(bottom.to_array());
-            positions.push(top.to_array());
-        }
-        // Each column's normal is across the sheet, from the run of the lower
-        // edge through it and the rise of the column. Taken per vertex rather
-        // than per triangle, so the edge fade turns smoothly along the ribbon
-        // instead of stepping at every segment.
-        for i in 0..=SEGMENTS {
-            let bottom = |j: usize| Vec3::from(positions[j * 2]);
-            let run = bottom(i.min(SEGMENTS - 1) + 1) - bottom(i.saturating_sub(1));
-            let rise = Vec3::from(positions[i * 2 + 1]) - bottom(i);
-            let normal = run.cross(rise).normalize_or(right).to_array();
-            normals.push(normal);
-            normals.push(normal);
-        }
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    for (curtain, mut aabb) in &mut curtains {
+        *aabb = reach(&shapes[curtain.index], &aurora, &opts);
     }
 }

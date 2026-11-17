@@ -11,7 +11,15 @@ default = ["cli"]
 # The desktop command line: flag parsing, a window, and the two things only a
 # desktop process can do — resolving assets from a directory and writing a PNG
 # to disk. A wasm or editor host replaces exactly this, and takes the library.
-cli = ["dep:clap", "dep:env_logger"]
+# On Linux, winit builds only with a display backend chosen, and choosing one
+# is the binary's call, so it is here rather than on the library. X11 also
+# reaches Wayland desktops through XWayland; the feature does nothing on macOS
+# or Windows.
+cli = ["test_window", "dep:clap", "dep:env_logger", "bevy/x11"]
+# The test window's tuning panel, built from Bevy's UI widgets. A host has
+# controls of its own, so it leaves the widgets, and their input-focus
+# plugins, out.
+test_window = ["bevy/bevy_ui_widgets"]
 
 [[bin]]
 name = "arora-scene"
@@ -27,28 +35,41 @@ log = { workspace = true }
 # The GLB extension parse, and the asset semantics above it.
 arora-visuals = { workspace = true, features = ["view", "view_gizmo", "camera_input"] }
 
-# The 3d stack: glTF loading, PBR (which carries shadows), the core pipeline,
-# windowing, and mesh picking. Composed rather than taking the `3d` collection,
-# which pulls `default_platform` — gamepads, clipboard, fonts, x11/wayland.
+# What the scene draws with, named one by one rather than through Bevy's
+# collections, which each bring more than they say: `3d_bevy_render` brings
+# animation, anti-aliasing, post-processing and the tonemapping and SMAA lookup
+# tables (and the KTX2 and zstd decoders that read them); `picking` brings
+# sprite picking, and with it the 2D sprite stack. The scene uses none of
+# them: robots move by bound values, not animation clips; the camera draws
+# untonemapped; and selection is an outline, not a post effect.
 bevy = { workspace = true, features = [
   "default_app",
-  "3d_bevy_render",
-  "scene",
-  "png",
-  "bevy_winit",
   "std",
   "multi_threaded",
-  "picking",
-  "mesh_picking",
-  # For a control's label. `default_font` ships a face with the binary, so no
-  # font asset has to sit beside the robot.
+  "bevy_winit",
+  # glTF loading, PBR (which carries shadows) and the core pipeline. Morph
+  # targets, for faces; mikktspace, for a glTF that asks for tangents.
+  "bevy_render",
+  "bevy_core_pipeline",
+  "bevy_pbr",
+  "bevy_light",
+  "bevy_gltf",
+  "bevy_mikktspace",
+  "morph",
+  "png",
+  # A glTF spawns as a world asset.
+  "bevy_world_serialization",
+  "bevy_scene",
+  # Pointer events, for picks and gizmo handles; the UI backend, for the view
+  # gizmo's hover.
+  "bevy_picking",
+  "ui_picking",
+  # The view gizmo and a control's label. `default_font` ships a face with the
+  # binary, so no font asset has to sit beside the robot.
   "bevy_ui",
   "bevy_ui_render",
   "bevy_text",
   "default_font",
-  # The tuning panel's sliders, and the pointer reaching them.
-  "bevy_ui_widgets",
-  "ui_picking",
 ] }
 
 clap = { version = "4", features = ["derive"], optional = true }
