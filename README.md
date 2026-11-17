@@ -10,7 +10,40 @@ semantics, the data modelling. **The split is the point**: a capability
 implemented twice has to be reconciled indefinitely, and that work produces
 nothing.
 
-## Running it
+## Layout
+
+| Path | What it is |
+| -- | -- |
+| `crates/arora-scene` | The scene as a Bevy library, with no window and no browser in it, and the native tooling behind its `cli` feature: a test window, a tuning panel, offscreen timing. |
+| `crates/arora-scene-wasm` | The browser host: the wasm module the npm package loads. One build per GPU backend, because Bevy chooses its backend at compile time. |
+| `packages/scene` | `@semio/scene`: the wasm modules, a typed TypeScript API, and a React `<Scene>` component. Its `example/` page drives the scene by hand. |
+
+The npm package is the product. The crates are its source and the native
+tools around it, and are not published.
+
+## In the browser
+
+```
+cd packages/scene
+npm install
+npm run build:wasm    # both backends into wasm/; needs wasm-bindgen-cli at Cargo.lock's version
+npm run dev           # the example page
+```
+
+Open the example with `?glb=<url>`, or choose a robot GLB on the page. It
+starts on WebGPU when the browser can give it an adapter and falls back to
+WebGL2. **WebGL2 draws shadows from one light only**, so the fill light casts
+none there.
+
+**A page holds one scene for its whole life.** Bevy's windowing runs on winit,
+which allows one event loop per page and never hands it back, so the package
+mounts once and a second mount returns the first scene. A host hides the scene
+rather than unmounting it.
+
+The workspace patches `bevy_pbr` so `StandardMaterial` draws on Safari's
+WebGPU; the root `Cargo.toml` says why and when to drop it.
+
+## Running it natively
 
 No robot ships with this repo. Point it at a Semio robot GLB of your own:
 
@@ -87,8 +120,6 @@ Three rules hold the model together:
 - **Nothing fills the screen yet.** The Vizij face renderer is not on
   `arora-visuals`, so `mount_screen` hands back a texture no one writes. The
   seam works; the content does not arrive through it yet.
-- **wasm is unbuilt and unmeasured**, and it gates every performance number
-  here.
 - **Assets load before the app runs.** `mount_screen` and `mount_joint` both
   read the GLB from disk up front, which is why they are the host's to call.
   Making these asset-driven is what lets a running scene gain, swap and lose
