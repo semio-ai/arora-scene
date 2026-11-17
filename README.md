@@ -24,11 +24,26 @@ tools around it, and are not published.
 ## In the browser
 
 ```
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129   # must equal the wasm-bindgen crate in Cargo.lock
 cd packages/scene
 npm install
-npm run build:wasm    # both backends into wasm/; needs wasm-bindgen-cli at Cargo.lock's version
+npm run build:wasm    # both backends into wasm/, about five minutes each from cold
 npm run dev           # the example page
 ```
+
+`build:wasm` also runs binaryen's `wasm-opt -Oz` when it is on `PATH` (or
+`WASM_OPT` names it), which takes a fifth off the module; without it the
+build still works. A wasm-bindgen CLI at any other version than the crate's
+fails the build with a schema mismatch, so `WASM_BINDGEN` can point at a
+specific binary.
+
+**Using it from another project.** The package is not published yet, so
+depend on this checkout: build the wasm and the package (`npm run build:wasm`
+and `npm run build`), then `"@semio/scene": "file:<path>/packages/scene"`.
+The package's `exports` carry a `source` condition, so a bundler set to read
+it builds from `src/` rather than `dist/`. Either way the `wasm/` modules
+must be built first: they are generated, not committed.
 
 Open the example with `?glb=<url>`, or choose a robot GLB on the page. It
 starts on WebGPU when the browser can give it an adapter and falls back to
