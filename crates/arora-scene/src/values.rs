@@ -51,6 +51,7 @@ impl Plugin for ValuesPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApplyValues;
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
     mut applied: ResMut<AppliedValues>,

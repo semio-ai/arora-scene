@@ -1,19 +1,25 @@
 [package]
-name = "arora-scene-web"
+name = "arora-scene-wasm"
 version = "0.0.0"
 edition = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
-description = "A browser host for arora-scene, instrumented for load and frame-time measurement."
+description = "The browser host for arora-scene: the wasm module @semio/scene loads."
+# Shipped as the npm package in packages/scene, not as a crate.
 publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# One backend per build: Bevy chooses its wgpu backend at compile time.
+# One backend per build: Bevy chooses its wgpu backend at compile time, so the
+# npm package carries one module for each and picks between them in the page.
 webgl2 = ["bevy/webgl2"]
 webgpu = ["bevy/webgpu"]
+# Load and frame-time measurement, and the diagnostic switches that go with
+# it: what the render benchmark reads back. Off in the package, which has no
+# use for the per-frame bookkeeping.
+bench = []
 # Bevy's spans for every system and render step, which the browser's
 # performance timeline records: per-system attribution for a profile, at the
 # cost of a mark and a measure per span. `debug` gives the spans their names.
@@ -31,5 +37,5 @@ bevy = { workspace = true, features = ["web"] }
 # Must equal the wasm-bindgen CLI's version exactly.
 wasm-bindgen = "=0.2.129"
 js-sys = "0.3.106"
-web-sys = { version = "0.3.106", features = ["Window", "Performance"] }
+web-sys = { version = "0.3.106", features = ["Window", "Performance", "console"] }
 console_error_panic_hook = "0.1"
