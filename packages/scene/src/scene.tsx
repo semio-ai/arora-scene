@@ -10,8 +10,10 @@ export interface SceneProps {
    * Names the model in `glb`: Studio's asset id, a content hash, any string
    * kept stable for the same model. A different key swaps the robot in the
    * running scene once it has loaded; the old robot's joint and element
-   * controls go with it. A new `glb` under the same key changes nothing. A
-   * robot that cannot be loaded reaches `onError`, the old robot kept.
+   * controls go with it. A new `glb` under the same key changes nothing, so
+   * change the two together: a key changed ahead of its bytes swaps in the
+   * old bytes under it. A robot that cannot be loaded reaches `onError`, the
+   * old robot kept.
    */
   robotKey: string;
   /** How the scene starts. Read once, when the page's scene starts. */
@@ -79,14 +81,17 @@ export function Scene({
     container.current !== null &&
     handle.canvas.parentElement === container.current;
 
-  // A key other than the robot last asked for swaps its robot into the
-  // running scene, including the robot showing when another is still
-  // loading, which it then replaces. A robot that cannot be read or loaded
-  // reaches `onError`, the old one kept; the same key is not tried again.
+  // Each key this `<Scene>` is given is asked for once, the first included:
+  // `loadRobot` itself leaves alone a key that is showing or loading, so the
+  // first ask joins the robot the scene started with, and a `<Scene>` mounted
+  // over a running scene swaps its own robot in. A key other than the one
+  // last asked for swaps its robot in, including the robot showing when
+  // another is still loading, which it then replaces. A robot that cannot be
+  // read or loaded reaches `onError`, the old one kept; the same key is not
+  // tried again.
   const asked = useRef<string>(undefined);
   useEffect(() => {
-    if (!scene || robotKey === (asked.current ?? scene.key) || !owns(scene))
-      return;
+    if (!scene || robotKey === asked.current || !owns(scene)) return;
     asked.current = robotKey;
     scene
       .loadRobot(glb, robotKey)

@@ -81,7 +81,7 @@ pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
     let path = format!("robot-{}.glb", LOADED.fetch_add(1, Ordering::SeqCst) + 1);
     dir.insert_asset(Path::new(&path), glb);
     held.push(path.clone());
-    let glb = format!("{SOURCE}://{path}");
+    let glb = asset_id(&path);
     NEXT.lock().unwrap().push(arora_scene::NextRobot {
         glb: glb.clone(),
         meta,
@@ -95,15 +95,15 @@ pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
 /// the asset server holds whatever it loaded from them. A robot showing makes
 /// every robot asked for before it unneeded too; one that failed or was
 /// replaced needs only its own bytes gone.
-fn release_bytes(outcome: &Result<String, (String, String)>) {
+fn release_bytes(outcome: &Result<arora_scene::Shown, (String, String)>) {
     let mut robots = ROBOTS.lock().unwrap();
     let Some((dir, held)) = robots.as_mut() else {
         return;
     };
-    let prefix = format!("{SOURCE}://");
+    let prefix = asset_id("");
     let path = |glb: &str| glb.strip_prefix(&prefix).map(str::to_string);
     let gone: Vec<String> = match outcome {
-        Ok(glb) => match path(glb).and_then(|p| held.iter().position(|h| *h == p)) {
+        Ok(shown) => match path(&shown.glb).and_then(|p| held.iter().position(|h| *h == p)) {
             Some(at) => held.drain(..at).collect(),
             None => Vec::new(),
         },
@@ -124,7 +124,13 @@ fn release_bytes(outcome: &Result<String, (String, String)>) {
 /// as `load_robot` returns one for each robot after it.
 #[wasm_bindgen]
 pub fn first_robot() -> String {
-    format!("{SOURCE}://{ROBOT}")
+    asset_id(ROBOT)
+}
+
+/// How the asset server names the robot served at `path`, which is also the
+/// id the robot's `robot` event carries.
+fn asset_id(path: &str) -> String {
+    format!("{SOURCE}://{path}")
 }
 
 /// Hands the latest robot the page loaded to the scene, which swaps it in,
@@ -313,7 +319,9 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     // Before the scene's own PreUpdate swap, so a robot loaded between
     // frames is swapped in on the next one.
     .add_systems(First, take_next_robot)
-    .add_systems(Last, (keep_poses, emit_events));
+    // Poses first, so a handler reading one in an event's handler reads
+    // the frame the event is about.
+    .add_systems(Last, (keep_poses, emit_events).chain());
 
     #[cfg(feature = "bench")]
     let continuous = bench::install(&mut app, &opts.bench);
@@ -560,7 +568,8 @@ fn keep_poses(
     placed: Query<&GlobalTransform>,
 ) {
     let mut poses = std::collections::HashMap::new();
-    for instance in instances.iter().filter(|i| i.id == "robot-0") {
+    let showing = arora_scene::instance::instance_id(0);
+    for instance in instances.iter().filter(|i| i.id == showing) {
         for (id, targets) in &instance.bindings.elements {
             if let Ok(placed) = placed.get(targets.node) {
                 poses.insert(
@@ -634,15 +643,14 @@ fn emit_events(
     mut picks: ResMut<Picks>,
     mut controls: ResMut<ControlEvents>,
     mut robots: ResMut<arora_scene::RobotOutcomes>,
-    joints: Res<arora_scene::joints::RobotJoints>,
 ) {
     for outcome in std::mem::take(&mut robots.0) {
         release_bytes(&outcome);
         send(&match &outcome {
-            Ok(glb) => SceneEvent::Robot {
-                glb,
+            Ok(shown) => SceneEvent::Robot {
+                glb: &shown.glb,
                 error: None,
-                joints: Some(joints.0.iter().map(JointInfo::from).collect()),
+                joints: Some(shown.joints.iter().map(JointInfo::from).collect()),
             },
             Err((glb, why)) => SceneEvent::Robot {
                 glb,

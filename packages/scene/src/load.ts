@@ -84,8 +84,11 @@ export interface SceneHandle {
    * nothing.
    */
   loadRobot(glb: Uint8Array, key: string): Promise<void>;
-  /** The key of the robot showing. */
-  readonly key: string;
+  /**
+   * The key of the robot showing: `undefined` until the robot the scene
+   * started with is showing, and for good if that one could not be loaded.
+   */
+  readonly key: string | undefined;
   /**
    * Where an element of the robot showing stood in the last frame drawn, by
    * its `RobotData` id: Z up, in metres, the rotation a quaternion
@@ -105,10 +108,16 @@ export interface SceneHandle {
 let running:
   | {
       canvas: HTMLCanvasElement;
-      /** The key of the robot showing: changed only once a swap has finished. */
-      key: string;
+      /**
+       * The key of the robot showing, set only once its robot is: a robot
+       * that failed is never taken for the one showing.
+       */
+      key?: string;
       handle: Promise<SceneHandle>;
-      /** A swap under way, so a second request for it joins the first. */
+      /**
+       * The robot loading, the one the scene started with included, so a
+       * second request for it joins the first.
+       */
       loading?: { key: string; done: Promise<void> };
     }
   | undefined;
@@ -168,7 +177,7 @@ export function showScene(
       "display:block;width:100%;height:100%;outline:none;touch-action:none";
     container.append(canvas);
     const handle = start(canvas, glb, key, options);
-    running = { canvas, key, handle };
+    running = { canvas, handle };
     // A start that fails (a module that did not download, a robot the scene
     // refused) never reached the event loop, so the next call may try again.
     handle.catch(() => {
@@ -210,13 +219,38 @@ async function start(
   }
   // Robots given to the scene and not yet settled, by the id the module
   // names each one by in its `robot` event, with the host's key for it. Every
-  // handler the page sets goes through `dispatch`, so a swap is settled
+  // handler the page sets goes through `dispatch`, so each robot is settled
   // whether or not the page listens, and the page hears of robots by its own
   // keys.
   const robots = new Map<
     string,
-    { key: string; resolve?: () => void; reject?: (error: Error) => void }
-  >([[wasm.first_robot(), { key }]]);
+    { key: string; resolve: () => void; reject: (error: Error) => void }
+  >();
+  // Loading until its `robot` event says how it ended, the robot the scene
+  // started with as much as any swapped in after it.
+  const track = (id: string, robotKey: string): Promise<void> => {
+    const settled = new Promise<void>((resolve, reject) =>
+      robots.set(id, { key: robotKey, resolve, reject }),
+    );
+    const loading = {
+      key: robotKey,
+      done: settled.then(
+        () => {
+          if (running) running.key = robotKey;
+          if (running?.loading === loading) running.loading = undefined;
+        },
+        (error: unknown) => {
+          if (running?.loading === loading) running.loading = undefined;
+          throw error;
+        },
+      ),
+    };
+    if (running) running.loading = loading;
+    return loading.done;
+  };
+  // Nothing may wait on the first robot, so its failure is the page's to hear
+  // through its handler or a later `loadRobot`, not an unhandled rejection.
+  track(wasm.first_robot(), key).catch(() => {});
   const dispatch =
     (handler?: (event: SceneEvent) => void) => (event: WasmEvent) => {
       if (event.type !== "robot") {
@@ -227,8 +261,8 @@ async function start(
       const robot = robots.get(glb);
       robots.delete(glb);
       if (!robot) return;
-      if (outcome.error === undefined) robot.resolve?.();
-      else robot.reject?.(new Error(outcome.error));
+      if (outcome.error === undefined) robot.resolve();
+      else robot.reject(new Error(outcome.error));
       handler?.({ ...outcome, key: robot.key });
     };
   wasm.set_event_handler(dispatch());
@@ -236,7 +270,7 @@ async function start(
     backend,
     canvas,
     get key() {
-      return running?.key ?? key;
+      return running?.key;
     },
     elementPose(element) {
       return wasm.element_pose(element);
@@ -254,7 +288,7 @@ async function start(
       // one, or the robot asked for last would not be the one left showing.
       if (running?.loading) {
         if (running.loading.key === nextKey) return running.loading.done;
-      } else if (nextKey === (running?.key ?? key)) {
+      } else if (nextKey === running?.key) {
         return Promise.resolve();
       }
       let id: string;
@@ -263,26 +297,7 @@ async function start(
       } catch (error) {
         return Promise.reject(error);
       }
-      const settled = new Promise<void>((resolve, reject) =>
-        robots.set(id, { key: nextKey, resolve, reject }),
-      );
-      const loading = {
-        key: nextKey,
-        // The robot showing changes only once the swap has finished, so a
-        // robot that failed is never taken for the one showing.
-        done: settled.then(
-          () => {
-            if (running) running.key = nextKey;
-            if (running?.loading === loading) running.loading = undefined;
-          },
-          (error: unknown) => {
-            if (running?.loading === loading) running.loading = undefined;
-            throw error;
-          },
-        ),
-      };
-      if (running) running.loading = loading;
-      return loading.done;
+      return track(id, nextKey);
     },
     onEvent(handler) {
       wasm.set_event_handler(dispatch(handler));

@@ -228,6 +228,7 @@ impl Plugin for ScenePlugin {
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
         .init_resource::<RobotOutcomes>()
+        .init_resource::<FirstRobot>()
         .add_systems(
             PreUpdate,
             (report_first_robot, begin_swap, finish_swap).chain(),
@@ -982,11 +983,28 @@ pub struct NextRobot {
 }
 
 /// How each robot the scene was given ended up, the one it started with
-/// included: `Ok` with the robot's `glb` once it is showing, `Err` with the
-/// `glb` and why it could not be loaded or was replaced, the old robot still
-/// showing.
+/// included, in the order they ended: `Ok` once it is showing, `Err` with
+/// its `glb` and why it could not be loaded or was replaced, the old robot
+/// still showing.
 #[derive(Resource, Default)]
-pub struct RobotOutcomes(pub Vec<Result<String, (String, String)>>);
+pub struct RobotOutcomes(pub Vec<Result<Shown, (String, String)>>);
+
+/// A robot that is now showing: its `glb`, and its own joints, which are not
+/// necessarily [`joints::RobotJoints`] by the time a host reads this, since a
+/// later robot may have replaced it in the same frame.
+pub struct Shown {
+    pub glb: String,
+    pub joints: Vec<robot::Joint>,
+}
+
+/// Whether how the robot the scene started with ended up has been reported.
+/// Whichever of [`report_first_robot`] and [`finish_swap`] settles it first
+/// does, so a swap that overtakes the first robot reports it replaced before
+/// reporting itself.
+#[derive(Resource, Default)]
+struct FirstRobot {
+    reported: bool,
+}
 
 /// A robot loading in the background to replace the one showing. It is not
 /// indexed, drawn or driven until it has loaded whole.
@@ -1067,6 +1085,7 @@ fn finish_swap(
     mut framing: ResMut<Framing>,
     mut selections: ResMut<arora_visuals::select::Selections>,
     mut outcomes: ResMut<RobotOutcomes>,
+    mut first: ResMut<FirstRobot>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -1126,7 +1145,14 @@ fn finish_swap(
     census.taken = false;
     census.since = frames.elapsed;
     framing.fitted = false;
-    outcomes.0.push(Ok(pending.glb.clone()));
+    if !first.reported {
+        first.reported = true;
+        outcomes.0.push(Err((spec.glb.clone(), REPLACED.into())));
+    }
+    outcomes.0.push(Ok(Shown {
+        glb: pending.glb.clone(),
+        joints: pending.joints.clone(),
+    }));
     commands.remove_resource::<PendingRobot>();
     log::info!("swapped in {}", pending.glb);
 }
@@ -1136,20 +1162,16 @@ fn finish_swap(
 /// replaced it first. A host learns that the first robot is showing the same
 /// way it learns that a swapped one is.
 fn report_first_robot(
-    mut first: Local<Option<String>>,
-    mut done: Local<bool>,
+    mut first: ResMut<FirstRobot>,
     spec: Res<RobotSpec>,
+    joints: Option<Res<joints::RobotJoints>>,
     assets: Res<AssetServer>,
     roots: Query<(&WorldAssetRoot, Has<Children>), Without<Incoming>>,
     mut outcomes: ResMut<RobotOutcomes>,
 ) {
-    if *done {
-        return;
-    }
-    let first = first.get_or_insert_with(|| spec.glb.clone());
-    if spec.glb != *first {
-        *done = true;
-        outcomes.0.push(Err((first.clone(), REPLACED.into())));
+    // Until a swap has finished, the robot showing, or loading to show, is
+    // the one `spec` names; a swap that finishes reports it itself.
+    if first.reported {
         return;
     }
     let mut spawned = !roots.is_empty();
@@ -1157,16 +1179,19 @@ fn report_first_robot(
         if let Some(RecursiveDependencyLoadState::Failed(error)) =
             assets.get_recursive_dependency_load_state(scene.0.id())
         {
-            log::warn!("could not load {first}: {error}");
-            *done = true;
-            outcomes.0.push(Err((first.clone(), error.to_string())));
+            log::warn!("could not load {}: {error}", spec.glb);
+            first.reported = true;
+            outcomes.0.push(Err((spec.glb.clone(), error.to_string())));
             return;
         }
         spawned &= has_children;
     }
     if spawned {
-        *done = true;
-        outcomes.0.push(Ok(first.clone()));
+        first.reported = true;
+        outcomes.0.push(Ok(Shown {
+            glb: spec.glb.clone(),
+            joints: joints.map(|j| j.0.clone()).unwrap_or_default(),
+        }));
     }
 }
 

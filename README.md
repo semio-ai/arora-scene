@@ -84,7 +84,8 @@ same without React; `chooseBackend()` says which backend a page would get.
 - **A robot is named by a key the host gives it**: Studio's asset id, a
   content hash, any string kept stable for the same model. The key, never the
   bytes, decides whether a robot is a different one, so the same file fetched
-  twice is one robot.
+  twice is one robot. **Change a robot's bytes and its key together**: a key
+  changed ahead of its bytes swaps in the old bytes under it.
 - **A different `robotKey` swaps the robot** in the running scene, as
   `scene.loadRobot(glb, key)` does. The new robot loads beside the old, which keeps
   showing; once it has loaded whole it takes the old one's place. The old
@@ -98,7 +99,9 @@ same without React; `chooseBackend()` says which backend a page would get.
   asked for while another is still loading replaces it, and the earlier
   promise rejects. **The robot asked for last is the one left showing**, the
   one already showing included: asking for its key again while another loads
-  replaces the one loading. `scene.key` is the robot showing.
+  replaces the one loading. `scene.key` is the robot showing: `undefined`
+  until the first robot shows, and for good if it could not be loaded.
+  `mountScene` resolves once its robot is showing, the first one included.
 - **The scene idles.** It draws a frame only when something changed, and its
   camera moves only when the user moves it. WebGPU is used when the browser
   can give the page an adapter, WebGL2 otherwise; **WebGL2 draws shadows from
@@ -215,7 +218,8 @@ wasm host is the reference for wiring it.
   loads it hidden beside the robot showing (its roots carry `Incoming` and are
   not indexed or driven), and swaps it in once it has loaded whole and
   spawned. How each robot ended up, the one the scene started with included,
-  lands in `RobotOutcomes`: `Ok(glb)` once the robot is showing,
+  lands in `RobotOutcomes`, in the order they ended: `Ok(Shown { glb,
+  joints })` once the robot is showing, with that robot's own joints,
   `Err((glb, why))` if it failed to load or another replaced it first, the
   old robot kept.
 

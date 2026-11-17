@@ -66,7 +66,7 @@ function Example() {
             if (file)
               setRobot({
                 glb: new Uint8Array(await file.arrayBuffer()),
-                key: file.name,
+                key: `${file.name} ${file.size} ${file.lastModified}`,
               });
           }}
         />
@@ -222,7 +222,7 @@ function Running({ robot: first }: { robot: Robot }) {
               if (file)
                 setRobot({
                   glb: new Uint8Array(await file.arrayBuffer()),
-                  key: file.name,
+                  key: `${file.name} ${file.size} ${file.lastModified}`,
                 });
             }}
           />
