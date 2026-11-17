@@ -33,6 +33,7 @@ pub mod values;
 
 use std::path::PathBuf;
 
+use bevy::asset::RecursiveDependencyLoadState;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
@@ -226,7 +227,8 @@ impl Plugin for ScenePlugin {
         .init_resource::<OrbitHeld>()
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
-        .add_systems(PreUpdate, swap_robot)
+        .init_resource::<RobotOutcomes>()
+        .add_systems(PreUpdate, (begin_swap, finish_swap).chain())
         .add_systems(
             Update,
             (
@@ -936,22 +938,39 @@ pub fn setup(
 
 /// Spawns the robot `spec` names, `spec.copies` times.
 fn spawn_robot(commands: &mut Commands, assets: &AssetServer, spec: &RobotSpec) {
-    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(spec.glb.clone()));
+    spawn_robot_roots(commands, assets, &spec.glb, spec.copies, ());
+}
+
+/// Spawns `copies` roots of the robot at `glb`, each with `extra`, and
+/// returns them.
+fn spawn_robot_roots(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    glb: &str,
+    copies: u32,
+    extra: impl Bundle + Clone,
+) -> Vec<Entity> {
+    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(glb.to_string()));
     // A square-ish grid, spaced by roughly a robot's width. The exact spacing
     // does not matter — the camera fits whatever bounds result.
-    let stride = (spec.copies as f32).sqrt().ceil().max(1.0) as u32;
-    for i in 0..spec.copies.max(1) {
-        let (x, z) = ((i % stride) as f32, (i / stride) as f32);
-        commands.spawn((
-            WorldAssetRoot(scene.clone()),
-            Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
-        ));
-    }
+    let stride = (copies as f32).sqrt().ceil().max(1.0) as u32;
+    (0..copies.max(1))
+        .map(|i| {
+            let (x, z) = ((i % stride) as f32, (i / stride) as f32);
+            commands
+                .spawn((
+                    WorldAssetRoot(scene.clone()),
+                    Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
+                    extra.clone(),
+                ))
+                .id()
+        })
+        .collect()
 }
 
 /// A robot to put in place of the one the scene is showing: where its GLB is
-/// served from, and what it declares. A host inserts it; the scene swaps the
-/// robot on the next frame and removes it.
+/// served from, and what it declares. A host inserts it; the scene starts
+/// loading it on the next frame and removes it.
 #[derive(Resource)]
 pub struct NextRobot {
     pub glb: String,
@@ -959,33 +978,119 @@ pub struct NextRobot {
     pub joints: Vec<robot::Joint>,
 }
 
-/// Replaces the robot with the one [`NextRobot`] names.
+/// How a robot swap ended, for the host that asked for it: `Ok` with the
+/// robot's `glb` once it is showing, `Err` with the `glb` and why it could not
+/// be loaded, the old robot still showing.
+#[derive(Resource, Default)]
+pub struct RobotOutcomes(pub Vec<Result<String, (String, String)>>);
+
+/// A robot loading in the background to replace the one showing. It is not
+/// indexed, drawn or driven until it has loaded whole.
+#[derive(Component, Clone)]
+pub struct Incoming;
+
+/// The swap under way: the robot's declaration, and the roots loading it.
+#[derive(Resource)]
+struct PendingRobot {
+    glb: String,
+    meta: arora_visuals::meta::AssetMeta,
+    joints: Vec<robot::Joint>,
+    roots: Vec<Entity>,
+}
+
+/// Starts loading the robot [`NextRobot`] names, hidden beside the one
+/// showing, which stays until the new one has loaded. A robot asked for while
+/// another is still loading replaces that one.
+fn begin_swap(
+    next: Option<Res<NextRobot>>,
+    pending: Option<Res<PendingRobot>>,
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    spec: Res<RobotSpec>,
+    mut outcomes: ResMut<RobotOutcomes>,
+) {
+    let Some(next) = next else {
+        return;
+    };
+    if let Some(earlier) = pending {
+        for &root in &earlier.roots {
+            commands.entity(root).despawn();
+        }
+        outcomes.0.push(Err((
+            earlier.glb.clone(),
+            "replaced by a later robot before it finished loading".into(),
+        )));
+    }
+    let roots = spawn_robot_roots(
+        &mut commands,
+        &assets,
+        &next.glb,
+        spec.copies,
+        (Incoming, Visibility::Hidden),
+    );
+    commands.insert_resource(PendingRobot {
+        glb: next.glb.clone(),
+        meta: next.meta.clone(),
+        joints: next.joints.clone(),
+        roots,
+    });
+    commands.remove_resource::<NextRobot>();
+    log::info!("loading {} to swap in", next.glb);
+}
+
+/// Finishes a swap once the incoming robot has loaded whole and spawned, or
+/// abandons it, keeping the old robot, if it failed to load.
 ///
 /// Everything bound to the old robot goes with it: its entities, the controls
 /// on its joints and elements, and the selection made of its element ids,
 /// which mean nothing on another robot. Goals stay, being nobody's. The new
-/// robot is spawned as the first was, and measured and framed afresh once it
-/// has had its own time to settle.
+/// robot is measured and framed afresh once it has had its own time to
+/// settle.
 #[allow(clippy::too_many_arguments)]
-fn swap_robot(
-    next: Option<Res<NextRobot>>,
+fn finish_swap(
+    pending: Option<Res<PendingRobot>>,
     mut commands: Commands,
-    roots: Query<Entity, With<WorldAssetRoot>>,
+    assets: Res<AssetServer>,
+    showing: Query<Entity, (With<WorldAssetRoot>, Without<Incoming>)>,
+    incoming: Query<(&WorldAssetRoot, Has<Children>), With<Incoming>>,
     children: Query<&Children>,
     transform_gizmos: Query<(Entity, &TransformGizmo)>,
     joint_gizmos: Query<(Entity, &JointGizmo)>,
-    assets: Res<AssetServer>,
     mut spec: ResMut<RobotSpec>,
     frames: Res<Frames>,
     mut census: ResMut<Census>,
     mut framing: ResMut<Framing>,
     mut selections: ResMut<arora_visuals::select::Selections>,
+    mut outcomes: ResMut<RobotOutcomes>,
 ) {
-    let Some(next) = next else {
+    let Some(pending) = pending else {
         return;
     };
+    let mut spawned = true;
+    for &root in &pending.roots {
+        let Ok((scene, has_children)) = incoming.get(root) else {
+            return;
+        };
+        if let Some(RecursiveDependencyLoadState::Failed(error)) =
+            assets.get_recursive_dependency_load_state(scene.0.id())
+        {
+            log::warn!("could not load {}: {error}", pending.glb);
+            for &root in &pending.roots {
+                commands.entity(root).despawn();
+            }
+            outcomes.0.push(Err((pending.glb.clone(), error.to_string())));
+            commands.remove_resource::<PendingRobot>();
+            return;
+        }
+        spawned &= has_children;
+    }
+    // Loaded whole and spawned: a scene spawns its entities once everything
+    // it depends on has arrived.
+    if !spawned {
+        return;
+    }
     let mut old = std::collections::HashSet::new();
-    for root in &roots {
+    for root in &showing {
         old.insert(root);
         old.extend(children.iter_descendants(root));
         commands.entity(root).despawn();
@@ -1000,17 +1105,23 @@ fn swap_robot(
             commands.entity(gizmo).despawn();
         }
     }
+    for &root in &pending.roots {
+        commands
+            .entity(root)
+            .remove::<Incoming>()
+            .insert(Visibility::Inherited);
+    }
     selections.0.clear();
     commands.insert_resource(instance::Selected(Vec::new()));
-    commands.insert_resource(instance::RobotMeta(next.meta.clone()));
-    commands.insert_resource(joints::RobotJoints(next.joints.clone()));
-    spec.glb = next.glb.clone();
-    spawn_robot(&mut commands, &assets, &spec);
+    commands.insert_resource(instance::RobotMeta(pending.meta.clone()));
+    commands.insert_resource(joints::RobotJoints(pending.joints.clone()));
+    spec.glb = pending.glb.clone();
     census.taken = false;
     census.since = frames.elapsed;
     framing.fitted = false;
-    commands.remove_resource::<NextRobot>();
-    log::info!("swapping in {}", next.glb);
+    outcomes.0.push(Ok(pending.glb.clone()));
+    commands.remove_resource::<PendingRobot>();
+    log::info!("swapped in {}", pending.glb);
 }
 
 /// Where the camera is kept above, as Studio keeps its camera a centimetre

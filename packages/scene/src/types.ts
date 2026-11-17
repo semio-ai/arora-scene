@@ -162,7 +162,13 @@ export type SceneEvent =
    */
   | { type: "pick"; instance: string; element: string | null }
   /** A drag on a control the driver added. */
-  | ({ type: "control" } & ControlEvent);
+  | ({ type: "control" } & ControlEvent)
+  /**
+   * How a robot swap ended: `error` is absent once the robot is showing, and
+   * says why it could not load otherwise, the old robot still showing.
+   * `loadRobot`'s promise settles from this; `glb` is the swap's id.
+   */
+  | { type: "robot"; glb: string; error?: string };
 
 /**
  * A value for one feature: one number (a joint's angle or travel) or three

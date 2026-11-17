@@ -81,10 +81,17 @@ same without React; `chooseBackend()` says which backend a page would get.
 - **`options` are read once**, when the page's scene first starts. A later
   `<Scene>`'s options are ignored.
 - **A different `glb` swaps the robot** in the running scene, as
-  `scene.loadRobot(glb)` does. The old robot goes, with every control on it
-  (joint controls, and transform controls on the robot or its elements) and
-  its selection; the new one is measured and framed afresh. Goals stay. A GLB
-  the scene cannot read is refused, and the old robot kept.
+  `scene.loadRobot(glb)` does. The new robot loads beside the old, which keeps
+  showing; once it has loaded whole it takes the old one's place. The old
+  robot goes with every control on it (joint controls, and transform controls
+  on the robot or its elements) and its selection, and the new one is measured
+  and framed afresh. Goals stay.
+- **A robot that cannot be loaded is refused, and the old one kept.**
+  `loadRobot` returns a promise that resolves once the new robot is showing
+  and rejects with the reason it could not be read or loaded; `<Scene>`
+  passes that reason to `onError`, and does not retry the same bytes. A robot
+  asked for while another is still loading replaces it, and the earlier
+  promise rejects. `scene.glb` is the robot showing.
 - **The scene idles.** It draws a frame only when something changed, and its
   camera moves only when the user moves it. WebGPU is used when the browser
   can give the page an adapter, WebGL2 otherwise; **WebGL2 draws shadows from
@@ -156,6 +163,8 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   `null` for none. The scene needs the pointer's position before the press,
   which a real pointer always gives it.
 - **`control`**: a drag on a control, as above.
+- **`robot`**: how a robot swap ended, with `error` when the robot could not
+  be loaded. `loadRobot`'s promise settles from it.
 
 ### Poses
 
@@ -183,8 +192,12 @@ wasm host is the reference for wiring it.
 - **Drive controls** by pushing `controls::ControlCommand`s onto
   `controls::ControlCommands`, and draining `controls::ControlEvents`. Poses
   there are the same Z-up `controls::Pose`.
-- **Swap the robot** by inserting `NextRobot { glb, meta, joints }`; the scene
-  swaps it in on its next frame.
+- **Swap the robot** by inserting `NextRobot { glb, meta, joints }`. The scene
+  loads it hidden beside the robot showing (its roots carry `Incoming` and are
+  not indexed or driven), and swaps it in once it has loaded whole and
+  spawned. How each swap ended lands in `RobotOutcomes`: `Ok(glb)` once the
+  robot is showing, `Err((glb, why))` if it failed to load, the old robot
+  kept.
 
 ## Running it natively
 

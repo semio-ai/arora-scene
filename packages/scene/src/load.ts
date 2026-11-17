@@ -12,7 +12,7 @@ interface Module {
   mount: (canvas: string, glb: Uint8Array, options: string) => void;
   set_value: (target: string, feature: string, values: Float32Array) => void;
   control: (command: string) => void;
-  load_robot: (glb: Uint8Array) => void;
+  load_robot: (glb: Uint8Array) => string;
   set_event_handler: (handler: (event: SceneEvent) => void) => void;
 }
 
@@ -61,10 +61,15 @@ export interface SceneHandle {
   control(command: ControlCommand): void;
   /**
    * Replaces the robot with the one in `glb`, in the same running scene. The
-   * old robot's joint and element controls go with it, and goals stay. Throws,
-   * keeping the old robot, if `glb` is not a robot the scene can read.
+   * new robot loads beside the old, which keeps showing until it is replaced.
+   * Resolves once the new robot is showing; the old robot's joint and element
+   * controls have gone with it, and goals stay. Rejects, keeping the old
+   * robot, if `glb` is not a robot the scene can read or fails to load. A
+   * later call replaces a robot still loading, whose promise rejects.
    */
-  loadRobot(glb: Uint8Array): void;
+  loadRobot(glb: Uint8Array): Promise<void>;
+  /** The GLB of the robot showing. */
+  readonly glb: Uint8Array;
   /** Sets where the scene's events go, replacing any earlier handler. */
   onEvent(handler: (event: SceneEvent) => void): void;
 }
@@ -75,7 +80,14 @@ export interface SceneHandle {
  * canvas moves between whichever containers show it.
  */
 let running:
-  | { canvas: HTMLCanvasElement; glb: Uint8Array; handle: Promise<SceneHandle> }
+  | {
+      canvas: HTMLCanvasElement;
+      /** The robot showing: changed only once a swap has finished. */
+      glb: Uint8Array;
+      handle: Promise<SceneHandle>;
+      /** A swap under way, so a second request for it joins the first. */
+      loading?: { glb: Uint8Array; done: Promise<void> };
+    }
   | undefined;
 
 /**
@@ -98,10 +110,26 @@ function parking(): HTMLElement {
 /**
  * Shows the page's scene in `container`, starting it with `glb` and `options`
  * the first time. Later calls move the running scene into their container and
- * swap in their `glb` if it is a different robot; their `options` are
- * ignored, the scene having started with the first call's.
+ * swap in their `glb` if it is a different robot, resolving once it is
+ * showing and rejecting if it cannot be; their `options` are ignored, the
+ * scene having started with the first call's.
  */
 export function mountScene(
+  container: HTMLElement,
+  glb: Uint8Array,
+  options: SceneOptions & { backend?: Backend } = {},
+): Promise<SceneHandle> {
+  return showScene(container, glb, options).then(async (scene) => {
+    if (scene.glb !== glb) await scene.loadRobot(glb);
+    return scene;
+  });
+}
+
+/**
+ * Shows the page's scene in `container`, starting it with `glb` and
+ * `options` if it is not running, and otherwise leaving its robot as it is.
+ */
+export function showScene(
   container: HTMLElement,
   glb: Uint8Array,
   options: SceneOptions & { backend?: Backend } = {},
@@ -123,11 +151,6 @@ export function mountScene(
     });
   } else {
     container.append(running.canvas);
-    if (glb !== running.glb) {
-      const wanted = glb;
-      running.glb = wanted;
-      void running.handle.then((scene) => scene.loadRobot(wanted));
-    }
   }
   return running.handle;
 }
@@ -157,9 +180,30 @@ async function start(
     if (!String(error).includes("Using exceptions for control flow"))
       throw error;
   }
+  // Swaps under way, by the id the scene names each one by in its `robot`
+  // event. Every handler the page sets goes through `dispatch`, so a swap is
+  // settled whether or not the page listens.
+  const swaps = new Map<
+    string,
+    { resolve: () => void; reject: (error: Error) => void }
+  >();
+  const dispatch =
+    (handler?: (event: SceneEvent) => void) => (event: SceneEvent) => {
+      if (event.type === "robot") {
+        const swap = swaps.get(event.glb);
+        swaps.delete(event.glb);
+        if (event.error === undefined) swap?.resolve();
+        else swap?.reject(new Error(event.error));
+      }
+      handler?.(event);
+    };
+  wasm.set_event_handler(dispatch());
   return {
     backend,
     canvas,
+    get glb() {
+      return running?.glb ?? glb;
+    },
     setValue(target, value, feature) {
       const values = typeof value === "number" ? [value] : value;
       wasm.set_value(target, feature ?? "", Float32Array.from(values));
@@ -167,12 +211,37 @@ async function start(
     control(command) {
       wasm.control(JSON.stringify(command));
     },
-    loadRobot(glb) {
-      wasm.load_robot(glb);
-      if (running) running.glb = glb;
+    loadRobot(next) {
+      if (running?.loading?.glb === next) return running.loading.done;
+      let id: string;
+      try {
+        id = wasm.load_robot(next);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      const settled = new Promise<void>((resolve, reject) =>
+        swaps.set(id, { resolve, reject }),
+      );
+      const loading = {
+        glb: next,
+        // The robot showing changes only once the swap has finished, so a
+        // robot that failed is never taken for the one showing.
+        done: settled.then(
+          () => {
+            if (running) running.glb = next;
+            if (running?.loading === loading) running.loading = undefined;
+          },
+          (error: unknown) => {
+            if (running?.loading === loading) running.loading = undefined;
+            throw error;
+          },
+        ),
+      };
+      if (running) running.loading = loading;
+      return loading.done;
     },
     onEvent(handler) {
-      wasm.set_event_handler(handler);
+      wasm.set_event_handler(dispatch(handler));
     },
   };
 }

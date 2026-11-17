@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
-import { mountScene, unmountScene, type SceneHandle } from "./load";
+import { showScene, unmountScene, type SceneHandle } from "./load";
 import type { Backend, SceneEvent, SceneOptions } from "./types";
 
 export interface SceneProps {
   /**
-   * The robot's GLB. A different one swaps the robot in the running scene; the
-   * old robot's joint and element controls go with it.
+   * The robot's GLB. A different one swaps the robot in the running scene
+   * once it has loaded; the old robot's joint and element controls go with
+   * it. One that cannot be loaded reaches `onError`, the old robot kept.
    */
   glb: Uint8Array;
   /** How the scene starts. Read once, when the page's scene starts. */
@@ -49,7 +50,10 @@ export function Scene({
     if (!el) return;
     const { glb, options, backend, onReady, onError } = first.current;
     let shown = true;
-    mountScene(el, glb, { ...options, backend }).then(
+    // Shown with the robot it already has: a different `glb` is swapped in
+    // below, where a robot that fails to load reaches `onError` and the
+    // scene, still showing the old robot, stays drivable.
+    showScene(el, glb, { ...options, backend }).then(
       (handle) => {
         if (!shown) return;
         setScene(handle);
@@ -70,18 +74,19 @@ export function Scene({
     container.current !== null &&
     handle.canvas.parentElement === container.current;
 
-  // A new robot swaps into the running scene; a robot the scene cannot read
-  // is refused and the old one kept.
-  const loaded = useRef(glb);
+  // A `glb` other than the robot showing swaps into the running scene. A
+  // robot that cannot be read or loaded reaches `onError`, the old one kept;
+  // the same bytes are not tried again, but a new array is.
+  const asked = useRef<Uint8Array>(undefined);
   useEffect(() => {
-    if (!scene || glb === loaded.current || !owns(scene)) return;
-    loaded.current = glb;
-    try {
-      scene.loadRobot(glb);
-    } catch (error) {
-      if (onError) onError(error);
-      else console.error(error);
-    }
+    if (!scene || glb === scene.glb || glb === asked.current || !owns(scene))
+      return;
+    asked.current = glb;
+    scene
+      .loadRobot(glb)
+      .catch((error: unknown) =>
+        onError ? onError(error) : console.error(error),
+      );
   }, [scene, glb, onError]);
 
   // Events go to the `<Scene>` showing the scene, and only while it does: a

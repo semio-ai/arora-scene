@@ -55,11 +55,15 @@ static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(
 /// A robot waiting for the next frame to take the old one's place.
 static NEXT: Mutex<Option<arora_scene::NextRobot>> = Mutex::new(None);
 
-/// Replaces the robot the scene shows with the one in `glb`. The old robot's
-/// joint and element controls go with it; goals stay. Refused, and the old
-/// robot kept, if `glb` is not a robot the scene can read.
+/// Starts replacing the robot the scene shows with the one in `glb`, and
+/// returns the id the swap's `robot` event will name. Refused at once if
+/// `glb` declares nothing the scene can read. Otherwise the new robot loads
+/// beside the old, which keeps showing; once it has loaded whole it takes the
+/// old one's place, and the old robot's joint and element controls go with
+/// it, goals staying. If it fails to load, the old robot stays and the event
+/// carries the error.
 #[wasm_bindgen]
-pub fn load_robot(glb: Vec<u8>) -> Result<(), JsValue> {
+pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
     let meta = arora_visuals::meta::AssetMeta::from_glb_bytes(&glb)
         .map_err(|e| error(format!("{e:#}")))?;
     let joints = arora_scene::robot::find_joints(&glb).unwrap_or_else(|e| {
@@ -72,17 +76,19 @@ pub fn load_robot(glb: Vec<u8>) -> Result<(), JsValue> {
     };
     let path = format!("robot-{}.glb", LOADED.fetch_add(1, Ordering::SeqCst) + 1);
     dir.insert_asset(Path::new(&path), glb);
-    // The old robot's bytes, once its replacement is in: the asset server
-    // already holds what it loaded from them.
+    // The bytes the last robot was loaded from: the asset server already
+    // holds whatever it loaded from them, whether that robot is showing or
+    // failed to load.
     dir.remove_asset(Path::new(showing));
     *showing = path.clone();
+    let glb = format!("{SOURCE}://{path}");
     *NEXT.lock().unwrap() = Some(arora_scene::NextRobot {
-        glb: format!("{SOURCE}://{path}"),
+        glb: glb.clone(),
         meta,
         joints,
     });
     wake();
-    Ok(())
+    Ok(glb)
 }
 
 /// Hands a robot the page loaded to the scene, which swaps it in.
@@ -392,6 +398,14 @@ enum SceneEvent<'a> {
     /// A drag on a control: what it asks for. Nothing has moved; the page
     /// writes the change if it wants it.
     Control(&'a ControlEvent),
+    /// How a robot swap ended: `error` is absent once the robot named by
+    /// `glb` (the id `load_robot` returned) is showing, and says why it could
+    /// not load otherwise, the old robot still showing.
+    Robot {
+        glb: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
 }
 
 /// Controls waiting for the next frame.
@@ -438,7 +452,17 @@ fn emit_events(
     overlay: Res<Overlay>,
     mut picks: ResMut<Picks>,
     mut controls: ResMut<ControlEvents>,
+    mut robots: ResMut<arora_scene::RobotOutcomes>,
 ) {
+    for outcome in std::mem::take(&mut robots.0) {
+        send(&match &outcome {
+            Ok(glb) => SceneEvent::Robot { glb, error: None },
+            Err((glb, why)) => SceneEvent::Robot {
+                glb,
+                error: Some(why),
+            },
+        });
+    }
     for event in std::mem::take(&mut controls.0) {
         send(&SceneEvent::Control(&event));
     }

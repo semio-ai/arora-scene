@@ -45,6 +45,15 @@ pub struct SpawnedScene<'w, 's> {
     transforms: Query<'w, 's, &'static Transform>,
 }
 
+/// A robot root not indexed yet. An incoming robot is indexed once its swap
+/// is finished, so until then values, controls and picks keep addressing the
+/// robot that is showing.
+type Unindexed = (
+    With<WorldAssetRoot>,
+    Without<EntityInstance>,
+    Without<crate::Incoming>,
+);
+
 /// Joins each spawned robot's elements to its entities, once its scene exists.
 ///
 /// Runs until each root is indexed, because a glTF scene spawns
@@ -56,7 +65,7 @@ pub fn index_instances(
     selected: Res<Selected>,
     mut selections: ResMut<arora_visuals::select::Selections>,
     camera: Query<Entity, With<OrbitCamera>>,
-    roots: Query<Entity, (With<WorldAssetRoot>, Without<EntityInstance>)>,
+    roots: Query<Entity, Unindexed>,
     scene: SpawnedScene,
     mut commands: Commands,
 ) {

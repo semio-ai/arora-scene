@@ -84,6 +84,10 @@ function Running({ glb: first }: { glb: Uint8Array }) {
     if (event.type === "overlay") return setOverlay(event);
     if (event.type === "pick")
       return note(`pick ${event.instance} ${event.element ?? "(no element)"}`);
+    if (event.type === "robot")
+      return note(
+        event.error ? `robot refused: ${event.error}` : `robot ${event.glb}`,
+      );
     const scene = sceneRef.current;
     if (event.phase !== "move")
       note(
@@ -164,6 +168,7 @@ function Running({ glb: first }: { glb: Uint8Array }) {
           backend={backendParam()}
           options={{ environment: "sky" }}
           onReady={ready}
+          onError={(error) => note(`error ${String(error)}`)}
           onEvent={onEvent}
           style={{ height: "100%" }}
         />
@@ -206,6 +211,21 @@ function Running({ glb: first }: { glb: Uint8Array }) {
           >
             Load this robot again
           </button>
+          <form
+            style={{ display: "flex", gap: 8 }}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const url = String(new FormData(e.currentTarget).get("url"));
+              const response = await fetch(url);
+              if (!response.ok) return note(`${url}: ${response.status}`);
+              setGlb(new Uint8Array(await response.arrayBuffer()));
+            }}
+          >
+            <input name="url" placeholder="robot URL" required />
+            <button type="submit" disabled={!scene}>
+              Load
+            </button>
+          </form>
         </div>
         <h4>Controls</h4>
         <form onSubmit={addControl} style={{ display: "grid", gap: 8 }}>
@@ -235,7 +255,9 @@ function Running({ glb: first }: { glb: Uint8Array }) {
         <h4>Pointer</h4>
         <pre>{hovered ? JSON.stringify(hovered, null, 1) : "none"}</pre>
         <h4>Events</h4>
-        <pre>{log.join("\n") || "none yet"}</pre>
+        <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+          {log.join("\n") || "none yet"}
+        </pre>
         <p>{overlay ? `${overlay.elements.length} elements on screen` : ""}</p>
       </aside>
     </div>
