@@ -35,6 +35,8 @@ export async function chooseBackend(): Promise<Backend> {
 /** A running scene. */
 export interface SceneHandle {
   readonly backend: Backend;
+  /** The canvas the scene draws into, wherever it is currently placed. */
+  readonly canvas: HTMLCanvasElement;
   /**
    * Writes one feature value: `target` an animatable or element id as the
    * robot's `RobotData` declares it, `feature` as `RobotData` names it
@@ -45,23 +47,67 @@ export interface SceneHandle {
   onEvent(handler: (event: SceneEvent) => void): void;
 }
 
-let mounted: Promise<SceneHandle> | undefined;
+/**
+ * The page's one scene. The renderer's event loop runs for the life of the
+ * page and cannot be started twice, so the scene is started once and its
+ * canvas moves between whichever containers show it.
+ */
+let running:
+  | { canvas: HTMLCanvasElement; glb: Uint8Array; handle: Promise<SceneHandle> }
+  | undefined;
 
 /**
- * Starts the scene in `canvas` (an element with an `id`), drawing the robot
- * in `glb`.
- *
- * **A page holds one scene, for its whole life.** The renderer's event loop
- * cannot be stopped or started twice, so a second call returns the first
- * scene rather than starting another. Hide the canvas to hide the scene.
+ * Where the canvas waits while no container shows it. It stays in the
+ * document so the renderer still finds it, and draws nothing there: a canvas
+ * with no size has no frames to draw.
+ */
+function parking(): HTMLElement {
+  const id = "semio-scene-parking";
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    el.hidden = true;
+    document.body.append(el);
+  }
+  return el;
+}
+
+/**
+ * Shows the page's scene in `container`, starting it with `glb` and `options`
+ * the first time. Later calls move the running scene into their container,
+ * and their `glb` and `options` are ignored: the scene keeps drawing the
+ * robot it started with.
  */
 export function mountScene(
-  canvas: HTMLCanvasElement,
+  container: HTMLElement,
   glb: Uint8Array,
   options: SceneOptions & { backend?: Backend } = {},
 ): Promise<SceneHandle> {
-  mounted ??= start(canvas, glb, options);
-  return mounted;
+  if (!running) {
+    const canvas = document.createElement("canvas");
+    canvas.id = "semio-scene";
+    canvas.style.cssText =
+      "display:block;width:100%;height:100%;outline:none;touch-action:none";
+    container.append(canvas);
+    running = { canvas, glb, handle: start(canvas, glb, options) };
+  } else {
+    if (glb !== running.glb)
+      console.warn(
+        "@semio/scene: the scene keeps the robot it started with; a different robot was ignored",
+      );
+    container.append(running.canvas);
+  }
+  return running.handle;
+}
+
+/**
+ * Takes the scene out of `container`, if it is there, and parks it until a
+ * container shows it again.
+ */
+export function unmountScene(container: HTMLElement): void {
+  if (running && running.canvas.parentElement === container)
+    parking().append(running.canvas);
 }
 
 async function start(
@@ -69,7 +115,6 @@ async function start(
   glb: Uint8Array,
   { backend: asked, ...options }: SceneOptions & { backend?: Backend },
 ): Promise<SceneHandle> {
-  if (!canvas.id) throw new Error("the scene's canvas needs an id");
   const backend = asked ?? (await chooseBackend());
   const wasm = await modules[backend]();
   await wasm.default();
@@ -83,6 +128,7 @@ async function start(
   }
   return {
     backend,
+    canvas,
     setValue(target, feature, value) {
       const values = typeof value === "number" ? [value] : value;
       wasm.set_value(target, feature, Float32Array.from(values));

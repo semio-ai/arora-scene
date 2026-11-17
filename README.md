@@ -35,10 +35,12 @@ starts on WebGPU when the browser can give it an adapter and falls back to
 WebGL2. **WebGL2 draws shadows from one light only**, so the fill light casts
 none there.
 
-**A page holds one scene for its whole life.** Bevy's windowing runs on winit,
-which allows one event loop per page and never hands it back, so the package
-mounts once and a second mount returns the first scene. A host hides the scene
-rather than unmounting it.
+**A page runs one scene for its whole life.** Bevy's windowing runs on winit,
+which allows one event loop per page and never hands it back. So the package
+starts the scene once and moves its canvas between the containers that show
+it: unmounting `<Scene>` parks the canvas, still running and drawing nothing,
+and mounting it again brings the same scene back. The scene keeps the robot it
+started with; swapping robots in a running scene is the next piece of work.
 
 The workspace patches `bevy_pbr` so `StandardMaterial` draws on Safari's
 WebGPU; the root `Cargo.toml` says why and when to drop it.

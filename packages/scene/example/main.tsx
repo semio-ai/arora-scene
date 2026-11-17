@@ -63,6 +63,8 @@ function Running({ glb }: { glb: Uint8Array }) {
   const [scene, setScene] = useState<SceneHandle>();
   const [overlay, setOverlay] = useState<OverlayFrame>();
   const [log, setLog] = useState<string[]>([]);
+  // Unmounting and mounting again shows the same running scene.
+  const [shown, setShown] = useState(true);
 
   const onEvent = useCallback((event: SceneEvent) => {
     if (event.type === "overlay") setOverlay(event);
@@ -105,18 +107,25 @@ function Running({ glb }: { glb: Uint8Array }) {
         height: "100%",
       }}
     >
-      <Scene
-        glb={glb}
-        backend={backendParam()}
-        options={{ environment: "sky" }}
-        onReady={setScene}
-        onEvent={onEvent}
-        style={{ height: "100%" }}
-      />
+      {shown ? (
+        <Scene
+          glb={glb}
+          backend={backendParam()}
+          options={{ environment: "sky" }}
+          onReady={setScene}
+          onEvent={onEvent}
+          style={{ height: "100%" }}
+        />
+      ) : (
+        <div style={{ padding: 24 }}>The scene is parked, still running.</div>
+      )}
       <aside
         style={{ padding: 16, overflow: "auto", borderLeft: "1px solid #333" }}
       >
         <p>Backend: {scene?.backend ?? "starting"}</p>
+        <button type="button" onClick={() => setShown((s) => !s)}>
+          {shown ? "Unmount the scene" : "Mount the scene"}
+        </button>
         <form onSubmit={write} style={{ display: "grid", gap: 8 }}>
           <input
             name="target"

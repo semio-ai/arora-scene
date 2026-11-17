@@ -1,12 +1,15 @@
-import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
-import { mountScene, type SceneHandle } from "./load";
+import { mountScene, unmountScene, type SceneHandle } from "./load";
 import type { Backend, SceneEvent, SceneOptions } from "./types";
 
 export interface SceneProps {
-  /** The robot's GLB. Read once: the scene draws the first one it is given. */
+  /**
+   * The robot's GLB. The page's scene draws the robot it started with, so
+   * only the first `<Scene>` on a page decides it.
+   */
   glb: Uint8Array;
-  /** How the scene starts. Read once, at mount. */
+  /** How the scene starts. Read when the page's scene starts, as `glb` is. */
   options?: SceneOptions;
   /** Force a backend instead of choosing by what the browser supports. */
   backend?: Backend;
@@ -19,12 +22,12 @@ export interface SceneProps {
 }
 
 /**
- * The robot scene, filling its container. The scene sizes itself to the
- * element around its canvas, so give that element a size.
+ * The robot scene, filling this element. Give the element a size.
  *
- * **Mount it once per page.** The renderer cannot be stopped and started
- * again, so a second `<Scene>` or a remount drives the scene the first one
- * started. Hide the component rather than unmounting it.
+ * A page has one scene, which runs for the life of the page. `<Scene>` shows
+ * it: mounting moves the scene into this element, and unmounting parks it,
+ * still running and drawing nothing, until a `<Scene>` mounts again. Show one
+ * `<Scene>` at a time; a second takes the scene from the first.
  */
 export function Scene({
   glb,
@@ -36,40 +39,43 @@ export function Scene({
   className,
   style,
 }: SceneProps) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const id = `semio-scene-${useId().replaceAll(":", "")}`;
+  const container = useRef<HTMLDivElement>(null);
   const [scene, setScene] = useState<SceneHandle>();
 
-  // The props a mount reads are read once, so this effect runs once.
+  // Read at mount: a running scene does not restart for new props.
   const first = useRef({ glb, options, backend, onReady, onError });
   useEffect(() => {
+    const el = container.current;
+    if (!el) return;
     const { glb, options, backend, onReady, onError } = first.current;
-    if (!canvas.current) return;
-    mountScene(canvas.current, glb, { ...options, backend }).then(
+    let shown = true;
+    mountScene(el, glb, { ...options, backend }).then(
       (handle) => {
+        if (!shown) return;
         setScene(handle);
         onReady?.(handle);
       },
       (error: unknown) => (onError ? onError(error) : console.error(error)),
     );
+    return () => {
+      shown = false;
+      unmountScene(el);
+    };
   }, []);
 
+  // Events go to the shown `<Scene>` only: a parked scene must not call into
+  // a component that is gone.
   useEffect(() => {
-    if (scene && onEvent) scene.onEvent(onEvent);
+    if (!scene || !onEvent) return;
+    scene.onEvent(onEvent);
+    return () => scene.onEvent(() => {});
   }, [scene, onEvent]);
 
   return (
-    <div className={className} style={{ position: "relative", ...style }}>
-      <canvas
-        ref={canvas}
-        id={id}
-        style={{
-          display: "block",
-          width: "100%",
-          height: "100%",
-          outline: "none",
-        }}
-      />
-    </div>
+    <div
+      ref={container}
+      className={className}
+      style={{ position: "relative", ...style }}
+    />
   );
 }
