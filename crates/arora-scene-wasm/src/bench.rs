@@ -34,7 +34,7 @@ use crate::now;
 
 /// What a benchmark run asks for beyond a normal mount.
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Options {
     /// How many copies of the robot to draw.
     pub copies: u32,
