@@ -228,7 +228,10 @@ impl Plugin for ScenePlugin {
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
         .init_resource::<RobotOutcomes>()
-        .add_systems(PreUpdate, (begin_swap, finish_swap).chain())
+        .add_systems(
+            PreUpdate,
+            (report_first_robot, begin_swap, finish_swap).chain(),
+        )
         .add_systems(
             Update,
             (
@@ -978,9 +981,10 @@ pub struct NextRobot {
     pub joints: Vec<robot::Joint>,
 }
 
-/// How a robot swap ended, for the host that asked for it: `Ok` with the
-/// robot's `glb` once it is showing, `Err` with the `glb` and why it could not
-/// be loaded, the old robot still showing.
+/// How each robot the scene was given ended up, the one it started with
+/// included: `Ok` with the robot's `glb` once it is showing, `Err` with the
+/// `glb` and why it could not be loaded or was replaced, the old robot still
+/// showing.
 #[derive(Resource, Default)]
 pub struct RobotOutcomes(pub Vec<Result<String, (String, String)>>);
 
@@ -1020,10 +1024,7 @@ fn begin_swap(
         for &root in &earlier.roots {
             commands.entity(root).despawn();
         }
-        outcomes.0.push(Err((
-            earlier.glb.clone(),
-            REPLACED.into(),
-        )));
+        outcomes.0.push(Err((earlier.glb.clone(), REPLACED.into())));
     }
     let roots = spawn_robot_roots(
         &mut commands,
@@ -1082,7 +1083,9 @@ fn finish_swap(
             for &root in &pending.roots {
                 commands.entity(root).despawn();
             }
-            outcomes.0.push(Err((pending.glb.clone(), error.to_string())));
+            outcomes
+                .0
+                .push(Err((pending.glb.clone(), error.to_string())));
             commands.remove_resource::<PendingRobot>();
             return;
         }
@@ -1126,6 +1129,45 @@ fn finish_swap(
     outcomes.0.push(Ok(pending.glb.clone()));
     commands.remove_resource::<PendingRobot>();
     log::info!("swapped in {}", pending.glb);
+}
+
+/// Reports how the robot the scene started with ended up, once: `Ok` once it
+/// has loaded whole and spawned, `Err` if it failed to load or a swap
+/// replaced it first. A host learns that the first robot is showing the same
+/// way it learns that a swapped one is.
+fn report_first_robot(
+    mut first: Local<Option<String>>,
+    mut done: Local<bool>,
+    spec: Res<RobotSpec>,
+    assets: Res<AssetServer>,
+    roots: Query<(&WorldAssetRoot, Has<Children>), Without<Incoming>>,
+    mut outcomes: ResMut<RobotOutcomes>,
+) {
+    if *done {
+        return;
+    }
+    let first = first.get_or_insert_with(|| spec.glb.clone());
+    if spec.glb != *first {
+        *done = true;
+        outcomes.0.push(Err((first.clone(), REPLACED.into())));
+        return;
+    }
+    let mut spawned = !roots.is_empty();
+    for (scene, has_children) in &roots {
+        if let Some(RecursiveDependencyLoadState::Failed(error)) =
+            assets.get_recursive_dependency_load_state(scene.0.id())
+        {
+            log::warn!("could not load {first}: {error}");
+            *done = true;
+            outcomes.0.push(Err((first.clone(), error.to_string())));
+            return;
+        }
+        spawned &= has_children;
+    }
+    if spawned {
+        *done = true;
+        outcomes.0.push(Ok(first.clone()));
+    }
 }
 
 /// Where the camera is kept above, as Studio keeps its camera a centimetre

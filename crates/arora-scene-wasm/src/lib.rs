@@ -15,8 +15,8 @@
 
 use std::cell::RefCell;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use arora_scene::controls::{ControlCommand, ControlCommands, ControlEvent, ControlEvents};
 use arora_scene::instance::{RobotMeta, Selected};
@@ -30,9 +30,9 @@ use arora_visuals::overlay::Overlay;
 use arora_visuals::pick::Picks;
 use arora_visuals::select::Selection;
 use arora_visuals::value::Decoded;
-use bevy::asset::AssetMetaCheck;
-use bevy::asset::io::AssetSourceBuilder;
 use bevy::asset::io::memory::{Dir, MemoryAssetReader};
+use bevy::asset::io::AssetSourceBuilder;
+use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
@@ -47,8 +47,10 @@ mod bench;
 const SOURCE: &str = "memory";
 const ROBOT: &str = "robot.glb";
 
-/// The memory the robots are served from, and the path of the one showing.
-static ROBOTS: Mutex<Option<(Dir, String)>> = Mutex::new(None);
+/// The memory the robots are served from, and the paths it holds, oldest
+/// first. A robot's bytes stay until its load has ended: removed while the
+/// asset server is still reading them, they fail the load they were for.
+static ROBOTS: Mutex<Option<(Dir, Vec<String>)>> = Mutex::new(None);
 /// How many robots have been loaded, which names each new one: a fresh path
 /// per robot, so the asset server never answers with the one it replaced.
 static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -73,16 +75,12 @@ pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
         Vec::new()
     });
     let mut robots = ROBOTS.lock().unwrap();
-    let Some((dir, showing)) = robots.as_mut() else {
+    let Some((dir, held)) = robots.as_mut() else {
         return Err(error("the scene is not mounted yet"));
     };
     let path = format!("robot-{}.glb", LOADED.fetch_add(1, Ordering::SeqCst) + 1);
     dir.insert_asset(Path::new(&path), glb);
-    // The bytes the last robot was loaded from: the asset server already
-    // holds whatever it loaded from them, whether that robot is showing or
-    // failed to load.
-    dir.remove_asset(Path::new(showing));
-    *showing = path.clone();
+    held.push(path.clone());
     let glb = format!("{SOURCE}://{path}");
     NEXT.lock().unwrap().push(arora_scene::NextRobot {
         glb: glb.clone(),
@@ -91,6 +89,42 @@ pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
     });
     wake();
     Ok(glb)
+}
+
+/// Lets go of the bytes a robot's load no longer needs, once it has ended:
+/// the asset server holds whatever it loaded from them. A robot showing makes
+/// every robot asked for before it unneeded too; one that failed or was
+/// replaced needs only its own bytes gone.
+fn release_bytes(outcome: &Result<String, (String, String)>) {
+    let mut robots = ROBOTS.lock().unwrap();
+    let Some((dir, held)) = robots.as_mut() else {
+        return;
+    };
+    let prefix = format!("{SOURCE}://");
+    let path = |glb: &str| glb.strip_prefix(&prefix).map(str::to_string);
+    let gone: Vec<String> = match outcome {
+        Ok(glb) => match path(glb).and_then(|p| held.iter().position(|h| *h == p)) {
+            Some(at) => held.drain(..at).collect(),
+            None => Vec::new(),
+        },
+        Err((glb, _)) => match path(glb) {
+            Some(p) => {
+                held.retain(|h| *h != p);
+                vec![p]
+            }
+            None => Vec::new(),
+        },
+    };
+    for p in gone {
+        dir.remove_asset(Path::new(&p));
+    }
+}
+
+/// The id the `robot` event names the robot the scene was mounted with by,
+/// as `load_robot` returns one for each robot after it.
+#[wasm_bindgen]
+pub fn first_robot() -> String {
+    format!("{SOURCE}://{ROBOT}")
 }
 
 /// Hands the latest robot the page loaded to the scene, which swaps it in,
@@ -185,7 +219,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
 
     let robot = Dir::default();
     robot.insert_asset(Path::new(ROBOT), glb);
-    *ROBOTS.lock().unwrap() = Some((robot.clone(), ROBOT.to_string()));
+    *ROBOTS.lock().unwrap() = Some((robot.clone(), vec![ROBOT.to_string()]));
 
     let mut resolution = WindowResolution::default();
     if let Some(sf) = opts.scale_factor {
@@ -264,7 +298,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
         ..default()
     })
     .insert_resource(RobotSpec {
-        glb: format!("{SOURCE}://{ROBOT}"),
+        glb: first_robot(),
         copies,
     })
     // What `arora_scene::mount_instances` does from a file, done from bytes.
@@ -279,7 +313,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     // Before the scene's own PreUpdate swap, so a robot loaded between
     // frames is swapped in on the next one.
     .add_systems(First, take_next_robot)
-    .add_systems(Last, emit_events);
+    .add_systems(Last, (keep_poses, emit_events));
 
     #[cfg(feature = "bench")]
     let continuous = bench::install(&mut app, &opts.bench);
@@ -315,11 +349,47 @@ thread_local! {
     /// frames, when a loop that draws only on change may be waiting
     /// indefinitely.
     static WAKE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    /// Whether a wake is already on its way, so that every call the page
+    /// makes before it arrives shares it.
+    static WAKE_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// What the browser runs to deliver a wake, kept for the page's life so
+    /// each wake does not allocate a closure.
+    static WAKE_LATER: Closure<dyn FnMut()> = Closure::new(|| {
+        WAKE_PENDING.with(|pending| pending.set(false));
+        wake_now();
+    });
     /// Where the scene's events go: the page's handler.
     static HANDLER: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
 }
 
+/// Wakes the event loop once the page's current task is over, once however
+/// many calls the page makes in it.
+///
+/// Not at once: winit cancels the animation frame it has requested and asks
+/// for the next one whenever it is woken, and runs no further update until
+/// that frame arrives. A page writing from inside its own animation frames,
+/// as playback does, would wake it in every frame before winit's own frame
+/// callback ran, putting the redraw off for as long as the writes continued.
+/// A timeout runs after the browser's animation frame callbacks, so winit's
+/// frame is drawn first and the wake asks for the next.
 fn wake() {
+    if WAKE_PENDING.with(|pending| pending.replace(true)) {
+        return;
+    }
+    let scheduled = WAKE_LATER.with(|later| {
+        web_sys::window().and_then(|window| {
+            window
+                .set_timeout_with_callback(later.as_ref().unchecked_ref())
+                .ok()
+        })
+    });
+    if scheduled.is_none() {
+        WAKE_PENDING.with(|pending| pending.set(false));
+        wake_now();
+    }
+}
+
+fn wake_now() {
     WAKE.with(|wake| {
         if let Some(wake) = wake.borrow().as_ref() {
             wake();
@@ -415,7 +485,108 @@ enum SceneEvent<'a> {
         glb: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
+        /// The robot's joints, once it is showing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        joints: Option<Vec<JointInfo<'a>>>,
     },
+}
+
+/// A joint as the page sees it: what to call it, what to write to move it,
+/// and how far it goes.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JointInfo<'a> {
+    name: &'a str,
+    kind: &'static str,
+    /// The element the joint moves, by its `RobotData` id.
+    element: &'a str,
+    /// The animatable to write to move it, absent for a joint that is not
+    /// animated. Joints that mimic one another share their leader's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    animatable: Option<&'a str>,
+    /// Present on a joint that follows another: it stands at
+    /// `value * multiplier + offset` of the animatable's value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mimic: Option<Mimic>,
+    /// The limits, absent where the joint has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f32>,
+    default: f32,
+}
+
+#[derive(Serialize)]
+struct Mimic {
+    multiplier: f32,
+    offset: f32,
+}
+
+impl<'a> From<&'a arora_scene::robot::Joint> for JointInfo<'a> {
+    fn from(joint: &'a arora_scene::robot::Joint) -> Self {
+        use arora_scene::robot::JointKind;
+        Self {
+            name: &joint.name,
+            kind: match joint.kind {
+                JointKind::Revolute => "revolute",
+                JointKind::Continuous => "continuous",
+                JointKind::Prismatic => "prismatic",
+                JointKind::Fixed => "fixed",
+            },
+            element: &joint.child,
+            animatable: joint.animatable.as_deref(),
+            mimic: joint
+                .mimic
+                .map(|(multiplier, offset)| Mimic { multiplier, offset }),
+            min: joint.min.is_finite().then_some(joint.min),
+            max: joint.max.is_finite().then_some(joint.max),
+            default: joint.default,
+        }
+    }
+}
+
+thread_local! {
+    /// Where each element of the robot showing stood in the last frame, by
+    /// its `RobotData` id, Z up.
+    static POSES: RefCell<std::collections::HashMap<String, arora_scene::controls::Pose>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Records where each element of the robot showing stands, for
+/// [`element_pose`]. Runs after transforms have propagated, so it reads the
+/// frame about to be drawn.
+fn keep_poses(
+    instances: Query<&arora_visuals::instance::EntityInstance, Without<arora_scene::Incoming>>,
+    placed: Query<&GlobalTransform>,
+) {
+    let mut poses = std::collections::HashMap::new();
+    for instance in instances.iter().filter(|i| i.id == "robot-0") {
+        for (id, targets) in &instance.bindings.elements {
+            if let Ok(placed) = placed.get(targets.node) {
+                poses.insert(
+                    id.clone(),
+                    arora_scene::controls::Pose::from_scene(&placed.compute_transform()),
+                );
+            }
+        }
+    }
+    POSES.with(|kept| *kept.borrow_mut() = poses);
+}
+
+/// Where an element of the robot showing stood in the last frame drawn, in
+/// the scene's world, Z up: `{ position, rotation }`, the rotation a
+/// quaternion `[x, y, z, w]`. `undefined` for an id the robot does not
+/// declare, or before it has spawned.
+#[wasm_bindgen]
+pub fn element_pose(element: &str) -> JsValue {
+    POSES.with(|poses| {
+        poses
+            .borrow()
+            .get(element)
+            .and_then(|pose| serde_json::to_string(pose).ok())
+            .and_then(|json| js_sys::JSON::parse(&json).ok())
+            .unwrap_or(JsValue::UNDEFINED)
+    })
 }
 
 /// Controls waiting for the next frame.
@@ -463,13 +634,20 @@ fn emit_events(
     mut picks: ResMut<Picks>,
     mut controls: ResMut<ControlEvents>,
     mut robots: ResMut<arora_scene::RobotOutcomes>,
+    joints: Res<arora_scene::joints::RobotJoints>,
 ) {
     for outcome in std::mem::take(&mut robots.0) {
+        release_bytes(&outcome);
         send(&match &outcome {
-            Ok(glb) => SceneEvent::Robot { glb, error: None },
+            Ok(glb) => SceneEvent::Robot {
+                glb,
+                error: None,
+                joints: Some(joints.0.iter().map(JointInfo::from).collect()),
+            },
             Err((glb, why)) => SceneEvent::Robot {
                 glb,
                 error: Some(why),
+                joints: None,
             },
         });
     }

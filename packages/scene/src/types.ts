@@ -164,11 +164,36 @@ export type SceneEvent =
   /** A drag on a control the driver added. */
   | ({ type: "control" } & ControlEvent)
   /**
-   * How a robot swap ended: `error` is absent once the robot is showing, and
-   * says why it could not load otherwise, the old robot still showing.
-   * `loadRobot`'s promise settles from this; `glb` is the swap's id.
+   * How a robot the scene was given ended up, the one it started with
+   * included, by the key the host gave it. Once it is showing, `error` is
+   * absent and `joints` lists its joints. Otherwise `error` says why it could
+   * not be loaded or what replaced it, the old robot still showing.
+   * `loadRobot`'s promise settles from this.
    */
-  | { type: "robot"; glb: string; error?: string };
+  | { type: "robot"; key: string; error?: string; joints?: Joint[] };
+
+/** One of a robot's joints, as its `RobotData` declares it. */
+export interface Joint {
+  name: string;
+  kind: "revolute" | "continuous" | "prismatic" | "fixed";
+  /** The element the joint moves, by its `RobotData` id. */
+  element: string;
+  /**
+   * The animatable to write with `setValue` to move it, and the key of its
+   * joint control. Absent for a joint that is not animated; joints that mimic
+   * one another share their leader's.
+   */
+  animatable?: string;
+  /**
+   * Present on a joint that follows another: it stands at
+   * `value * multiplier + offset` of its animatable's value.
+   */
+  mimic?: { multiplier: number; offset: number };
+  /** The limits, absent where the joint has none. */
+  min?: number;
+  max?: number;
+  default: number;
+}
 
 /**
  * A value for one feature: one number (a joint's angle or travel) or three
