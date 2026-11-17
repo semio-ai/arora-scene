@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { createRoot } from "react-dom/client";
 
 import {
@@ -66,16 +72,34 @@ function Running({ glb }: { glb: Uint8Array }) {
   // Unmounting and mounting again shows the same running scene.
   const [shown, setShown] = useState(true);
 
+  // This page plays the driver: a drag moves nothing until the driver writes
+  // it back, which it does here unless told not to.
+  const sceneRef = useRef<SceneHandle>(undefined);
+  const writeBack = useRef(true);
+  const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
+
   const onEvent = useCallback((event: SceneEvent) => {
-    if (event.type === "overlay") setOverlay(event);
-    else
-      setLog((l) =>
-        [
-          `pick ${event.instance} ${event.element ?? "(no element)"}`,
-          ...l,
-        ].slice(0, 8),
+    if (event.type === "overlay") return setOverlay(event);
+    if (event.type === "pick")
+      return note(`pick ${event.instance} ${event.element ?? "(no element)"}`);
+    const scene = sceneRef.current;
+    if (event.phase !== "move")
+      note(
+        `${event.phase} ${event.key.slice(0, 8)} ${
+          event.value?.toFixed(3) ??
+          event.pose?.position.map((v) => v.toFixed(2)).join(" ")
+        }`,
       );
+    if (!scene || !writeBack.current) return;
+    if (event.value !== undefined) scene.setValue(event.key, event.value);
+    if (event.pose)
+      scene.control({ op: "setPose", key: event.key, pose: event.pose });
   }, []);
+
+  const ready = (handle: SceneHandle) => {
+    sceneRef.current = handle;
+    setScene(handle);
+  };
 
   const write = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -88,13 +112,33 @@ function Running({ glb }: { glb: Uint8Array }) {
       numbers.length === 3 ? (numbers as [number, number, number]) : numbers[0];
     if (!scene || value === undefined) return;
     try {
-      scene.setValue(
-        String(form.get("target")),
-        String(form.get("feature")),
-        value,
-      );
+      const feature = String(form.get("feature"));
+      scene.setValue(String(form.get("target")), value, feature || undefined);
     } catch (err) {
-      setLog((l) => [`error ${String(err)}`, ...l].slice(0, 8));
+      note(`error ${String(err)}`);
+    }
+  };
+
+  const addControl = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const submitter = (e.nativeEvent as SubmitEvent).submitter as
+      HTMLButtonElement | undefined;
+    const key = String(new FormData(e.currentTarget).get("key"));
+    if (!scene || !key) return;
+    switch (submitter?.value) {
+      case "joint":
+        return scene.control({ op: "add", key, control: { kind: "joint" } });
+      case "goal":
+        return scene.control({
+          op: "add",
+          key,
+          control: {
+            kind: "transform",
+            target: { kind: "goal", pose: { position: [0.3, 0, 1.2] } },
+          },
+        });
+      case "remove":
+        return scene.control({ op: "remove", key });
     }
   };
 
@@ -112,7 +156,7 @@ function Running({ glb }: { glb: Uint8Array }) {
           glb={glb}
           backend={backendParam()}
           options={{ environment: "sky" }}
-          onReady={setScene}
+          onReady={ready}
           onEvent={onEvent}
           style={{ height: "100%" }}
         />
@@ -132,16 +176,36 @@ function Running({ glb }: { glb: Uint8Array }) {
             placeholder="animatable or element id"
             required
           />
-          <input
-            name="feature"
-            placeholder="feature, e.g. rotation"
-            defaultValue="rotation"
-            required
-          />
+          <input name="feature" placeholder="feature, for an element id" />
           <input name="value" placeholder="one number, or three" required />
           <button type="submit" disabled={!scene}>
             Write value
           </button>
+        </form>
+        <h4>Controls</h4>
+        <form onSubmit={addControl} style={{ display: "grid", gap: 8 }}>
+          <input
+            name="key"
+            placeholder="joint value animatable, or any key"
+            required
+          />
+          <button type="submit" value="joint" disabled={!scene}>
+            Add a joint control
+          </button>
+          <button type="submit" value="goal" disabled={!scene}>
+            Add a goal
+          </button>
+          <button type="submit" value="remove" disabled={!scene}>
+            Remove
+          </button>
+          <label>
+            <input
+              type="checkbox"
+              defaultChecked
+              onChange={(e) => (writeBack.current = e.target.checked)}
+            />{" "}
+            Write drags back, as a driver would
+          </label>
         </form>
         <h4>Pointer</h4>
         <pre>{hovered ? JSON.stringify(hovered, null, 1) : "none"}</pre>

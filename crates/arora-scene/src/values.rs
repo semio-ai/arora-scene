@@ -26,7 +26,10 @@ pub struct ValueWrite {
     pub instance: Option<String>,
     /// An animatable's id, or failing that an element's.
     pub target: String,
-    pub feature: FeatureKind,
+    /// The feature an element write changes. An animatable carries its own
+    /// feature, so a write to one needs none, and a joint's value has no
+    /// feature to name.
+    pub feature: Option<FeatureKind>,
     pub value: Decoded,
 }
 
@@ -113,7 +116,10 @@ pub fn apply_values(
                 Some(found) => found.clone(),
                 None => match bindings.elements.get(&write.target) {
                     Some(element) => {
-                        let entity = match &write.feature {
+                        let Some(feature) = &write.feature else {
+                            continue;
+                        };
+                        let entity = match feature {
                             FeatureKind::Translation
                             | FeatureKind::Rotation
                             | FeatureKind::Scale => element.node,
@@ -126,7 +132,7 @@ pub fn apply_values(
                         // the GLB may share its material with others, which a
                         // material write would change too. It gets a copy of
                         // its own the first time.
-                        if is_material(&write.feature) && own.0.insert(entity) {
+                        if is_material(feature) && own.0.insert(entity) {
                             if let Ok(mut handle) = material_handles.get_mut(entity) {
                                 if let Some(copy) = materials.get(&handle.0).cloned() {
                                     handle.0 = materials.add(copy);
@@ -135,7 +141,7 @@ pub fn apply_values(
                         }
                         vec![SceneBinding {
                             entity,
-                            feature: write.feature.clone(),
+                            feature: feature.clone(),
                             axis: None,
                             morph_index: None,
                         }]

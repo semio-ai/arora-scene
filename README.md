@@ -45,6 +45,27 @@ started with; swapping robots in a running scene is the next piece of work.
 The workspace patches `bevy_pbr` so `StandardMaterial` draws on Safari's
 WebGPU; the root `Cargo.toml` says why and when to drop it.
 
+## Driving it
+
+The scene draws what it is told and reports what the user does; a driver (a
+device, Studio's World, an IK solver) decides what either means.
+
+- **Values in.** `setValue(id, value)` writes an animatable by the id
+  `RobotData` gives it, and the scene moves wherever the robot binds it. A
+  joint's value is an animatable like any other: it turns or slides the body
+  the joint moves, from the pose the GLB gave it.
+- **Controls, by the driver's keys.** `control({op: "add", key, control})`
+  adds a joint control (keyed by the joint's value animatable) or a transform
+  control on the robot, an element, or a goal: a pose with nothing drawn but
+  the control, which is what an IK target is. `remove`, `show` and `setPose`
+  take the same key.
+- **A drag moves nothing.** It arrives as a `control` event with the value or
+  pose it asks for, and the driver writes it back if it wants it, through the
+  same `setValue` and `setPose` every other change uses. What the driver holds
+  and what the scene shows cannot disagree.
+- **Poses are Z up**, in metres, with quaternions as `[x, y, z, w]`: the frame
+  a robot is described in. The scene converts to Bevy's Y up at the boundary.
+
 ## Running it natively
 
 No robot ships with this repo. Point it at a Semio robot GLB of your own:

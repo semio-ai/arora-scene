@@ -1,10 +1,17 @@
-import type { Backend, FeatureValue, SceneEvent, SceneOptions } from "./types";
+import type {
+  Backend,
+  ControlCommand,
+  FeatureValue,
+  SceneEvent,
+  SceneOptions,
+} from "./types";
 
 /** The wasm module's exports this package uses. */
 interface Module {
   default: (input?: unknown) => Promise<unknown>;
   mount: (canvas: string, glb: Uint8Array, options: string) => void;
   set_value: (target: string, feature: string, values: Float32Array) => void;
+  control: (command: string) => void;
   set_event_handler: (handler: (event: SceneEvent) => void) => void;
 }
 
@@ -38,11 +45,19 @@ export interface SceneHandle {
   /** The canvas the scene draws into, wherever it is currently placed. */
   readonly canvas: HTMLCanvasElement;
   /**
-   * Writes one feature value: `target` an animatable or element id as the
-   * robot's `RobotData` declares it, `feature` as `RobotData` names it
-   * (`rotation`, `translation`, `color`, ...). Drawn in the next frame.
+   * Writes a value. `target` is an animatable's id as the robot's `RobotData`
+   * declares it, which carries its own feature (a joint's value among them),
+   * or an element's id together with the `feature` to change, as `RobotData`
+   * names it (`rotation`, `translation`, `color`, ...). Drawn in the next
+   * frame; before the robot has spawned, in the frame it arrives in.
    */
-  setValue(target: string, feature: string, value: FeatureValue): void;
+  setValue(target: string, value: FeatureValue, feature?: string): void;
+  /**
+   * Adds, removes, shows, hides or moves a control, by the driver's key for
+   * it. A drag on a control moves nothing: it arrives as a `control` event,
+   * and the driver writes the change.
+   */
+  control(command: ControlCommand): void;
   /** Sets where the scene's events go, replacing any earlier handler. */
   onEvent(handler: (event: SceneEvent) => void): void;
 }
@@ -137,9 +152,12 @@ async function start(
   return {
     backend,
     canvas,
-    setValue(target, feature, value) {
+    setValue(target, value, feature) {
       const values = typeof value === "number" ? [value] : value;
-      wasm.set_value(target, feature, Float32Array.from(values));
+      wasm.set_value(target, feature ?? "", Float32Array.from(values));
+    },
+    control(command) {
+      wasm.control(JSON.stringify(command));
     },
     onEvent(handler) {
       wasm.set_event_handler(handler);

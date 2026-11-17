@@ -65,6 +65,25 @@ impl JointBinding {
         }
     }
 
+    /// The joint value the body stands at, read back from its transform: the
+    /// inverse of [`JointBinding::pose`].
+    pub fn value_of(&self, body: &Transform) -> f32 {
+        let moved = match self.motion {
+            JointMotion::Turn => {
+                let (axis, angle) = (self.rest.rotation.inverse() * body.rotation).to_axis_angle();
+                if axis.dot(*self.axis) < 0.0 {
+                    -angle
+                } else {
+                    angle
+                }
+            }
+            JointMotion::Slide => (self.rest.rotation.inverse()
+                * (body.translation - self.rest.translation))
+                .dot(*self.axis),
+        };
+        self.rest_value + moved
+    }
+
     /// The body's transform at joint value `value`.
     pub fn pose(&self, value: f32) -> Transform {
         let moved = value - self.rest_value;
@@ -146,6 +165,20 @@ mod tests {
     fn a_mimic_joint_follows_its_leader_scaled_and_offset() {
         let binding = bind(JointKind::Revolute, 0.0, Some((-2.0, 0.1))).unwrap();
         assert!((binding.joint_value(0.5) - -0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pose_reads_back_as_the_value_that_made_it() {
+        for kind in [JointKind::Revolute, JointKind::Prismatic] {
+            let binding = bind(kind, 0.2, None).unwrap();
+            for value in [-0.7, 0.2, 0.9] {
+                let read = binding.value_of(&binding.pose(value));
+                assert!(
+                    (read - value).abs() < 1e-5,
+                    "{kind:?} at {value}: read {read}"
+                );
+            }
+        }
     }
 
     #[test]

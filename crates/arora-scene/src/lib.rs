@@ -20,6 +20,7 @@
 //! viewport feel bad, and the 99th is what a person notices.
 
 pub mod aurora;
+pub mod controls;
 pub mod instance;
 pub mod joints;
 pub mod redraw;
@@ -195,6 +196,7 @@ impl Plugin for ScenePlugin {
             arora_visuals::active_area::ActiveAreaPlugin,
             values::ValuesPlugin,
         ))
+        .add_plugins(controls::ControlsPlugin)
         .init_resource::<WashChoice>()
         // Read by the scene's gizmo systems; the test window's toggles set it.
         .init_resource::<toggles::GizmoChoice>()

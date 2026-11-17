@@ -18,6 +18,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use arora_scene::controls::{ControlCommand, ControlCommands, ControlEvent, ControlEvents};
 use arora_scene::instance::{RobotMeta, Selected};
 use arora_scene::redraw::RedrawOnChangePlugin;
 use arora_scene::stage::{Environment, Theme};
@@ -206,6 +207,8 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     .add_systems(Update, arora_scene::instance::index_instances)
     .add_systems(Startup, keep_waker)
     .add_systems(Update, take_pushed.before(ApplyValues))
+    // Before Update, where the scene carries control commands out.
+    .add_systems(PreUpdate, take_controls)
     .add_systems(Last, emit_events);
 
     #[cfg(feature = "bench")]
@@ -276,14 +279,21 @@ fn take_pushed(mut writes: ResMut<ValueWrites>) {
     }
 }
 
-/// Writes one feature value: `target` an animatable or element id as the
-/// robot's `RobotData` declares it, `feature` as `RobotData` names it
-/// (`rotation`, `translation`, `color`, ...), and one value or three. Takes
-/// effect in the next frame, which the call wakes the scene to draw.
+/// Writes one value, one number or three, to `target`: an animatable's id as
+/// the robot's `RobotData` declares it, which carries its own feature (a
+/// joint's value among them), or an element's id with the `feature` to change
+/// as `RobotData` names it (`rotation`, `translation`, `color`, ...). An empty
+/// `feature` writes an animatable. Takes effect in the next frame, which the
+/// call wakes the scene to draw.
 #[wasm_bindgen]
 pub fn set_value(target: String, feature: String, values: Vec<f32>) -> Result<(), JsValue> {
-    let feature = FeatureKind::from_name(&feature, &[])
-        .ok_or_else(|| error(format!("unknown feature {feature:?}")))?;
+    let feature = match feature.as_str() {
+        "" => None,
+        name => Some(
+            FeatureKind::from_name(name, &[])
+                .ok_or_else(|| error(format!("unknown feature {feature:?}")))?,
+        ),
+    };
     let value = match values.as_slice() {
         [s] => Decoded::Scalar(*s),
         [x, y, z] => Decoded::Triple([*x, *y, *z]),
@@ -331,6 +341,28 @@ enum SceneEvent<'a> {
         instance: &'a str,
         element: Option<&'a str>,
     },
+    /// A drag on a control: what it asks for. Nothing has moved; the page
+    /// writes the change if it wants it.
+    Control(&'a ControlEvent),
+}
+
+/// Controls waiting for the next frame.
+static CONTROLS: Mutex<Vec<ControlCommand>> = Mutex::new(Vec::new());
+
+/// Adds, removes, shows, hides or moves a control, by a command as JSON (see
+/// the package's `ControlCommand` type). Takes effect in the next frame, or,
+/// before the robot has spawned, in the frame it arrives in.
+#[wasm_bindgen]
+pub fn control(command: String) -> Result<(), JsValue> {
+    let command: ControlCommand = serde_json::from_str(&command).map_err(error)?;
+    CONTROLS.lock().unwrap().push(command);
+    wake();
+    Ok(())
+}
+
+/// Hands the page's control commands to the scene.
+fn take_controls(mut commands: ResMut<ControlCommands>) {
+    commands.0.append(&mut CONTROLS.lock().unwrap());
 }
 
 fn send(event: &SceneEvent) {
@@ -354,7 +386,14 @@ fn send(event: &SceneEvent) {
 /// Sends the frame's overlay when it changed, and every pick since the last
 /// frame. Picks are drained either way, so a page that sets its handler late
 /// does not get a backlog.
-fn emit_events(overlay: Res<Overlay>, mut picks: ResMut<Picks>) {
+fn emit_events(
+    overlay: Res<Overlay>,
+    mut picks: ResMut<Picks>,
+    mut controls: ResMut<ControlEvents>,
+) {
+    for event in std::mem::take(&mut controls.0) {
+        send(&SceneEvent::Control(&event));
+    }
     let picks = std::mem::take(&mut picks.0);
     if SNAPSHOT.swap(false, Ordering::SeqCst) || overlay.is_changed() {
         send(&SceneEvent::Overlay(&overlay.0));

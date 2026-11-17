@@ -93,6 +93,61 @@ export interface OverlayFrame {
   pointer: GizmoInHand | null;
 }
 
+/**
+ * A pose as a driver sees it: Z up, in metres, with the rotation as a
+ * quaternion `[x, y, z, w]`.
+ */
+export interface Pose {
+  position: [number, number, number];
+  /** No turn when absent. */
+  rotation?: [number, number, number, number];
+}
+
+/** What a transform control moves. */
+export type ControlTarget =
+  | { kind: "robot" }
+  /** One element, by the id the robot's `RobotData` gives it. */
+  | { kind: "element"; id: string }
+  /** A goal at `pose`, with nothing drawn but the control: an IK target. */
+  | { kind: "goal"; pose: Pose };
+
+/** A control a driver adds. */
+export type Control =
+  /** A ring or bar on the joint whose value animatable is the control's key. */
+  | { kind: "joint" }
+  | {
+      kind: "transform";
+      target: ControlTarget;
+      /** Every mode when absent. */
+      modes?: ("translate" | "rotate" | "scale")[];
+      /** Handles along the target's own axes rather than the world's. */
+      local?: boolean;
+    };
+
+/** An instruction about one control, by the driver's key for it. */
+export type ControlCommand =
+  | { op: "add"; key: string; control: Control }
+  | { op: "remove"; key: string }
+  | { op: "show"; key: string; visible: boolean }
+  /** Moves a transform control's target to `pose`, in the world. */
+  | { op: "setPose"; key: string; pose: Pose };
+
+/**
+ * A drag on a control: what it asks its target to become. **Nothing has
+ * moved**: the driver writes the joint's value, or sets the pose, if it wants
+ * the change.
+ */
+export interface ControlEvent {
+  key: string;
+  phase: "start" | "move" | "end";
+  /** A joint control's value. */
+  value?: number;
+  /** A transform control's target's pose, in the world. */
+  pose?: Required<Pose>;
+  /** A transform control's target's scale, along its own axes. */
+  scale?: [number, number, number];
+}
+
 /** Something the scene reports, by its `type`. */
 export type SceneEvent =
   /** Sent each frame the overlay changed. */
@@ -101,7 +156,9 @@ export type SceneEvent =
    * A press on the robot: the element under it, or `null` for a press that
    * hit no element.
    */
-  | { type: "pick"; instance: string; element: string | null };
+  | { type: "pick"; instance: string; element: string | null }
+  /** A drag on a control the driver added. */
+  | ({ type: "control" } & ControlEvent);
 
 /**
  * A value for one feature: one number (a joint's angle or travel) or three
