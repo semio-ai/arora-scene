@@ -203,6 +203,8 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   (the key for its joint control), its limits, and how it mimics another. It
   also carries `elements`, each element's id with the name its author gave it
   (`base_link`), so a host that knows a link by name can find its id.
+  `scene.robot` keeps what the event said of the robot showing: the first
+  robot's event can come before a page has set its handler.
   Otherwise it carries `error`, the reason it could not be loaded or was
   replaced. `loadRobot`'s promise settles from it.
 

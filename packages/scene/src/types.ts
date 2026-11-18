@@ -217,6 +217,14 @@ export type SceneEvent =
       elements?: { id: string; name: string }[];
     };
 
+/** The robot showing, as its `robot` event described it. */
+export interface ShownRobot {
+  key: string;
+  joints: Joint[];
+  /** Each element's id with the name its author gave it, `""` where unnamed. */
+  elements: { id: string; name: string }[];
+}
+
 /** One of a robot's joints, as its `RobotData` declares it. */
 export interface Joint {
   name: string;

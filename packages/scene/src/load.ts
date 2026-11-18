@@ -5,6 +5,7 @@ import type {
   Pose,
   SceneEvent,
   SceneOptions,
+  ShownRobot,
 } from "./types";
 
 /** The wasm module's exports this package uses. */
@@ -90,6 +91,13 @@ export interface SceneHandle {
    */
   readonly key: string | undefined;
   /**
+   * The robot showing, with its joints and elements, as its `robot` event
+   * described it: `undefined` while `key` is. The first robot's event can
+   * come before a page has set its handler, so read this rather than rely
+   * on hearing it.
+   */
+  readonly robot: ShownRobot | undefined;
+  /**
    * Where an element of the robot showing stood in the last frame drawn, by
    * its `RobotData` id: Z up, in metres, the rotation a quaternion
    * `[x, y, z, w]`, the frame goal poses are given in. `undefined` for an id
@@ -113,6 +121,8 @@ let running:
        * that failed is never taken for the one showing.
        */
       key?: string;
+      /** What the robot showing's `robot` event said of it. */
+      robot?: ShownRobot;
       handle: Promise<SceneHandle>;
       /**
        * The robot loading, the one the scene started with included, so a
@@ -267,8 +277,15 @@ async function start(
       const robot = robots.get(glb);
       robots.delete(glb);
       if (!robot) return;
-      if (outcome.error === undefined) robot.resolve();
-      else robot.reject(new Error(outcome.error));
+      if (outcome.error === undefined) {
+        if (running)
+          running.robot = {
+            key: robot.key,
+            joints: outcome.joints ?? [],
+            elements: outcome.elements ?? [],
+          };
+        robot.resolve();
+      } else robot.reject(new Error(outcome.error));
       handler?.({ ...outcome, key: robot.key });
     };
   wasm.set_event_handler(dispatch());
@@ -301,6 +318,9 @@ async function start(
     canvas,
     get key() {
       return running?.key;
+    },
+    get robot() {
+      return running?.robot;
     },
     elementPose(element) {
       return wasm.element_pose(element);
