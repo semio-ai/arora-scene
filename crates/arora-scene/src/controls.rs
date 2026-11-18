@@ -162,9 +162,15 @@ pub enum ControlCommand {
         scale: Option<[f32; 3]>,
     },
     /// Changes how a control looks or works, in place: a joint control's
-    /// `color`, a transform control's `colors` and whether it is `local`.
-    /// What is absent stays as it is, and what the control's kind does not
-    /// take is ignored, so one command can recolour controls of both kinds.
+    /// `color`, a transform control's `colors` and whether it is `local`, and
+    /// for either its `opacity` and whether it is `interactive`. What is
+    /// absent stays as it is, and what the control's kind does not take is
+    /// ignored, so one command can recolour controls of both kinds.
+    ///
+    /// `opacity`, from 0 to 1, is eased into over [`FADE_SECS`], so a host
+    /// sends the value it wants once. A control that is not `interactive`
+    /// takes no hover, press or drag, and the pointer reaches the robot and
+    /// the view behind it; a host's highlight still shows on it.
     Configure {
         key: String,
         #[serde(default)]
@@ -173,6 +179,10 @@ pub enum ControlCommand {
         colors: Option<[String; 3]>,
         #[serde(default)]
         local: Option<bool>,
+        #[serde(default)]
+        opacity: Option<f32>,
+        #[serde(default)]
+        interactive: Option<bool>,
     },
     /// Draws a control as the one under the pointer is drawn, or stops: a
     /// host pointing at it from elsewhere. `handle` names one handle of a
@@ -287,7 +297,12 @@ struct Placed {
     target: Option<Entity>,
     /// A goal the control brought with it, which goes when it goes.
     goal: Option<Entity>,
+    /// The opacity the host asked for, which the gizmo's eases toward.
+    opacity: f32,
 }
+
+/// How long a control takes to fade to the opacity a host asks for.
+pub const FADE_SECS: f32 = 0.2;
 
 pub struct ControlsPlugin;
 
@@ -297,10 +312,49 @@ impl Plugin for ControlsPlugin {
             .init_resource::<ControlEvents>()
             .init_resource::<ControlPresses>()
             .init_resource::<Controls>()
-            .add_systems(Update, carry_out)
+            .add_systems(Update, (carry_out, fade).chain())
             .add_observer(report_transform_drag)
             .add_observer(report_joint_drag)
             .add_observer(report_press);
+    }
+}
+
+/// Eases each control's gizmo toward the opacity its host asked for, over
+/// [`FADE_SECS`], asking for frames while any is still on its way.
+///
+/// A step is at most a thirtieth of a second's: the scene draws only on
+/// change, so the first frame after a quiet spell can be seconds after the
+/// one before, which would otherwise take the whole fade in one jump.
+fn fade(
+    time: Res<Time>,
+    controls: Res<Controls>,
+    mut transform_gizmos: Query<&mut TransformGizmo>,
+    mut joint_gizmos: Query<&mut JointGizmo>,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    let step = time.delta_secs().min(1.0 / 30.0) / FADE_SECS;
+    let toward = |now: f32, wanted: f32| now + (wanted - now).clamp(-step, step);
+    let mut fading = false;
+    for placed in controls.0.values() {
+        let opacity = if let Ok(mut gizmo) = transform_gizmos.get_mut(placed.gizmo) {
+            if gizmo.opacity == placed.opacity {
+                continue;
+            }
+            gizmo.opacity = toward(gizmo.opacity, placed.opacity);
+            gizmo.opacity
+        } else if let Ok(mut gizmo) = joint_gizmos.get_mut(placed.gizmo) {
+            if gizmo.opacity == placed.opacity {
+                continue;
+            }
+            gizmo.opacity = toward(gizmo.opacity, placed.opacity);
+            gizmo.opacity
+        } else {
+            continue;
+        };
+        fading |= opacity != placed.opacity;
+    }
+    if fading {
+        redraw.write(RequestRedraw);
     }
 }
 
@@ -402,6 +456,7 @@ fn carry_out(
                             gizmo: commands.spawn(gizmo).id(),
                             target: None,
                             goal: None,
+                            opacity: 1.0,
                         }
                     }
                     Control::Transform {
@@ -456,6 +511,7 @@ fn carry_out(
                             gizmo,
                             target: Some(target),
                             goal,
+                            opacity: 1.0,
                         }
                     }
                 };
@@ -523,6 +579,8 @@ fn carry_out(
                 color,
                 colors,
                 local,
+                opacity,
+                interactive,
             } => {
                 // A control added this frame is spawned at the end of it, so
                 // its gizmo is not there yet; the change waits a frame for
@@ -539,6 +597,8 @@ fn carry_out(
                             color,
                             colors,
                             local,
+                            opacity,
+                            interactive,
                         });
                     } else {
                         log::debug!("no control {key:?} to configure");
@@ -546,7 +606,15 @@ fn carry_out(
                     continue;
                 };
                 again = true;
+                if let (Some(opacity), Some(placed)) = (opacity, controls.0.get_mut(&key)) {
+                    placed.opacity = opacity.clamp(0.0, 1.0);
+                }
+                // Neither kind's own: one command may carry these for both.
+                let common = opacity.is_some() || interactive.is_some();
                 if let Ok(mut gizmo) = transform_gizmos.get_mut(gizmo) {
+                    if let Some(interactive) = interactive {
+                        gizmo.interactive = interactive;
+                    }
                     if let Some(colours) = colors.as_ref().and_then(colours) {
                         gizmo.colours = colours;
                     }
@@ -557,14 +625,17 @@ fn carry_out(
                             GizmoSpace::World
                         };
                     }
-                    if color.is_some() && colors.is_none() && local.is_none() {
+                    if color.is_some() && colors.is_none() && local.is_none() && !common {
                         log::warn!("{key:?} is a transform control; give it colors");
                     }
                 } else if let Ok(mut gizmo) = joint_gizmos.get_mut(gizmo) {
+                    if let Some(interactive) = interactive {
+                        gizmo.interactive = interactive;
+                    }
                     if let Some(colour) = color.as_deref().and_then(colour) {
                         gizmo.colour = colour;
                     }
-                    if color.is_none() && (colors.is_some() || local.is_some()) {
+                    if color.is_none() && (colors.is_some() || local.is_some()) && !common {
                         log::warn!("{key:?} is a joint control; give it a color");
                     }
                 }
@@ -1075,6 +1146,8 @@ mod tests {
                 color: None,
                 colors: Some([hex("#0000ff"), hex("not a colour"), hex("#ff0000")]),
                 local: Some(true),
+                opacity: None,
+                interactive: None,
             },
         );
         let configured = app.world().get::<TransformGizmo>(gizmo).unwrap();
@@ -1099,6 +1172,8 @@ mod tests {
                 color: Some(hex("#00ff00")),
                 colors: None,
                 local: None,
+                opacity: None,
+                interactive: None,
             },
         );
         assert_eq!(
@@ -1183,6 +1258,8 @@ mod tests {
                 color: None,
                 colors: None,
                 local: Some(true),
+                opacity: None,
+                interactive: None,
             },
         ]);
         app.update();
@@ -1223,6 +1300,8 @@ mod tests {
                 color: Some("#ff0000".into()),
                 colors: None,
                 local: None,
+                opacity: None,
+                interactive: None,
             },
         );
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
@@ -1252,6 +1331,91 @@ mod tests {
         app.update();
         let joint = only::<JointGizmo>(&mut app).unwrap();
         assert!(app.world().get::<JointGizmo>(joint).unwrap().show_in_hand);
+    }
+
+    fn configure(key: &str, opacity: Option<f32>, interactive: Option<bool>) -> ControlCommand {
+        ControlCommand::Configure {
+            key: key.into(),
+            color: None,
+            colors: None,
+            local: None,
+            opacity,
+            interactive,
+        }
+    }
+
+    /// A control eases to the opacity its host asks for, over the fade's
+    /// length rather than at once, and stays there; a frame that comes long
+    /// after the last takes one step of it, not the whole fade.
+    #[test]
+    fn a_control_eases_to_the_opacity_asked_for() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let frame = FADE_SECS / 4.0;
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            frame,
+        )));
+        let gizmo = add_goal(&mut app, "goal", None);
+        let opacity = |app: &App| app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        assert_eq!(opacity(&app), 1.0);
+
+        send(&mut app, configure("goal", Some(0.0), None));
+        let first = opacity(&app);
+        assert!(first < 1.0 && first > 0.0, "part of the way: {first}");
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(opacity(&app), 0.0, "and there in the end");
+
+        // A long quiet spell before the next change is one step, not all.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(5)));
+        send(&mut app, configure("goal", Some(1.0), None));
+        let after_a_pause = opacity(&app);
+        assert!(after_a_pause < 1.0, "{after_a_pause}");
+    }
+
+    /// `interactive` reaches either kind of control, and one command can
+    /// carry it for both without a complaint about the other's settings.
+    #[test]
+    fn a_control_can_be_made_inert_and_live_again() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let goal = add_goal(&mut app, "goal", None);
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint { color: None },
+            },
+        );
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        for key in ["goal", TILT] {
+            send(&mut app, configure(key, None, Some(false)));
+        }
+        assert!(!app.world().get::<TransformGizmo>(goal).unwrap().interactive);
+        assert!(!app.world().get::<JointGizmo>(joint).unwrap().interactive);
+        send(&mut app, configure("goal", None, Some(true)));
+        assert!(app.world().get::<TransformGizmo>(goal).unwrap().interactive);
+    }
+
+    /// The JSON a host sends for a fade and an inert control reads as meant.
+    #[test]
+    fn opacity_and_interactive_read_from_json() {
+        let command: ControlCommand = serde_json::from_value(serde_json::json!({
+            "op": "configure", "key": "k", "opacity": 0.3, "interactive": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            command,
+            ControlCommand::Configure {
+                opacity: Some(o),
+                interactive: Some(false),
+                ..
+            } if o == 0.3
+        ));
     }
 
     /// A host's press on a control's handle is reported by the control's

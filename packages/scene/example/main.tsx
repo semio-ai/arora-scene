@@ -188,6 +188,16 @@ function Running({ robot: first }: { robot: Robot }) {
           color: "#f59e0b",
           colors: ["#f59e0b", "#a855f7", "#14b8a6"],
         });
+      case "still":
+      case "live":
+        // What a host does around playback: dim and still a control, then
+        // bring it back.
+        return scene.control({
+          op: "configure",
+          key,
+          opacity: submitter?.value === "still" ? 0.25 : 1,
+          interactive: submitter?.value === "live",
+        });
       case "local":
       case "world":
         return scene.control({
@@ -307,6 +317,12 @@ function Running({ robot: first }: { robot: Robot }) {
             </button>
             <button type="submit" value="recolour" disabled={!scene}>
               Recolour
+            </button>
+            <button type="submit" value="still" disabled={!scene}>
+              Dim and still
+            </button>
+            <button type="submit" value="live" disabled={!scene}>
+              Bring back
             </button>
             <button type="submit" value="local" disabled={!scene}>
               Local axes
