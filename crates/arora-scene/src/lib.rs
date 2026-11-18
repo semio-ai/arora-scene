@@ -756,8 +756,14 @@ pub fn mount_instances(
     app.insert_resource(instance::RobotMeta(meta))
         .insert_resource(instance::Selected(select))
         // Registered by the mount rather than by the plugin, so the system
-        // exists only where the resources it needs do.
-        .add_systems(Update, instance::index_instances);
+        // exists only where the resources it needs do. Before the control
+        // commands, so a robot indexed this frame is there for both passes:
+        // one indexed between them would leave a change sent with an add a
+        // pass short, and the control showing a frame without it.
+        .add_systems(
+            Update,
+            instance::index_instances.before(controls::ControlSystems::Commands),
+        );
 }
 
 /// Builds the screen the robot declares and hands back the texture it shows.

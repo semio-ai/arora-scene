@@ -897,17 +897,20 @@ mod tests {
     }
 
     fn robot(app: &mut App, body: Entity) {
-        let camera = app
-            .world_mut()
+        spawn_robot(app.world_mut(), body);
+    }
+
+    fn spawn_robot(world: &mut World, body: Entity) {
+        let camera = world
             .query_filtered::<Entity, With<OrbitCamera>>()
-            .single(app.world())
+            .single(world)
             .unwrap();
         let mut rig = JointRig::default();
         rig.0.insert(
             TILT.into(),
             vec![JointBinding::new(&tilt(), body, Transform::default()).unwrap()],
         );
-        app.world_mut().spawn((
+        world.spawn((
             rig,
             EntityInstance {
                 id: "robot-0".into(),
@@ -1709,6 +1712,42 @@ mod tests {
             app.update();
         }
         assert_eq!(opacity(&app), 0.5);
+    }
+
+    /// A robot that arrives through commands before the passes, as one the
+    /// mount indexes does, leaves both passes to a control waiting on it: a
+    /// change sent with its add holds from the control's first frame.
+    #[test]
+    fn a_control_waiting_on_its_robot_first_shows_as_asked() {
+        #[derive(Resource)]
+        struct Arriving(Option<Entity>);
+
+        let (mut app, body) = scene();
+        {
+            let mut asked = app.world_mut().resource_mut::<ControlCommands>();
+            asked.0.push(ControlCommand::Add {
+                key: "goal".into(),
+                control: goal_at([0.0, 0.0, 1.0]),
+            });
+            asked.0.push(configure("goal", Some(0.25), Some(false)));
+        }
+        app.update();
+        assert!(only::<TransformGizmo>(&mut app).is_none(), "no robot yet");
+
+        app.insert_resource(Arriving(Some(body)));
+        app.add_systems(
+            Update,
+            (|mut arriving: ResMut<Arriving>, mut commands: Commands| {
+                if let Some(body) = arriving.0.take() {
+                    commands.queue(move |world: &mut World| spawn_robot(world, body));
+                }
+            })
+            .before(ControlSystems::Commands),
+        );
+        app.update();
+        let gizmo = only::<TransformGizmo>(&mut app).expect("added with the robot");
+        let gizmo = app.world().get::<TransformGizmo>(gizmo).unwrap();
+        assert_eq!((gizmo.opacity, gizmo.interactive), (0.25, false));
     }
 
     /// A control dimmed while hidden takes the opacity at once, so it first
