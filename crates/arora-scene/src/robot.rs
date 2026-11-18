@@ -368,7 +368,7 @@ mod tests {
     /// A GLB holding only `json`, as its JSON chunk.
     fn glb(json: serde_json::Value) -> Vec<u8> {
         let mut chunk = serde_json::to_vec(&json).unwrap();
-        while chunk.len() % 4 != 0 {
+        while !chunk.len().is_multiple_of(4) {
             chunk.push(b' ');
         }
         let mut bytes = Vec::new();
