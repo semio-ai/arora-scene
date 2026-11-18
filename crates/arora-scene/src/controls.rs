@@ -335,8 +335,11 @@ impl Plugin for ControlsPlugin {
             // a change sent with its control's add then takes hold the
             // frame the control first shows, rather than one frame later,
             // live and at full strength in between. Both before the
-            // gizmos' own pointer handling, so a press in the frame a
-            // control is made inert finds it inert.
+            // gizmos' own drag handling, so a left press in the frame a
+            // control is made inert does not take it. A press with another
+            // button is reported in `PreUpdate`, before either pass, so one
+            // in that frame can still reach the host: a press and a change
+            // arriving between the same two frames have no order to keep.
             .add_systems(
                 Update,
                 (carry_out, carry_out, fade)
