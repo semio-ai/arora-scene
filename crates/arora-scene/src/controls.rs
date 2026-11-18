@@ -168,10 +168,10 @@ pub enum ControlCommand {
     /// absent stays as it is, and what the control's kind does not take is
     /// ignored, so one command can recolour controls of both kinds.
     ///
-    /// `opacity`, from 0 to 1, is faded to evenly over [`FADE_SECS`] (longer while
-    /// frames come slower than thirty a second), so a host sends the value it
-    /// wants once. It is how the control looks only: a faded control still
-    /// takes the pointer. A control that is not `interactive` takes no hover,
+    /// `opacity`, from 0 to 1, is faded to evenly over [`FADE_SECS`] (longer
+    /// while frames come slower than thirty a second), so a host sends the
+    /// value it wants once. It is how the control looks only: a faded control
+    /// still takes the pointer. A control that is not `interactive` takes no hover,
     /// press or drag, the pointer reaches the robot and the view behind it,
     /// and a drag in hand ends; a host's highlight still shows on it.
     Configure {
@@ -365,9 +365,9 @@ impl Plugin for ControlsPlugin {
     }
 }
 
-/// Fades each control's gizmo evenly from where its fade began to the opacity its
-/// host asked for, over [`FADE_SECS`], asking for frames while any fade is
-/// still under way.
+/// Fades each control's gizmo evenly from where its fade began to the opacity
+/// its host asked for, over [`FADE_SECS`], asking for frames while any fade
+/// is still under way.
 ///
 /// A step is at most a thirtieth of a second's: the scene draws only on
 /// change, so the first frame after a quiet spell can be seconds after the
