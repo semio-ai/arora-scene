@@ -304,9 +304,10 @@ struct Placed {
     opacity: f32,
     /// The fade toward `opacity` under way, if one is.
     fade: Option<Fade>,
-    /// Whether its gizmo has been drawn. Until it has, an opacity asked for
-    /// is taken at once rather than faded to, so a control added dimmed
-    /// never shows at full strength.
+    /// Whether its gizmo showed in the last frame: drawn, and not hidden by
+    /// the host. While it does not, an opacity asked for is taken at once
+    /// rather than faded to, so a control added dimmed, or dimmed while
+    /// hidden, never shows at full strength on its way there.
     shown: bool,
 }
 
@@ -364,13 +365,14 @@ fn fade(
     mut controls: ResMut<Controls>,
     mut transform_gizmos: Query<&mut TransformGizmo>,
     mut joint_gizmos: Query<&mut JointGizmo>,
+    hidden: Query<(), With<HiddenByDriver>>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     let step = time.delta_secs().min(1.0 / 30.0);
     let mut fading = false;
     for placed in controls.0.values_mut() {
-        // Drawn after this, in the frame's own `PostUpdate`.
-        placed.shown = true;
+        // Drawn after this, in the frame's own `PostUpdate`, unless hidden.
+        placed.shown = !hidden.contains(placed.gizmo);
         let Some(fade) = placed.fade.as_mut() else {
             continue;
         };
@@ -438,7 +440,7 @@ fn carry_out(
         })
         .collect();
     // Whether a change for `key` should wait: for its control's gizmo, which
-    // an add this frame spawns at the end of it, or for an add still to come.
+    // an add spawns at the end of its pass, or for an add still to come.
     // Anything else is for a key nothing will add, such as one whose control
     // went with a swapped robot, and waiting would hold it, and the frames it
     // asks for, for good.
@@ -447,7 +449,7 @@ fn carry_out(
     };
     let mut waiting = Vec::new();
     // Whether to draw another frame: for a command that changed something, or
-    // one waiting on a gizmo spawned at the end of this one.
+    // one waiting on a gizmo spawned at the end of this pass.
     let mut again = false;
     for command in asked {
         again |= !matches!(
@@ -590,9 +592,9 @@ fn carry_out(
             },
             ControlCommand::SetPose { key, pose, scale } => {
                 let target = controls.0.get(&key).and_then(|p| p.target);
-                // A goal added this frame is spawned at the end of it, so it
-                // has no transform yet; the pose waits a frame for it, as one
-                // set before the add would.
+                // A goal added in this pass is spawned at the end of it, so it
+                // has no transform yet; the pose waits for the second pass, as
+                // one set before the add would.
                 let Some((target, mut transform)) =
                     target.and_then(|t| transforms.get_mut(t).ok().map(|tr| (t, tr)))
                 else {
@@ -1575,6 +1577,39 @@ mod tests {
         assert_eq!(app.world().resource::<Seen>().0, [true]);
         send(&mut app, configure("goal", None, Some(false)));
         assert_eq!(app.world().resource::<Seen>().0, [true, false]);
+    }
+
+    /// A control dimmed while hidden takes the opacity at once, so it first
+    /// shows at it, not fading down from where it was.
+    #[test]
+    fn a_control_dimmed_while_hidden_shows_at_it() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        {
+            let mut asked = app.world_mut().resource_mut::<ControlCommands>();
+            asked.0.push(ControlCommand::Add {
+                key: "goal".into(),
+                control: goal_at([0.0, 0.0, 1.0]),
+            });
+            asked.0.push(ControlCommand::Show {
+                key: "goal".into(),
+                visible: false,
+            });
+        }
+        app.update();
+        app.update();
+        let gizmo = only::<TransformGizmo>(&mut app).unwrap();
+        {
+            let mut asked = app.world_mut().resource_mut::<ControlCommands>();
+            asked.0.push(configure("goal", Some(0.25), None));
+            asked.0.push(ControlCommand::Show {
+                key: "goal".into(),
+                visible: true,
+            });
+        }
+        app.update();
+        let opacity = app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        assert_eq!(opacity, 0.25);
     }
 
     /// An opacity outside 0 to 1 is held to it, rather than reaching the
