@@ -10,10 +10,17 @@ import { createRoot } from "react-dom/client";
 import {
   Scene,
   type Backend,
+  type Joint,
   type OverlayFrame,
   type SceneEvent,
   type SceneHandle,
 } from "../src";
+
+/** A robot's bytes and the key that names the model. */
+interface Robot {
+  glb: Uint8Array;
+  key: string;
+}
 
 /** `?backend=webgl2` or `?backend=webgpu` forces one; otherwise the page chooses. */
 function backendParam(): Backend | undefined {
@@ -27,7 +34,7 @@ function backendParam(): Backend | undefined {
  * URL, or choose a file.
  */
 function Example() {
-  const [glb, setGlb] = useState<Uint8Array>();
+  const [robot, setRobot] = useState<Robot>();
   const [error, setError] = useState<string>();
 
   // A robot named in the URL loads without a click.
@@ -40,11 +47,11 @@ function Example() {
             ? r.arrayBuffer()
             : Promise.reject(new Error(`${url}: ${r.status}`)),
         )
-        .then((bytes) => setGlb(new Uint8Array(bytes)))
+        .then((bytes) => setRobot({ glb: new Uint8Array(bytes), key: url }))
         .catch((e: unknown) => setError(String(e)));
   }, []);
 
-  if (!glb)
+  if (!robot)
     return (
       <div style={{ padding: 24 }}>
         <p>
@@ -56,18 +63,24 @@ function Example() {
           accept=".glb,model/gltf-binary"
           onChange={async (e) => {
             const file = e.target.files?.[0];
-            if (file) setGlb(new Uint8Array(await file.arrayBuffer()));
+            if (file)
+              setRobot({
+                glb: new Uint8Array(await file.arrayBuffer()),
+                key: `${file.name} ${file.size} ${file.lastModified}`,
+              });
           }}
         />
         {error && <p style={{ color: "#f87171" }}>{error}</p>}
       </div>
     );
-  return <Running glb={glb} />;
+  return <Running robot={robot} />;
 }
 
-function Running({ glb: first }: { glb: Uint8Array }) {
-  // A different robot here swaps it in the running scene.
-  const [glb, setGlb] = useState(first);
+function Running({ robot: first }: { robot: Robot }) {
+  // A robot under a different key here swaps it in the running scene.
+  const [robot, setRobot] = useState(first);
+  const [joints, setJoints] = useState<Joint[]>([]);
+  const [pose, setPose] = useState<string>();
   const [scene, setScene] = useState<SceneHandle>();
   const [overlay, setOverlay] = useState<OverlayFrame>();
   const [log, setLog] = useState<string[]>([]);
@@ -84,9 +97,19 @@ function Running({ glb: first }: { glb: Uint8Array }) {
     if (event.type === "overlay") return setOverlay(event);
     if (event.type === "pick")
       return note(`pick ${event.instance} ${event.element ?? "(no element)"}`);
-    if (event.type === "robot")
+    if (event.type === "robot") {
+      if (event.joints) setJoints(event.joints);
       return note(
-        event.error ? `robot refused: ${event.error}` : `robot ${event.glb}`,
+        event.error
+          ? `robot ${event.key} refused: ${event.error}`
+          : `robot ${event.key} showing`,
+      );
+    }
+    if (event.type === "controlPress")
+      return note(
+        `${event.button} press on ${event.key.slice(0, 8)} ${JSON.stringify(
+          event.handle,
+        )} at ${event.position.map((v) => Math.round(v)).join(",")}`,
       );
     const scene = sceneRef.current;
     if (event.phase !== "move")
@@ -150,6 +173,28 @@ function Running({ glb: first }: { glb: Uint8Array }) {
         });
       case "remove":
         return scene.control({ op: "remove", key });
+      case "highlight":
+      case "unhighlight":
+        return scene.control({
+          op: "highlight",
+          key,
+          on: submitter?.value === "highlight",
+        });
+      case "recolour":
+        // Every kind takes the colour it can: a joint one, a transform three.
+        return scene.control({
+          op: "configure",
+          key,
+          color: "#f59e0b",
+          colors: ["#f59e0b", "#a855f7", "#14b8a6"],
+        });
+      case "local":
+      case "world":
+        return scene.control({
+          op: "configure",
+          key,
+          local: submitter?.value === "local",
+        });
     }
   };
 
@@ -164,7 +209,8 @@ function Running({ glb: first }: { glb: Uint8Array }) {
     >
       {shown ? (
         <Scene
-          glb={glb}
+          glb={robot.glb}
+          robotKey={robot.key}
           backend={backendParam()}
           options={{ environment: "sky" }}
           onReady={ready}
@@ -201,15 +247,21 @@ function Running({ glb: first }: { glb: Uint8Array }) {
             accept=".glb,model/gltf-binary"
             onChange={async (e) => {
               const file = e.target.files?.[0];
-              if (file) setGlb(new Uint8Array(await file.arrayBuffer()));
+              if (file)
+                setRobot({
+                  glb: new Uint8Array(await file.arrayBuffer()),
+                  key: `${file.name} ${file.size} ${file.lastModified}`,
+                });
             }}
           />
           <button
             type="button"
             disabled={!scene}
-            onClick={() => setGlb(new Uint8Array(glb))}
+            onClick={() =>
+              setRobot((r) => ({ glb: r.glb, key: `${r.key} (again)` }))
+            }
           >
-            Load this robot again
+            Load this robot again, under a new key
           </button>
           <form
             style={{ display: "flex", gap: 8 }}
@@ -218,7 +270,10 @@ function Running({ glb: first }: { glb: Uint8Array }) {
               const url = String(new FormData(e.currentTarget).get("url"));
               const response = await fetch(url);
               if (!response.ok) return note(`${url}: ${response.status}`);
-              setGlb(new Uint8Array(await response.arrayBuffer()));
+              setRobot({
+                glb: new Uint8Array(await response.arrayBuffer()),
+                key: url,
+              });
             }}
           >
             <input name="url" placeholder="robot URL" required />
@@ -243,6 +298,23 @@ function Running({ glb: first }: { glb: Uint8Array }) {
           <button type="submit" value="remove" disabled={!scene}>
             Remove
           </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="submit" value="highlight" disabled={!scene}>
+              Highlight
+            </button>
+            <button type="submit" value="unhighlight" disabled={!scene}>
+              Unhighlight
+            </button>
+            <button type="submit" value="recolour" disabled={!scene}>
+              Recolour
+            </button>
+            <button type="submit" value="local" disabled={!scene}>
+              Local axes
+            </button>
+            <button type="submit" value="world" disabled={!scene}>
+              World axes
+            </button>
+          </div>
           <label>
             <input
               type="checkbox"
@@ -252,6 +324,33 @@ function Running({ glb: first }: { glb: Uint8Array }) {
             Write drags back, as a driver would
           </label>
         </form>
+        <h4>Joints</h4>
+        <ul style={{ paddingLeft: 16 }}>
+          {joints.map((joint) => (
+            <li key={joint.name}>
+              {joint.name} ({joint.kind})
+              {joint.animatable && <code> {joint.animatable.slice(0, 8)}</code>}
+              {joint.mimic && " mimics"}
+            </li>
+          ))}
+        </ul>
+        <form
+          style={{ display: "flex", gap: 8 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            const element = String(
+              new FormData(e.currentTarget).get("element"),
+            );
+            const found = scene?.elementPose(element);
+            setPose(found ? JSON.stringify(found) : "no such element");
+          }}
+        >
+          <input name="element" placeholder="element id" required />
+          <button type="submit" disabled={!scene}>
+            Where is it?
+          </button>
+        </form>
+        {pose && <pre style={{ whiteSpace: "pre-wrap" }}>{pose}</pre>}
         <h4>Pointer</h4>
         <pre>{hovered ? JSON.stringify(hovered, null, 1) : "none"}</pre>
         <h4>Events</h4>

@@ -228,7 +228,11 @@ impl Plugin for ScenePlugin {
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
         .init_resource::<RobotOutcomes>()
-        .add_systems(PreUpdate, (begin_swap, finish_swap).chain())
+        .init_resource::<FirstRobot>()
+        .add_systems(
+            PreUpdate,
+            (report_first_robot, begin_swap, finish_swap).chain(),
+        )
         .add_systems(
             Update,
             (
@@ -978,11 +982,40 @@ pub struct NextRobot {
     pub joints: Vec<robot::Joint>,
 }
 
-/// How a robot swap ended, for the host that asked for it: `Ok` with the
-/// robot's `glb` once it is showing, `Err` with the `glb` and why it could not
-/// be loaded, the old robot still showing.
+/// How each robot the scene was given ended up, the one it started with
+/// included, in the order they ended: `Ok` once it is showing, `Err` with
+/// its `glb` and why it could not be loaded or was replaced, the old robot
+/// still showing.
 #[derive(Resource, Default)]
-pub struct RobotOutcomes(pub Vec<Result<String, (String, String)>>);
+pub struct RobotOutcomes(pub Vec<Result<Shown, (String, String)>>);
+
+/// A robot that is now showing: its `glb`, and its own joints, which are not
+/// necessarily [`joints::RobotJoints`] by the time a host reads this, since a
+/// later robot may have replaced it in the same frame.
+pub struct Shown {
+    pub glb: String,
+    pub joints: Vec<robot::Joint>,
+    /// Its elements, as `(id, name)`: the name is what the author called
+    /// the element (a link's `base_link`), empty where unnamed.
+    pub elements: Vec<(String, String)>,
+}
+
+/// An asset's elements as `(id, name)`, for [`Shown`].
+fn named(meta: &arora_visuals::meta::AssetMeta) -> Vec<(String, String)> {
+    meta.elements
+        .iter()
+        .map(|element| (element.id.clone(), element.name.clone()))
+        .collect()
+}
+
+/// Whether how the robot the scene started with ended up has been reported.
+/// Whichever of [`report_first_robot`] and [`finish_swap`] settles it first
+/// does, so a swap that overtakes the first robot reports it replaced before
+/// reporting itself.
+#[derive(Resource, Default)]
+struct FirstRobot {
+    reported: bool,
+}
 
 /// A robot loading in the background to replace the one showing. It is not
 /// indexed, drawn or driven until it has loaded whole.
@@ -1020,10 +1053,7 @@ fn begin_swap(
         for &root in &earlier.roots {
             commands.entity(root).despawn();
         }
-        outcomes.0.push(Err((
-            earlier.glb.clone(),
-            REPLACED.into(),
-        )));
+        outcomes.0.push(Err((earlier.glb.clone(), REPLACED.into())));
     }
     let roots = spawn_robot_roots(
         &mut commands,
@@ -1066,6 +1096,7 @@ fn finish_swap(
     mut framing: ResMut<Framing>,
     mut selections: ResMut<arora_visuals::select::Selections>,
     mut outcomes: ResMut<RobotOutcomes>,
+    mut first: ResMut<FirstRobot>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -1082,7 +1113,9 @@ fn finish_swap(
             for &root in &pending.roots {
                 commands.entity(root).despawn();
             }
-            outcomes.0.push(Err((pending.glb.clone(), error.to_string())));
+            outcomes
+                .0
+                .push(Err((pending.glb.clone(), error.to_string())));
             commands.remove_resource::<PendingRobot>();
             return;
         }
@@ -1119,13 +1152,62 @@ fn finish_swap(
     commands.insert_resource(instance::Selected(Vec::new()));
     commands.insert_resource(instance::RobotMeta(pending.meta.clone()));
     commands.insert_resource(joints::RobotJoints(pending.joints.clone()));
+    // While no swap has finished, `spec` still names the first robot.
+    if !first.reported {
+        first.reported = true;
+        outcomes.0.push(Err((spec.glb.clone(), REPLACED.into())));
+    }
     spec.glb = pending.glb.clone();
     census.taken = false;
     census.since = frames.elapsed;
     framing.fitted = false;
-    outcomes.0.push(Ok(pending.glb.clone()));
+    outcomes.0.push(Ok(Shown {
+        glb: pending.glb.clone(),
+        joints: pending.joints.clone(),
+        elements: named(&pending.meta),
+    }));
     commands.remove_resource::<PendingRobot>();
     log::info!("swapped in {}", pending.glb);
+}
+
+/// Reports how the robot the scene started with ended up, once: `Ok` once it
+/// has loaded whole and spawned, `Err` if it failed to load or a swap
+/// replaced it first. A host learns that the first robot is showing the same
+/// way it learns that a swapped one is.
+fn report_first_robot(
+    mut first: ResMut<FirstRobot>,
+    spec: Res<RobotSpec>,
+    joints: Option<Res<joints::RobotJoints>>,
+    meta: Option<Res<instance::RobotMeta>>,
+    assets: Res<AssetServer>,
+    roots: Query<(&WorldAssetRoot, Has<Children>), Without<Incoming>>,
+    mut outcomes: ResMut<RobotOutcomes>,
+) {
+    // Until a swap has finished, the robot showing, or loading to show, is
+    // the one `spec` names; a swap that finishes reports it itself.
+    if first.reported {
+        return;
+    }
+    let mut spawned = !roots.is_empty();
+    for (scene, has_children) in &roots {
+        if let Some(RecursiveDependencyLoadState::Failed(error)) =
+            assets.get_recursive_dependency_load_state(scene.0.id())
+        {
+            log::warn!("could not load {}: {error}", spec.glb);
+            first.reported = true;
+            outcomes.0.push(Err((spec.glb.clone(), error.to_string())));
+            return;
+        }
+        spawned &= has_children;
+    }
+    if spawned {
+        first.reported = true;
+        outcomes.0.push(Ok(Shown {
+            glb: spec.glb.clone(),
+            joints: joints.map(|j| j.0.clone()).unwrap_or_default(),
+            elements: meta.map(|m| named(&m.0)).unwrap_or_default(),
+        }));
+    }
 }
 
 /// Where the camera is kept above, as Studio keeps its camera a centimetre

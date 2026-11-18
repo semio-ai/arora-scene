@@ -112,7 +112,11 @@ export type ControlTarget =
 /** A control a driver adds. */
 export type Control =
   /** A ring or bar on the joint whose value animatable is the control's key. */
-  | { kind: "joint" }
+  | {
+      kind: "joint";
+      /** A CSS hex colour (`"#22c55e"`); the joint's own when absent. */
+      color?: string;
+    }
   | {
       kind: "transform";
       target: ControlTarget;
@@ -120,6 +124,8 @@ export type Control =
       modes?: ("translate" | "rotate" | "scale")[];
       /** Handles along the target's own axes rather than the world's. */
       local?: boolean;
+      /** The X, Y and Z handles' CSS hex colours; red, green, blue when absent. */
+      colors?: [string, string, string];
     };
 
 /** An instruction about one control, by the driver's key for it. */
@@ -134,7 +140,25 @@ export type ControlCommand =
       pose: Pose;
       /** The target's scale along its own axes; kept as it is when absent. */
       scale?: [number, number, number];
-    };
+    }
+  /**
+   * Changes a control in place: a joint control's `color`, a transform
+   * control's `colors` and `local`. What is absent stays as it is.
+   */
+  | {
+      op: "configure";
+      key: string;
+      color?: string;
+      colors?: [string, string, string];
+      local?: boolean;
+    }
+  /**
+   * Draws a control as the one under the pointer is drawn, or stops: for a
+   * host pointing at it from elsewhere, such as its row in a list. `handle`
+   * names one handle of a transform control, as the overlay names it; the
+   * whole control when absent.
+   */
+  | { op: "highlight"; key: string; handle?: GizmoHandle; on: boolean };
 
 /**
  * A drag on a control: what it asks its target to become. **Nothing has
@@ -164,11 +188,65 @@ export type SceneEvent =
   /** A drag on a control the driver added. */
   | ({ type: "control" } & ControlEvent)
   /**
-   * How a robot swap ended: `error` is absent once the robot is showing, and
-   * says why it could not load otherwise, the old robot still showing.
-   * `loadRobot`'s promise settles from this; `glb` is the swap's id.
+   * A press with a button other than the primary on a control's handle,
+   * which is the host's to act on: it moves nothing and turns no view.
+   * `position` is in the canvas's CSS pixels. A right-click over a control
+   * also reaches the page as an ordinary `contextmenu` event, not prevented,
+   * so a context menu wrapped around `<Scene>` opens there.
    */
-  | { type: "robot"; glb: string; error?: string };
+  | {
+      type: "controlPress";
+      key: string;
+      handle: GizmoHandle;
+      button: "secondary" | "middle";
+      position: [number, number];
+    }
+  /**
+   * How a robot the scene was given ended up, the one it started with
+   * included, by the key the host gave it. Once it is showing, `error` is
+   * absent, `joints` lists its joints and `elements` its elements, each with
+   * the name its author gave it (`""` where unnamed). Otherwise `error` says
+   * why it could not be loaded or what replaced it, the old robot still
+   * showing. `loadRobot`'s promise settles from this.
+   */
+  | {
+      type: "robot";
+      key: string;
+      error?: string;
+      joints?: Joint[];
+      elements?: { id: string; name: string }[];
+    };
+
+/** The robot showing, as its `robot` event described it. */
+export interface ShownRobot {
+  key: string;
+  joints: Joint[];
+  /** Each element's id with the name its author gave it, `""` where unnamed. */
+  elements: { id: string; name: string }[];
+}
+
+/** One of a robot's joints, as its `RobotData` declares it. */
+export interface Joint {
+  name: string;
+  kind: "revolute" | "continuous" | "prismatic" | "fixed";
+  /** The element the joint moves, by its `RobotData` id. */
+  element: string;
+  /**
+   * The animatable to write with `setValue` to move it, and the key of its
+   * joint control. Absent for a joint that is not animated; joints that mimic
+   * one another share their leader's.
+   */
+  animatable?: string;
+  /**
+   * Present on a joint that follows another: it stands at
+   * `value * multiplier + offset` of its animatable's value.
+   */
+  mimic?: { multiplier: number; offset: number };
+  /** The limits, absent where the joint has none. */
+  min?: number;
+  max?: number;
+  default: number;
+}
 
 /**
  * A value for one feature: one number (a joint's angle or travel) or three

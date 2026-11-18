@@ -115,9 +115,10 @@ pub struct Stage {
 /// one: `-log2(1.2)`.
 pub const UNIT_EV100: f32 = -0.263_034_4;
 
-/// How far the main camera must see: past the floor's edge and out to the sky
-/// dome. A flat floor meets the horizon only at infinity, so at a shorter reach
-/// a band of whatever lies beyond would show beneath the horizon.
+/// How far the main camera must see: out to the sky dome, whose ground colour
+/// below the horizon carries the floor on past its edge. A flat floor meets
+/// the horizon only at infinity, so at a shorter reach a band of whatever lies
+/// beyond would show beneath the horizon.
 pub const GROUND_REACH: f32 = 100_000.0;
 
 /// The sky dome's radius, inside the camera's reach so it is never clipped.
@@ -125,6 +126,18 @@ const DOME_RADIUS: f32 = GROUND_REACH * 0.5;
 
 /// The floor's height: zero, where Studio's grid lies.
 pub const FLOOR_HEIGHT: f32 = 0.0;
+
+/// How far the floor reaches from the point beneath the camera, which it is
+/// kept centred on. Small enough that every triangle of it is small: the
+/// floor's grid and depth are interpolated across its triangles, and across
+/// ones kilometres wide that interpolation is only good to millimetres or
+/// worse, so the grid shimmers and the floor's line on a robot standing in it
+/// moves as the camera does. Large enough to outreach what the floor shows:
+/// its grid fades out within `FloorUniform::fade_distance` of the camera, and
+/// a shadow far beyond that is a speck. Past the edge the sky's ground colour
+/// carries on, which is the floor's own wherever it is lit, so the edge does
+/// not show.
+const FLOOR_REACH: f32 = 1_000.0;
 
 /// The light theme's ink: its grid's major lines, and what a ghost is washed
 /// toward on the light ground, so a ghost reads against it as everything
@@ -421,7 +434,29 @@ impl Plugin for StagePlugin {
                 reach_shadows,
             )
                 .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            keep_floor_under_camera.before(bevy::transform::TransformSystems::Propagate),
         );
+    }
+}
+
+/// Keeps the floor centred beneath the camera, at its height, wherever the
+/// camera goes ([`FLOOR_REACH`]). The grid is drawn from world positions, so
+/// it stays put on the ground as the floor moves under it.
+fn keep_floor_under_camera(
+    cameras: Query<&Transform, (With<OrbitCamera>, Without<Floor>)>,
+    mut floors: Query<&mut Transform, With<Floor>>,
+) {
+    let Some(camera) = cameras.iter().next() else {
+        return;
+    };
+    let under = Vec3::new(camera.translation.x, FLOOR_HEIGHT, camera.translation.z);
+    for mut floor in &mut floors {
+        if floor.translation != under {
+            floor.translation = under;
+        }
     }
 }
 
@@ -479,7 +514,7 @@ fn build_stage(
             meshes.add(
                 Plane3d::default()
                     .mesh()
-                    .size(2.0 * DOME_RADIUS, 2.0 * DOME_RADIUS),
+                    .size(2.0 * FLOOR_REACH, 2.0 * FLOOR_REACH),
             ),
         ),
         MeshMaterial3d(floors.add(FloorMaterial::default())),
@@ -662,6 +697,28 @@ mod tests {
         world.spawn((MeshMaterial3d(sky), Dome));
         world.spawn((MeshMaterial3d(floor), Floor));
         (world, main, anchor)
+    }
+
+    /// The floor stays beneath the camera at its own height, wherever the
+    /// camera goes, so the camera never looks past its edge nearby.
+    #[test]
+    fn the_floor_follows_the_camera_across_the_ground() {
+        let mut world = World::new();
+        let camera = world
+            .spawn((Transform::from_xyz(3000.0, 40.0, -2500.0), OrbitCamera))
+            .id();
+        let floor = world.spawn((Transform::default(), Floor)).id();
+        world.run_system_once(keep_floor_under_camera).unwrap();
+        assert_eq!(
+            world.get::<Transform>(floor).unwrap().translation,
+            Vec3::new(3000.0, FLOOR_HEIGHT, -2500.0)
+        );
+        world.get_mut::<Transform>(camera).unwrap().translation = Vec3::new(-7.0, 2.0, 5.0);
+        world.run_system_once(keep_floor_under_camera).unwrap();
+        assert_eq!(
+            world.get::<Transform>(floor).unwrap().translation,
+            Vec3::new(-7.0, FLOOR_HEIGHT, 5.0)
+        );
     }
 
     fn stage(environment: Environment, lighting: Lighting, theme: Theme) -> Stage {

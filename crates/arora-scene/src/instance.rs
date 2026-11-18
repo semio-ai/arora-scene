@@ -54,6 +54,12 @@ type Unindexed = (
     Without<crate::Incoming>,
 );
 
+/// The id of a copy of the robot's [`EntityInstance`]: `robot-0` for the
+/// first, the one a host that draws a single robot reads.
+pub fn instance_id(copy: usize) -> String {
+    format!("robot-{copy}")
+}
+
 /// Joins each spawned robot's elements to its entities, once its scene exists.
 ///
 /// Runs until each root is indexed, because a glTF scene spawns
@@ -179,7 +185,7 @@ pub fn index_instances(
             }
         }
 
-        let id = format!("robot-{copy}");
+        let id = instance_id(copy);
         if !selected.0.is_empty() {
             selections.0.insert(id.clone(), selected.0.clone());
         }

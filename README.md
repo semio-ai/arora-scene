@@ -59,6 +59,7 @@ import { Scene, type SceneHandle, type SceneEvent } from "@semio/scene";
 
 <Scene
   glb={bytes}                       // the robot's GLB, as a Uint8Array
+  robotKey={assetId}                // names the model: what decides a swap
   options={{ environment: "sky" }}  // SceneOptions, read once
   onReady={(scene) => drive(scene)} // the SceneHandle
   onEvent={(event) => hear(event)}  // overlay, pick and control events
@@ -66,7 +67,7 @@ import { Scene, type SceneHandle, type SceneEvent } from "@semio/scene";
 />;
 ```
 
-`mountScene(container, glb, options)` and `unmountScene(container)` do the
+`mountScene(container, glb, key, options)` and `unmountScene(container)` do the
 same without React; `chooseBackend()` says which backend a page would get.
 
 ### The scene's life
@@ -80,8 +81,13 @@ same without React; `chooseBackend()` says which backend a page would get.
   from then on the first neither drives the scene nor receives its events.
 - **`options` are read once**, when the page's scene first starts. A later
   `<Scene>`'s options are ignored.
-- **A different `glb` swaps the robot** in the running scene, as
-  `scene.loadRobot(glb)` does. The new robot loads beside the old, which keeps
+- **A robot is named by a key the host gives it**: Studio's asset id, a
+  content hash, any string kept stable for the same model. The key, never the
+  bytes, decides whether a robot is a different one, so the same file fetched
+  twice is one robot. **Change a robot's bytes and its key together**: a key
+  changed ahead of its bytes swaps in the old bytes under it.
+- **A different `robotKey` swaps the robot** in the running scene, as
+  `scene.loadRobot(glb, key)` does. The new robot loads beside the old, which keeps
   showing; once it has loaded whole it takes the old one's place. The old
   robot goes with every control on it (joint controls, and transform controls
   on the robot or its elements) and its selection, and the new one is measured
@@ -89,11 +95,13 @@ same without React; `chooseBackend()` says which backend a page would get.
 - **A robot that cannot be loaded is refused, and the old one kept.**
   `loadRobot` returns a promise that resolves once the new robot is showing
   and rejects with the reason it could not be read or loaded; `<Scene>`
-  passes that reason to `onError`, and does not retry the same bytes. A robot
+  passes that reason to `onError`, and does not retry the same key. A robot
   asked for while another is still loading replaces it, and the earlier
   promise rejects. **The robot asked for last is the one left showing**, the
-  one already showing included: asking for it again while another loads
-  replaces the one loading. `scene.glb` is the robot showing.
+  one already showing included: asking for its key again while another loads
+  replaces the one loading. `scene.key` is the robot showing: `undefined`
+  until the first robot shows, and for good if it could not be loaded.
+  `mountScene` resolves once its robot is showing, the first one included.
 - **The scene idles.** It draws a frame only when something changed, and its
   camera moves only when the user moves it. WebGPU is used when the browser
   can give the page an adapter, WebGL2 otherwise; **WebGL2 draws shadows from
@@ -120,6 +128,9 @@ three, in the next frame.
 - **A write made before the robot has arrived waits for it**, so a driver can
   write from `onReady`. A write to an id the robot does not have changes
   nothing.
+- **Write as often as the values change**, every animation frame included.
+  Every write and control command made in one task share one wake of the
+  scene, which draws them together in its next frame.
 
 ### Controls
 
@@ -128,14 +139,16 @@ World, an IK solver) adds controls under keys of its own, hears each drag as a
 `control` event, and writes back what the drag should change.
 
 ```ts
-// A ring on a joint, keyed by the joint's value animatable.
-scene.control({ op: "add", key: tiltValueId, control: { kind: "joint" } });
+// A ring on a joint, keyed by the joint's value animatable, in its track's colour.
+scene.control({ op: "add", key: tiltValueId, control: { kind: "joint", color: "#22c55e" } });
 // An IK goal: a pose with nothing drawn but its handles.
 scene.control({
   op: "add",
   key: "left-hand-goal",
   control: { kind: "transform", target: { kind: "goal", pose: { position: [0.3, 0, 1.2] } } },
 });
+scene.control({ op: "configure", key: "left-hand-goal", local: true });
+scene.control({ op: "highlight", key: "left-hand-goal", on: true });
 scene.control({ op: "show", key: "left-hand-goal", visible: false });
 scene.control({ op: "remove", key: "left-hand-goal" });
 ```
@@ -150,9 +163,21 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   `{ kind: "element", id }` or `{ kind: "goal", pose }`. It offers moving,
   turning and scaling unless `modes` names fewer, along the world's axes unless
   `local` is set.
+- **Colours are the host's** when it gives them, as CSS hex: `color` on a joint
+  control (its joint's own otherwise), `colors` for a transform control's X, Y
+  and Z (red, green and blue otherwise).
+- **`configure` changes a control in place**: a joint control's `color`, a
+  transform control's `colors` and `local`. What it leaves out stays as it is,
+  and what a control's kind does not take is ignored, so one command can
+  recolour controls of both kinds.
+- **`highlight` draws a control as the one under the pointer is drawn**, until
+  turned off, for a host pointing at it from elsewhere, such as its row in a
+  list. `handle` names one handle of a transform control, as the overlay names
+  it; the whole control when absent. The pointer's own hover works as ever.
 - **Commands made before the robot has arrived wait for it**, in order;
-  `remove` cancels anything still waiting under its key, and `setPose` on a
-  goal added in the same frame applies once the goal exists.
+  `remove` cancels anything still waiting under its key, and `setPose`,
+  `configure` and `highlight` on a control added in the same frame apply once
+  it exists.
 - **`show` is the driver's.** The scene also hides controls on its own account
   (on a ghosted robot), and shows one only when neither wants it hidden.
 
@@ -165,14 +190,35 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   `null` for none. The scene needs the pointer's position before the press,
   which a real pointer always gives it.
 - **`control`**: a drag on a control, as above.
-- **`robot`**: how a robot swap ended, with `error` when the robot could not
-  be loaded. `loadRobot`'s promise settles from it.
+- **`controlPress`**: a press with the right or middle button on a control's
+  handle, with its `key`, `handle`, `button` and `position` in the canvas's CSS
+  pixels. It is the host's to act on, to open a menu for the control, say: it
+  moves nothing and turns or pans no view. A right-click over a control also
+  reaches the elements around the scene as an ordinary `contextmenu` event,
+  not prevented, sent from `<Scene>`'s element, so a context menu wrapped
+  around `<Scene>` opens there; the browser's own menu stays shut. Anywhere
+  else on the scene, a right-click pans the view and opens no menu.
+- **`robot`**: how each robot the scene was given ended up, the one it started
+  with included, by its `key`. Once the robot is showing it carries `joints`:
+  each joint's name, kind, the element it moves, the animatable that moves it
+  (the key for its joint control), its limits, and how it mimics another. It
+  also carries `elements`, each element's id with the name its author gave it
+  (`base_link`), so a host that knows a link by name can find its id.
+  `scene.robot` keeps what the event said of the robot showing: the first
+  robot's event can come before a page has set its handler.
+  Otherwise it carries `error`, the reason it could not be loaded or was
+  replaced. `loadRobot`'s promise settles from it.
 
 ### Poses
 
 **Poses are Z up**, in metres, with quaternions as `[x, y, z, w]`: the frame a
 robot is described in. The scene converts to and from Bevy's Y up at the
 boundary, in both directions, so a driver never sees the scene's own axes.
+
+`scene.elementPose(element)` is where an element of the robot showing stood
+in the last frame drawn, in that frame: what a driver needs to place a goal
+relative to a link, such as an IK chain's root. It is `undefined` for an id
+the robot does not declare, or before the robot has spawned.
 
 ## Embedding the Rust library
 
@@ -197,9 +243,12 @@ wasm host is the reference for wiring it.
 - **Swap the robot** by inserting `NextRobot { glb, meta, joints }`. The scene
   loads it hidden beside the robot showing (its roots carry `Incoming` and are
   not indexed or driven), and swaps it in once it has loaded whole and
-  spawned. How each swap ended lands in `RobotOutcomes`: `Ok(glb)` once the
-  robot is showing, `Err((glb, why))` if it failed to load, the old robot
-  kept.
+  spawned. How each robot ended up, the one the scene started with included,
+  lands in `RobotOutcomes`, in the order they ended: `Ok(Shown { glb,
+  joints, elements })` once the robot is showing, with that robot's own
+  joints and elements,
+  `Err((glb, why))` if it failed to load or another replaced it first, the
+  old robot kept.
 
 ## Running it natively
 
