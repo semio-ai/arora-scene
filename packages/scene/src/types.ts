@@ -143,7 +143,8 @@ export type ControlCommand =
     }
   /**
    * Changes a control in place: a joint control's `color`, a transform
-   * control's `colors` and `local`. What is absent stays as it is.
+   * control's `colors` and `local`, and for either `opacity` and
+   * `interactive`. What is absent stays as it is.
    */
   | {
       op: "configure";
@@ -151,6 +152,20 @@ export type ControlCommand =
       color?: string;
       colors?: [string, string, string];
       local?: boolean;
+      /**
+       * From 0 to 1, faded to evenly over a fifth of a second (longer while the
+       * scene draws fewer than thirty frames a second), so send the value
+       * wanted once; sent with the control's `add`, the control first shows
+       * at it. Multiplies any alpha the control's colours carry. How
+       * the control looks only: a faded control still takes the pointer.
+       */
+      opacity?: number;
+      /**
+       * `false` and the control takes no hover, press or drag: the pointer
+       * reaches the robot and the view behind it, and a drag in hand ends.
+       * A `highlight` still shows on it.
+       */
+      interactive?: boolean;
     }
   /**
    * Draws a control as the one under the pointer is drawn, or stops: for a

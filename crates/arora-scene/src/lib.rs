@@ -198,6 +198,7 @@ impl Plugin for ScenePlugin {
             values::ValuesPlugin,
         ))
         .add_plugins(controls::ControlsPlugin)
+        .add_plugins(hide_ghosted_controls)
         .init_resource::<WashChoice>()
         // Read by the scene's gizmo systems; the test window's toggles set it.
         .init_resource::<toggles::GizmoChoice>()
@@ -207,7 +208,6 @@ impl Plugin for ScenePlugin {
                 attach_gizmo,
                 choose_gizmo_mode,
                 ghost_robots,
-                hide_controls_on_ghosts,
                 wash_ghosts,
                 place_readout,
             ),
@@ -756,8 +756,14 @@ pub fn mount_instances(
     app.insert_resource(instance::RobotMeta(meta))
         .insert_resource(instance::Selected(select))
         // Registered by the mount rather than by the plugin, so the system
-        // exists only where the resources it needs do.
-        .add_systems(Update, instance::index_instances);
+        // exists only where the resources it needs do. Before the control
+        // commands, so a robot indexed this frame is there for both passes:
+        // one indexed between them would leave a change sent with an add a
+        // pass short, and the control showing a frame without it.
+        .add_systems(
+            Update,
+            instance::index_instances.before(controls::ControlSystems::Commands),
+        );
 }
 
 /// Builds the screen the robot declares and hands back the texture it shows.
@@ -1486,6 +1492,18 @@ type Controls<'w, 's> = Query<
     ),
     Or<(With<JointGizmo>, With<TransformGizmo>)>,
 >;
+
+/// Hides the controls on a ghosted robot: after the control commands, so a
+/// control added this frame is hidden in it, and before the fade reads
+/// whether a control shows.
+pub(crate) fn hide_ghosted_controls(app: &mut App) {
+    app.add_systems(
+        Update,
+        hide_controls_on_ghosts
+            .after(controls::ControlSystems::Commands)
+            .before(controls::ControlSystems::Fade),
+    );
+}
 
 fn hide_controls_on_ghosts(
     mut gizmos: Controls,

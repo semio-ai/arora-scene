@@ -167,9 +167,22 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   control (its joint's own otherwise), `colors` for a transform control's X, Y
   and Z (red, green and blue otherwise).
 - **`configure` changes a control in place**: a joint control's `color`, a
-  transform control's `colors` and `local`. What it leaves out stays as it is,
-  and what a control's kind does not take is ignored, so one command can
-  recolour controls of both kinds.
+  transform control's `colors` and `local`, and for either its `opacity` and
+  whether it is `interactive`. What it leaves out stays as it is, and what a
+  control's kind does not take is ignored, so one command can recolour
+  controls of both kinds.
+- **`opacity` fades a control** evenly to a value from 0 to 1 over a fifth of
+  a second (longer while the scene draws fewer than thirty frames a second),
+  so a host sends the value it wants once. Sent with the control's `add`, the
+  control first shows at it, and `interactive: false` sent with it holds from
+  its first frame. It multiplies any alpha the colours the host gave carry
+  (`#22c55e80`); a robot's own joint colours draw opaque. It is how a control
+  looks only: a faded control still takes the pointer until it is made inert.
+- **`interactive: false` makes a control inert**: it takes no hover, press or
+  drag, the pointer reaches the robot and the view behind it, and a drag in
+  hand ends. A host's `highlight` still shows on it. The scene knows nothing
+  of why: a host that plays a timeline, say, dims and stills its controls
+  while it plays, and turns them back when it stops.
 - **`highlight` draws a control as the one under the pointer is drawn**, until
   turned off, for a host pointing at it from elsewhere, such as its row in a
   list. `handle` names one handle of a transform control, as the overlay names
@@ -332,8 +345,6 @@ Three rules hold the model together:
   they describe the robot the tool started with, not one swapped in later. The
   browser package uses neither: its joint controls come from the robot being
   shown.
-- **A control can be shown or hidden, not made inert.** Studio's controls can
-  be visible but not draggable; these cannot yet.
 - **Morph targets are not bound.** A robot's declaration carries none, and a
   morph animatable writes nothing.
 

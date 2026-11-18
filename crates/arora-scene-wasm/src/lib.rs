@@ -313,7 +313,12 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     .insert_resource(RobotMeta(meta))
     .insert_resource(arora_scene::joints::RobotJoints(joints))
     .insert_resource(Selected(opts.select.iter().map(Selection::of).collect()))
-    .add_systems(Update, arora_scene::instance::index_instances)
+    // Before the control commands, as the native mount orders it.
+    .add_systems(
+        Update,
+        arora_scene::instance::index_instances
+            .before(arora_scene::controls::ControlSystems::Commands),
+    )
     .add_systems(Startup, keep_waker)
     .add_systems(Update, take_pushed.before(ApplyValues))
     // Before Update, where the scene carries control commands out.
