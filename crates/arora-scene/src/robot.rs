@@ -240,10 +240,14 @@ pub fn find_joints(bytes: &[u8]) -> Result<Vec<Joint>> {
             min: number("/constraints/min").unwrap_or(f32::NEG_INFINITY),
             max: number("/constraints/max").unwrap_or(f32::INFINITY),
             default: number("/default").unwrap_or_default(),
+            // Opaque whatever the author wrote: a control draws its colour's
+            // alpha, and an asset's colour is the track's hue, not a request
+            // to fade or hide the control it names.
             color: value
                 .and_then(|v| v.pointer("/pub/color"))
                 .and_then(Json::as_str)
                 .and_then(|hex| Srgba::hex(hex).ok())
+                .map(|colour| colour.with_alpha(1.0))
                 .unwrap_or_else(|| colour_of_axis(axis)),
         });
     }
@@ -361,6 +365,46 @@ mod tests {
     /// A joint is held within its limits by its kind and its limits alone:
     /// a revolute joint a whole turn wide still stops at its ends, and a
     /// continuous one never does, whatever it carries.
+    /// A GLB holding only `json`, as its JSON chunk.
+    fn glb(json: serde_json::Value) -> Vec<u8> {
+        let mut chunk = serde_json::to_vec(&json).unwrap();
+        while chunk.len() % 4 != 0 {
+            chunk.push(b' ');
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"glTF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&(12 + 8 + chunk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"JSON");
+        bytes.extend_from_slice(&chunk);
+        bytes
+    }
+
+    /// A joint's authored colour names its hue; an alpha in it does not fade
+    /// or hide the control drawn in it.
+    #[test]
+    fn a_joint_s_authored_colour_is_opaque() {
+        let bytes = glb(serde_json::json!({
+            "nodes": [
+                { "extensions": { "RobotData": { "id": "link", "type": "group" } } },
+                { "extensions": { "RobotData": {
+                    "id": "j", "name": "j", "type": "revolute", "child": "link",
+                    "features": { "jointValue": { "animated": true, "value": {
+                        "id": "jv", "pub": { "color": "#22c55e00" }
+                    } } }
+                } } }
+            ]
+        }));
+        let joints = find_joints(&bytes).unwrap();
+        assert_eq!(joints.len(), 1);
+        assert_eq!(joints[0].color.alpha, 1.0);
+        assert_eq!(
+            joints[0].color.to_hex(),
+            Srgba::hex("#22c55e").unwrap().to_hex()
+        );
+    }
+
     #[test]
     fn a_joint_is_limited_by_its_kind_and_its_limits() {
         use std::f32::consts::PI;

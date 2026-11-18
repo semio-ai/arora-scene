@@ -167,10 +167,12 @@ pub enum ControlCommand {
     /// absent stays as it is, and what the control's kind does not take is
     /// ignored, so one command can recolour controls of both kinds.
     ///
-    /// `opacity`, from 0 to 1, is eased into over [`FADE_SECS`], so a host
-    /// sends the value it wants once. A control that is not `interactive`
-    /// takes no hover, press or drag, and the pointer reaches the robot and
-    /// the view behind it; a host's highlight still shows on it.
+    /// `opacity`, from 0 to 1, is eased into over [`FADE_SECS`] (longer while
+    /// frames come slower than thirty a second), so a host sends the value it
+    /// wants once. It is how the control looks only: a faded control still
+    /// takes the pointer. A control that is not `interactive` takes no hover,
+    /// press or drag, the pointer reaches the robot and the view behind it,
+    /// and a drag in hand ends; a host's highlight still shows on it.
     Configure {
         key: String,
         #[serde(default)]
@@ -1365,10 +1367,24 @@ mod tests {
         send(&mut app, configure("goal", Some(0.0), None));
         let first = opacity(&app);
         assert!(first < 1.0 && first > 0.0, "part of the way: {first}");
+        // The scene draws only on change, so a fade asks for its own frames
+        // while it runs, and none once it has arrived.
+        let frames_asked = |app: &mut App| {
+            let mut messages = app.world_mut().resource_mut::<Messages<RequestRedraw>>();
+            let asked = messages.len();
+            messages.clear();
+            asked
+        };
+        frames_asked(&mut app);
+        app.update();
+        assert!(frames_asked(&mut app) > 0, "a frame asked for mid-fade");
         for _ in 0..8 {
             app.update();
         }
         assert_eq!(opacity(&app), 0.0, "and there in the end");
+        frames_asked(&mut app);
+        app.update();
+        assert_eq!(frames_asked(&mut app), 0, "none once it has arrived");
 
         // A long quiet spell before the next change is one step, not all.
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(5)));

@@ -173,7 +173,9 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   controls of both kinds.
 - **`opacity` fades a control**, from 0 to 1, eased in over a fifth of a
   second, so a host sends the value it wants once. It multiplies any alpha the
-  control's colours carry (`#22c55e80`).
+  colours the host gave carry (`#22c55e80`); a robot's own joint colours draw
+  opaque. It is how a control looks only: a faded control still takes the
+  pointer until it is made inert.
 - **`interactive: false` makes a control inert**: it takes no hover, press or
   drag, the pointer reaches the robot and the view behind it, and a drag in
   hand ends. A host's `highlight` still shows on it. The scene knows nothing

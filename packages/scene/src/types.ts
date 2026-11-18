@@ -154,7 +154,8 @@ export type ControlCommand =
       local?: boolean;
       /**
        * From 0 to 1, eased into over a fifth of a second, so send the value
-       * wanted once. Multiplies any alpha the control's colours carry.
+       * wanted once. Multiplies any alpha the control's colours carry. How
+       * the control looks only: a faded control still takes the pointer.
        */
       opacity?: number;
       /**
