@@ -304,8 +304,9 @@ struct Placed {
     opacity: f32,
     /// The fade toward `opacity` under way, if one is.
     fade: Option<Fade>,
-    /// Whether its gizmo showed in the last frame: drawn, and not hidden by
-    /// the host. While it does not, an opacity asked for is taken at once
+    /// Whether its gizmo shows: drawn, and hidden neither by the host nor by
+    /// its robot's being ghosted. While it does not, an opacity asked for is
+    /// taken at once
     /// rather than faded to, so a control added dimmed, or dimmed while
     /// hidden, never shows at full strength on its way there.
     shown: bool,
@@ -365,14 +366,17 @@ fn fade(
     mut controls: ResMut<Controls>,
     mut transform_gizmos: Query<&mut TransformGizmo>,
     mut joint_gizmos: Query<&mut JointGizmo>,
-    hidden: Query<(), With<HiddenByDriver>>,
+    visibility: Query<&Visibility>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     let step = time.delta_secs().min(1.0 / 30.0);
     let mut fading = false;
     for placed in controls.0.values_mut() {
-        // Drawn after this, in the frame's own `PostUpdate`, unless hidden.
-        placed.shown = !hidden.contains(placed.gizmo);
+        // Drawn after this, in the frame's own `PostUpdate`, unless hidden:
+        // whatever hides a control, the host or a ghosting, does it here.
+        placed.shown = visibility
+            .get(placed.gizmo)
+            .is_ok_and(|visibility| *visibility != Visibility::Hidden);
         let Some(fade) = placed.fade.as_mut() else {
             continue;
         };
@@ -1608,6 +1612,20 @@ mod tests {
             });
         }
         app.update();
+        let opacity = app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        assert_eq!(opacity, 0.25);
+    }
+
+    /// Hidden by anything but the host, as a ghosted robot's controls are,
+    /// a control takes an opacity at once as well.
+    #[test]
+    fn a_control_hidden_by_a_ghosting_takes_an_opacity_at_once() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let gizmo = add_goal(&mut app, "goal", None);
+        app.world_mut().entity_mut(gizmo).insert(Visibility::Hidden);
+        app.update();
+        send(&mut app, configure("goal", Some(0.25), None));
         let opacity = app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
         assert_eq!(opacity, 0.25);
     }
