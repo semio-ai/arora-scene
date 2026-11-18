@@ -25,7 +25,8 @@ use std::f32::consts::FRAC_PI_2;
 use arora_visuals::instance::EntityInstance;
 use arora_visuals::joint_gizmo::{JointDrag, JointGizmo};
 use arora_visuals::transform_gizmo::{
-    DragPhase, GizmoDrag, GizmoHandle, GizmoPress, GizmoSpace, TransformGizmo, TransformModes,
+    DragPhase, GizmoDrag, GizmoHandle, GizmoPress, GizmoSpace, TransformGizmo,
+    TransformGizmoSystems, TransformModes,
 };
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
@@ -303,6 +304,10 @@ struct Placed {
     opacity: f32,
     /// The fade toward `opacity` under way, if one is.
     fade: Option<Fade>,
+    /// Whether its gizmo has been drawn. Until it has, an opacity asked for
+    /// is taken at once rather than faded to, so a control added dimmed
+    /// never shows at full strength.
+    shown: bool,
 }
 
 /// A fade under way. It runs for [`FADE_SECS`] however far it has to go, so
@@ -326,7 +331,18 @@ impl Plugin for ControlsPlugin {
             .init_resource::<ControlEvents>()
             .init_resource::<ControlPresses>()
             .init_resource::<Controls>()
-            .add_systems(Update, (carry_out, fade).chain())
+            // Twice, the gizmos an add spawns being there for the second:
+            // a change sent with its control's add then takes hold the
+            // frame the control first shows, rather than one frame later,
+            // live and at full strength in between. Both before the
+            // gizmos' own pointer handling, so a press in the frame a
+            // control is made inert finds it inert.
+            .add_systems(
+                Update,
+                (carry_out, carry_out, fade)
+                    .chain()
+                    .before(TransformGizmoSystems),
+            )
             .add_observer(report_transform_drag)
             .add_observer(report_joint_drag)
             .add_observer(report_press);
@@ -350,6 +366,8 @@ fn fade(
     let step = time.delta_secs().min(1.0 / 30.0);
     let mut fading = false;
     for placed in controls.0.values_mut() {
+        // Drawn after this, in the frame's own `PostUpdate`.
+        placed.shown = true;
         let Some(fade) = placed.fade.as_mut() else {
             continue;
         };
@@ -480,6 +498,7 @@ fn carry_out(
                             goal: None,
                             opacity: 1.0,
                             fade: None,
+                            shown: false,
                         }
                     }
                     Control::Transform {
@@ -536,6 +555,7 @@ fn carry_out(
                             goal,
                             opacity: 1.0,
                             fade: None,
+                            shown: false,
                         }
                     }
                 };
@@ -606,9 +626,9 @@ fn carry_out(
                 opacity,
                 interactive,
             } => {
-                // A control added this frame is spawned at the end of it, so
-                // its gizmo is not there yet; the change waits a frame for
-                // it, as one made before the add would.
+                // A control added in this pass is spawned at the end of it,
+                // so its gizmo is not there yet; the change waits for the
+                // second pass, as one made before the add would.
                 let gizmo = controls.0.get(&key).map(|placed| placed.gizmo);
                 let spawned = gizmo.is_some_and(|gizmo| {
                     transform_gizmos.contains(gizmo) || joint_gizmos.contains(gizmo)
@@ -630,12 +650,18 @@ fn carry_out(
                     continue;
                 };
                 again = true;
+                // An opacity for a control not yet drawn, taken as it is.
+                let mut at_once = None;
                 if let (Some(opacity), Some(placed)) = (opacity, controls.0.get_mut(&key)) {
                     let opacity = opacity.clamp(0.0, 1.0);
-                    // Asked again for where it is already going, a fade runs
-                    // on; asked for somewhere new, it starts over from where
-                    // the gizmo has got to.
-                    if opacity != placed.opacity {
+                    if !placed.shown {
+                        placed.opacity = opacity;
+                        placed.fade = None;
+                        at_once = Some(opacity);
+                    } else if opacity != placed.opacity {
+                        // Asked again for where it is already going, a fade
+                        // runs on; asked for somewhere new, it starts over
+                        // from where the gizmo has got to.
                         placed.opacity = opacity;
                         placed.fade = Some(Fade {
                             from: None,
@@ -646,6 +672,9 @@ fn carry_out(
                 // Neither kind's own: one command may carry these for both.
                 let common = opacity.is_some() || interactive.is_some();
                 if let Ok(mut gizmo) = transform_gizmos.get_mut(gizmo) {
+                    if let Some(opacity) = at_once {
+                        gizmo.opacity = opacity;
+                    }
                     if let Some(interactive) = interactive {
                         gizmo.interactive = interactive;
                     }
@@ -663,6 +692,9 @@ fn carry_out(
                         log::warn!("{key:?} is a transform control; give it colors");
                     }
                 } else if let Ok(mut gizmo) = joint_gizmos.get_mut(gizmo) {
+                    if let Some(opacity) = at_once {
+                        gizmo.opacity = opacity;
+                    }
                     if let Some(interactive) = interactive {
                         gizmo.interactive = interactive;
                     }
@@ -675,7 +707,7 @@ fn carry_out(
                 }
             }
             ControlCommand::Highlight { key, handle, on } => {
-                // Waits for a control added this frame, as a configure does.
+                // Waits for a control added in this pass, as a configure does.
                 let gizmo = controls.0.get(&key).map(|placed| placed.gizmo);
                 let spawned = gizmo.is_some_and(|gizmo| {
                     transform_gizmos.contains(gizmo) || joint_gizmos.contains(gizmo)
@@ -1471,6 +1503,69 @@ mod tests {
         near(&app, 0.5625);
         send(&mut app, configure("goal", Some(1.0), None));
         near(&app, 0.625);
+    }
+
+    /// A control sent with a change in the same batch as its add first
+    /// shows with it: at the opacity asked for, not faded down from full,
+    /// and inert from its first frame.
+    #[test]
+    fn a_control_added_dimmed_and_inert_first_shows_so() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        {
+            let mut asked = app.world_mut().resource_mut::<ControlCommands>();
+            asked.0.push(ControlCommand::Add {
+                key: "goal".into(),
+                control: goal_at([0.0, 0.0, 1.0]),
+            });
+            asked.0.push(ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint { color: None },
+            });
+            for key in ["goal", TILT] {
+                asked.0.push(configure(key, Some(0.25), Some(false)));
+            }
+        }
+        app.update();
+        let goal = only::<TransformGizmo>(&mut app).unwrap();
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        let goal = app.world().get::<TransformGizmo>(goal).unwrap();
+        assert_eq!((goal.opacity, goal.interactive), (0.25, false));
+        let joint = app.world().get::<JointGizmo>(joint).unwrap();
+        assert_eq!((joint.opacity, joint.interactive), (0.25, false));
+
+        // Once shown, a change fades as ever.
+        send(&mut app, configure("goal", Some(1.0), None));
+        let goal = only::<TransformGizmo>(&mut app).unwrap();
+        let now = app.world().get::<TransformGizmo>(goal).unwrap().opacity;
+        assert!(now > 0.25 && now < 1.0, "{now}");
+    }
+
+    /// An opacity outside 0 to 1 is held to it, rather than reaching the
+    /// gizmo's materials as an alpha they cannot draw.
+    #[test]
+    fn an_opacity_out_of_range_is_held_to_it() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            1.0 / 60.0,
+        )));
+        let gizmo = add_goal(&mut app, "goal", None);
+        let opacity = |app: &App| app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        let settle = |app: &mut App| {
+            for _ in 0..60 {
+                app.update();
+            }
+        };
+        send(&mut app, configure("goal", Some(-3.0), None));
+        settle(&mut app);
+        assert_eq!(opacity(&app), 0.0);
+        send(&mut app, configure("goal", Some(7.0), None));
+        settle(&mut app);
+        assert_eq!(opacity(&app), 1.0);
     }
 
     /// `interactive` reaches either kind of control, and one command can

@@ -172,10 +172,12 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   control's kind does not take is ignored, so one command can recolour
   controls of both kinds.
 - **`opacity` fades a control**, from 0 to 1, eased in over a fifth of a
-  second, so a host sends the value it wants once. It multiplies any alpha the
-  colours the host gave carry (`#22c55e80`); a robot's own joint colours draw
-  opaque. It is how a control looks only: a faded control still takes the
-  pointer until it is made inert.
+  second (longer while the scene draws fewer than thirty frames a second), so
+  a host sends the value it wants once. Sent with the control's `add`, the
+  control first shows at it, and `interactive: false` sent with it holds from
+  its first frame. It multiplies any alpha the colours the host gave carry
+  (`#22c55e80`); a robot's own joint colours draw opaque. It is how a control
+  looks only: a faded control still takes the pointer until it is made inert.
 - **`interactive: false` makes a control inert**: it takes no hover, press or
   drag, the pointer reaches the robot and the view behind it, and a drag in
   hand ends. A host's `highlight` still shows on it. The scene knows nothing

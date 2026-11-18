@@ -362,9 +362,6 @@ mod tests {
         }
     }
 
-    /// A joint is held within its limits by its kind and its limits alone:
-    /// a revolute joint a whole turn wide still stops at its ends, and a
-    /// continuous one never does, whatever it carries.
     /// A GLB holding only `json`, as its JSON chunk.
     fn glb(json: serde_json::Value) -> Vec<u8> {
         let mut chunk = serde_json::to_vec(&json).unwrap();
@@ -405,6 +402,9 @@ mod tests {
         );
     }
 
+    /// A joint is held within its limits by its kind and its limits alone:
+    /// a revolute joint a whole turn wide still stops at its ends, and a
+    /// continuous one never does, whatever it carries.
     #[test]
     fn a_joint_is_limited_by_its_kind_and_its_limits() {
         use std::f32::consts::PI;
