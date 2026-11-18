@@ -198,6 +198,7 @@ impl Plugin for ScenePlugin {
             values::ValuesPlugin,
         ))
         .add_plugins(controls::ControlsPlugin)
+        .add_plugins(hide_ghosted_controls)
         .init_resource::<WashChoice>()
         // Read by the scene's gizmo systems; the test window's toggles set it.
         .init_resource::<toggles::GizmoChoice>()
@@ -207,8 +208,6 @@ impl Plugin for ScenePlugin {
                 attach_gizmo,
                 choose_gizmo_mode,
                 ghost_robots,
-                // Before the fade reads whether a control shows.
-                hide_controls_on_ghosts.before(controls::fade),
                 wash_ghosts,
                 place_readout,
             ),
@@ -1487,6 +1486,18 @@ type Controls<'w, 's> = Query<
     ),
     Or<(With<JointGizmo>, With<TransformGizmo>)>,
 >;
+
+/// Hides the controls on a ghosted robot: after the control commands, so a
+/// control added this frame is hidden in it, and before the fade reads
+/// whether a control shows.
+pub(crate) fn hide_ghosted_controls(app: &mut App) {
+    app.add_systems(
+        Update,
+        hide_controls_on_ghosts
+            .after(controls::ControlSystems::Commands)
+            .before(controls::ControlSystems::Fade),
+    );
+}
 
 fn hide_controls_on_ghosts(
     mut gizmos: Controls,

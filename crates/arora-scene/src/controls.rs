@@ -326,6 +326,14 @@ pub const FADE_SECS: f32 = 0.2;
 
 pub struct ControlsPlugin;
 
+/// The controls' systems, for another system to order itself against: the
+/// passes that carry out commands, then the fade.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ControlSystems {
+    Commands,
+    Fade,
+}
+
 impl Plugin for ControlsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ControlCommands>()
@@ -343,7 +351,11 @@ impl Plugin for ControlsPlugin {
             // arriving between the same two frames have no order to keep.
             .add_systems(
                 Update,
-                (carry_out, carry_out, fade)
+                (
+                    carry_out.in_set(ControlSystems::Commands),
+                    carry_out.in_set(ControlSystems::Commands),
+                    fade.in_set(ControlSystems::Fade),
+                )
                     .chain()
                     .before(TransformGizmoSystems),
             )
@@ -353,14 +365,14 @@ impl Plugin for ControlsPlugin {
     }
 }
 
-/// Eases each control's gizmo from where its fade began to the opacity its
+/// Fades each control's gizmo evenly from where its fade began to the opacity its
 /// host asked for, over [`FADE_SECS`], asking for frames while any fade is
 /// still under way.
 ///
 /// A step is at most a thirtieth of a second's: the scene draws only on
 /// change, so the first frame after a quiet spell can be seconds after the
 /// one before, which would otherwise take the whole fade in one jump.
-pub(crate) fn fade(
+fn fade(
     time: Res<Time>,
     mut controls: ResMut<Controls>,
     mut transform_gizmos: Query<&mut TransformGizmo>,
@@ -1641,6 +1653,62 @@ mod tests {
         app.update();
         let opacity = app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
         assert_eq!(opacity, 0.25);
+    }
+
+    /// A control added to a ghosted robot is hidden from its first frame, so
+    /// an opacity sent the frame after takes hold at once.
+    #[test]
+    fn a_control_added_on_a_ghost_takes_an_opacity_at_once() {
+        let (mut app, body) = scene();
+        app.add_plugins(crate::hide_ghosted_controls);
+        robot(&mut app, body);
+        app.world_mut()
+            .entity_mut(body)
+            .insert(arora_visuals::ghost::Ghost);
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint { color: None },
+            },
+        );
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        assert_eq!(
+            app.world().get::<Visibility>(joint),
+            Some(&Visibility::Hidden),
+            "hidden in the frame it is added"
+        );
+        send(&mut app, configure(TILT, Some(0.25), None));
+        assert_eq!(app.world().get::<JointGizmo>(joint).unwrap().opacity, 0.25);
+    }
+
+    /// A joint control fades as a transform control does.
+    #[test]
+    fn a_joint_control_fades() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            FADE_SECS / 8.0,
+        )));
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint { color: None },
+            },
+        );
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        let opacity = |app: &App| app.world().get::<JointGizmo>(joint).unwrap().opacity;
+        send(&mut app, configure(TILT, Some(0.5), None));
+        let part_way = opacity(&app);
+        assert!(part_way > 0.5 && part_way < 1.0, "{part_way}");
+        for _ in 0..7 {
+            app.update();
+        }
+        assert_eq!(opacity(&app), 0.5);
     }
 
     /// A control dimmed while hidden takes the opacity at once, so it first
