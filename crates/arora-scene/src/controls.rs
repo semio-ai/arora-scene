@@ -301,6 +301,18 @@ struct Placed {
     goal: Option<Entity>,
     /// The opacity the host asked for, which the gizmo's eases toward.
     opacity: f32,
+    /// The fade toward `opacity` under way, if one is.
+    fade: Option<Fade>,
+}
+
+/// A fade under way. It runs for [`FADE_SECS`] however far it has to go, so
+/// it keeps where it started rather than moving at a set rate, which would
+/// take a small change in a frame or two.
+struct Fade {
+    /// The gizmo's opacity when the fade began, read on its first frame.
+    from: Option<f32>,
+    /// How long it has run, in steps of at most a thirtieth of a second.
+    elapsed: f32,
 }
 
 /// How long a control takes to fade to the opacity a host asks for.
@@ -321,39 +333,47 @@ impl Plugin for ControlsPlugin {
     }
 }
 
-/// Eases each control's gizmo toward the opacity its host asked for, over
-/// [`FADE_SECS`], asking for frames while any is still on its way.
+/// Eases each control's gizmo from where its fade began to the opacity its
+/// host asked for, over [`FADE_SECS`], asking for frames while any fade is
+/// still under way.
 ///
 /// A step is at most a thirtieth of a second's: the scene draws only on
 /// change, so the first frame after a quiet spell can be seconds after the
 /// one before, which would otherwise take the whole fade in one jump.
 fn fade(
     time: Res<Time>,
-    controls: Res<Controls>,
+    mut controls: ResMut<Controls>,
     mut transform_gizmos: Query<&mut TransformGizmo>,
     mut joint_gizmos: Query<&mut JointGizmo>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
-    let step = time.delta_secs().min(1.0 / 30.0) / FADE_SECS;
-    let toward = |now: f32, wanted: f32| now + (wanted - now).clamp(-step, step);
+    let step = time.delta_secs().min(1.0 / 30.0);
     let mut fading = false;
-    for placed in controls.0.values() {
-        let opacity = if let Ok(mut gizmo) = transform_gizmos.get_mut(placed.gizmo) {
-            if gizmo.opacity == placed.opacity {
-                continue;
-            }
-            gizmo.opacity = toward(gizmo.opacity, placed.opacity);
-            gizmo.opacity
-        } else if let Ok(mut gizmo) = joint_gizmos.get_mut(placed.gizmo) {
-            if gizmo.opacity == placed.opacity {
-                continue;
-            }
-            gizmo.opacity = toward(gizmo.opacity, placed.opacity);
-            gizmo.opacity
-        } else {
+    for placed in controls.0.values_mut() {
+        let Some(fade) = placed.fade.as_mut() else {
             continue;
         };
-        fading |= opacity != placed.opacity;
+        let opacity = if let Ok(gizmo) = transform_gizmos.get_mut(placed.gizmo) {
+            gizmo.map_unchanged(|gizmo| &mut gizmo.opacity)
+        } else if let Ok(gizmo) = joint_gizmos.get_mut(placed.gizmo) {
+            gizmo.map_unchanged(|gizmo| &mut gizmo.opacity)
+        } else {
+            // Its gizmo is gone, and the fade with it.
+            placed.fade = None;
+            continue;
+        };
+        let from = *fade.from.get_or_insert(*opacity);
+        fade.elapsed += step;
+        let done = (fade.elapsed / FADE_SECS).min(1.0);
+        let mut opacity = opacity;
+        *opacity = from + (placed.opacity - from) * done;
+        if done >= 1.0 {
+            // Exactly what was asked for, whatever the rounding on the way.
+            *opacity = placed.opacity;
+            placed.fade = None;
+        } else {
+            fading = true;
+        }
     }
     if fading {
         redraw.write(RequestRedraw);
@@ -459,6 +479,7 @@ fn carry_out(
                             target: None,
                             goal: None,
                             opacity: 1.0,
+                            fade: None,
                         }
                     }
                     Control::Transform {
@@ -514,6 +535,7 @@ fn carry_out(
                             target: Some(target),
                             goal,
                             opacity: 1.0,
+                            fade: None,
                         }
                     }
                 };
@@ -609,7 +631,17 @@ fn carry_out(
                 };
                 again = true;
                 if let (Some(opacity), Some(placed)) = (opacity, controls.0.get_mut(&key)) {
-                    placed.opacity = opacity.clamp(0.0, 1.0);
+                    let opacity = opacity.clamp(0.0, 1.0);
+                    // Asked again for where it is already going, a fade runs
+                    // on; asked for somewhere new, it starts over from where
+                    // the gizmo has got to.
+                    if opacity != placed.opacity {
+                        placed.opacity = opacity;
+                        placed.fade = Some(Fade {
+                            from: None,
+                            elapsed: 0.0,
+                        });
+                    }
                 }
                 // Neither kind's own: one command may carry these for both.
                 let common = opacity.is_some() || interactive.is_some();
@@ -1391,6 +1423,54 @@ mod tests {
         send(&mut app, configure("goal", Some(1.0), None));
         let after_a_pause = opacity(&app);
         assert!(after_a_pause < 1.0, "{after_a_pause}");
+    }
+
+    /// A small change takes the whole fade, as a large one does, and a fade
+    /// sent somewhere new part way starts over from where it had got to.
+    #[test]
+    fn every_fade_takes_the_fade_s_length() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        // Under the thirtieth of a second a step is held to.
+        let frame = FADE_SECS / 8.0;
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            frame,
+        )));
+        let gizmo = add_goal(&mut app, "goal", None);
+        let opacity = |app: &App| app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        let near = |app: &App, wanted: f32| {
+            let now = opacity(app);
+            assert!((now - wanted).abs() < 1e-4, "{now}, not {wanted}");
+        };
+        let frames = |app: &mut App, count: usize| {
+            for _ in 0..count {
+                app.update();
+            }
+        };
+
+        send(&mut app, configure("goal", Some(0.9), None));
+        near(&app, 0.9875);
+        frames(&mut app, 3);
+        near(&app, 0.95);
+        frames(&mut app, 4);
+        assert_eq!(opacity(&app), 0.9, "there at the fade's length");
+
+        // Sent somewhere new half way, it starts over from where it had got
+        // to: half way from 0.9 to 0.1 is 0.5, so a fade to 0.5 holds there.
+        send(&mut app, configure("goal", Some(0.1), None));
+        frames(&mut app, 3);
+        near(&app, 0.5);
+        send(&mut app, configure("goal", Some(0.5), None));
+        near(&app, 0.5);
+
+        // Asked again for where it is already going, it runs on.
+        send(&mut app, configure("goal", Some(1.0), None));
+        near(&app, 0.5625);
+        send(&mut app, configure("goal", Some(1.0), None));
+        near(&app, 0.625);
     }
 
     /// `interactive` reaches either kind of control, and one command can
