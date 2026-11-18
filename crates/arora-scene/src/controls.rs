@@ -578,7 +578,7 @@ fn carry_out(
                 // would bring back a control the driver has since removed.
                 waiting.retain(|waiting| waiting.key() != key);
             }
-            ControlCommand::Show { key, visible } => match controls.0.get(&key) {
+            ControlCommand::Show { key, visible } => match controls.0.get_mut(&key) {
                 Some(placed) => {
                     let mut gizmo = commands.entity(placed.gizmo);
                     if visible {
@@ -587,6 +587,9 @@ fn carry_out(
                             .insert(Visibility::Inherited);
                     } else {
                         gizmo.insert((HiddenByDriver, Visibility::Hidden));
+                        // Hidden from now, for a change later in the batch;
+                        // the fade reads whether it shows afresh each frame.
+                        placed.shown = false;
                     }
                 }
                 // Shown or hidden before it was added: the add is waiting
@@ -1618,6 +1621,26 @@ mod tests {
             assert_eq!(opacity(&app), 0.25);
             app.update();
         }
+    }
+
+    /// Hidden and dimmed in one batch, a control takes the opacity at once,
+    /// as it would a frame later.
+    #[test]
+    fn a_control_hidden_and_dimmed_together_takes_the_opacity_at_once() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let gizmo = add_goal(&mut app, "goal", None);
+        {
+            let mut asked = app.world_mut().resource_mut::<ControlCommands>();
+            asked.0.push(ControlCommand::Show {
+                key: "goal".into(),
+                visible: false,
+            });
+            asked.0.push(configure("goal", Some(0.25), None));
+        }
+        app.update();
+        let opacity = app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        assert_eq!(opacity, 0.25);
     }
 
     /// A control dimmed while hidden takes the opacity at once, so it first
