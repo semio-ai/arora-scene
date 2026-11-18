@@ -306,9 +306,8 @@ struct Placed {
     fade: Option<Fade>,
     /// Whether its gizmo shows: drawn, and hidden neither by the host nor by
     /// its robot's being ghosted. While it does not, an opacity asked for is
-    /// taken at once
-    /// rather than faded to, so a control added dimmed, or dimmed while
-    /// hidden, never shows at full strength on its way there.
+    /// taken at once rather than faded to, so a control added dimmed, or
+    /// dimmed while hidden, never shows at full strength on its way there.
     shown: bool,
 }
 
@@ -361,7 +360,7 @@ impl Plugin for ControlsPlugin {
 /// A step is at most a thirtieth of a second's: the scene draws only on
 /// change, so the first frame after a quiet spell can be seconds after the
 /// one before, which would otherwise take the whole fade in one jump.
-fn fade(
+pub(crate) fn fade(
     time: Res<Time>,
     mut controls: ResMut<Controls>,
     mut transform_gizmos: Query<&mut TransformGizmo>,
@@ -1498,6 +1497,13 @@ mod tests {
         near(&app, 0.95);
         frames(&mut app, 4);
         assert_eq!(opacity(&app), 0.9, "there at the fade's length");
+        // Exactly there, though the steps on the way round.
+        send(&mut app, configure("goal", Some(0.1), None));
+        frames(&mut app, 7);
+        assert_eq!(opacity(&app), 0.1, "exactly what was asked for");
+        send(&mut app, configure("goal", Some(0.9), None));
+        frames(&mut app, 7);
+        assert_eq!(opacity(&app), 0.9);
 
         // Sent somewhere new half way, it starts over from where it had got
         // to: half way from 0.9 to 0.1 is 0.5, so a fade to 0.5 holds there.
@@ -1581,6 +1587,37 @@ mod tests {
         assert_eq!(app.world().resource::<Seen>().0, [true]);
         send(&mut app, configure("goal", None, Some(false)));
         assert_eq!(app.world().resource::<Seen>().0, [true, false]);
+    }
+
+    /// Hidden part way through a fade and then given another opacity, a
+    /// control takes it at once, and the fade it was on goes.
+    #[test]
+    fn a_control_hidden_part_way_through_a_fade_takes_a_new_opacity_at_once() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            FADE_SECS / 8.0,
+        )));
+        let gizmo = add_goal(&mut app, "goal", None);
+        let opacity = |app: &App| app.world().get::<TransformGizmo>(gizmo).unwrap().opacity;
+        send(&mut app, configure("goal", Some(0.5), None));
+        let part_way = opacity(&app);
+        assert!(part_way > 0.5 && part_way < 1.0, "{part_way}");
+        send(
+            &mut app,
+            ControlCommand::Show {
+                key: "goal".into(),
+                visible: false,
+            },
+        );
+        send(&mut app, configure("goal", Some(0.25), None));
+        for _ in 0..8 {
+            assert_eq!(opacity(&app), 0.25);
+            app.update();
+        }
     }
 
     /// A control dimmed while hidden takes the opacity at once, so it first

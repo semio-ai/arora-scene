@@ -207,7 +207,8 @@ impl Plugin for ScenePlugin {
                 attach_gizmo,
                 choose_gizmo_mode,
                 ghost_robots,
-                hide_controls_on_ghosts,
+                // Before the fade reads whether a control shows.
+                hide_controls_on_ghosts.before(controls::fade),
                 wash_ghosts,
                 place_readout,
             ),
