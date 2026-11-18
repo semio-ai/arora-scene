@@ -1544,6 +1544,39 @@ mod tests {
         assert!(now > 0.25 && now < 1.0, "{now}");
     }
 
+    /// The commands run before the gizmos' own systems, so a control made
+    /// inert is inert to the drag handling of the same frame. Ambiguity is
+    /// an error here, so the order has to be stated rather than happen to
+    /// fall out.
+    #[test]
+    fn commands_run_before_the_gizmos_own_systems() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
+
+        #[derive(Resource, Default)]
+        struct Seen(Vec<bool>);
+
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        add_goal(&mut app, "goal", None);
+        app.init_resource::<Seen>().add_systems(
+            Update,
+            (|gizmos: Query<&TransformGizmo>, mut seen: ResMut<Seen>| {
+                seen.0.extend(gizmos.iter().map(|gizmo| gizmo.interactive));
+            })
+            .in_set(TransformGizmoSystems),
+        );
+        app.edit_schedule(Update, |schedule| {
+            schedule.set_build_settings(ScheduleBuildSettings {
+                ambiguity_detection: LogLevel::Error,
+                ..default()
+            });
+        });
+        app.update();
+        assert_eq!(app.world().resource::<Seen>().0, [true]);
+        send(&mut app, configure("goal", None, Some(false)));
+        assert_eq!(app.world().resource::<Seen>().0, [true, false]);
+    }
+
     /// An opacity outside 0 to 1 is held to it, rather than reaching the
     /// gizmo's materials as an alpha they cannot draw.
     #[test]
