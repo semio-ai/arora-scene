@@ -139,14 +139,16 @@ World, an IK solver) adds controls under keys of its own, hears each drag as a
 `control` event, and writes back what the drag should change.
 
 ```ts
-// A ring on a joint, keyed by the joint's value animatable.
-scene.control({ op: "add", key: tiltValueId, control: { kind: "joint" } });
+// A ring on a joint, keyed by the joint's value animatable, in its track's colour.
+scene.control({ op: "add", key: tiltValueId, control: { kind: "joint", color: "#22c55e" } });
 // An IK goal: a pose with nothing drawn but its handles.
 scene.control({
   op: "add",
   key: "left-hand-goal",
   control: { kind: "transform", target: { kind: "goal", pose: { position: [0.3, 0, 1.2] } } },
 });
+scene.control({ op: "configure", key: "left-hand-goal", local: true });
+scene.control({ op: "highlight", key: "left-hand-goal", on: true });
 scene.control({ op: "show", key: "left-hand-goal", visible: false });
 scene.control({ op: "remove", key: "left-hand-goal" });
 ```
@@ -161,9 +163,21 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   `{ kind: "element", id }` or `{ kind: "goal", pose }`. It offers moving,
   turning and scaling unless `modes` names fewer, along the world's axes unless
   `local` is set.
+- **Colours are the host's** when it gives them, as CSS hex: `color` on a joint
+  control (its joint's own otherwise), `colors` for a transform control's X, Y
+  and Z (red, green and blue otherwise).
+- **`configure` changes a control in place**: a joint control's `color`, a
+  transform control's `colors` and `local`. What it leaves out stays as it is,
+  and what a control's kind does not take is ignored, so one command can
+  recolour controls of both kinds.
+- **`highlight` draws a control as the one under the pointer is drawn**, until
+  turned off, for a host pointing at it from elsewhere, such as its row in a
+  list. `handle` names one handle of a transform control, as the overlay names
+  it; the whole control when absent. The pointer's own hover works as ever.
 - **Commands made before the robot has arrived wait for it**, in order;
-  `remove` cancels anything still waiting under its key, and `setPose` on a
-  goal added in the same frame applies once the goal exists.
+  `remove` cancels anything still waiting under its key, and `setPose`,
+  `configure` and `highlight` on a control added in the same frame apply once
+  it exists.
 - **`show` is the driver's.** The scene also hides controls on its own account
   (on a ghosted robot), and shows one only when neither wants it hidden.
 
@@ -176,10 +190,19 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   `null` for none. The scene needs the pointer's position before the press,
   which a real pointer always gives it.
 - **`control`**: a drag on a control, as above.
+- **`controlPress`**: a press with the right or middle button on a control's
+  handle, with its `key`, `handle`, `button` and `position` in the canvas's CSS
+  pixels. It is the host's to act on, to open a menu for the control, say: it
+  moves nothing and turns or pans no view. A right-click over a control also
+  reaches the page as an ordinary `contextmenu` event, not prevented, so a
+  context menu wrapped around `<Scene>` opens there; anywhere else on the
+  scene, a right-click pans the view and opens no menu.
 - **`robot`**: how each robot the scene was given ended up, the one it started
   with included, by its `key`. Once the robot is showing it carries `joints`:
   each joint's name, kind, the element it moves, the animatable that moves it
-  (the key for its joint control), its limits, and how it mimics another.
+  (the key for its joint control), its limits, and how it mimics another. It
+  also carries `elements`, each element's id with the name its author gave it
+  (`base_link`), so a host that knows a link by name can find its id.
   Otherwise it carries `error`, the reason it could not be loaded or was
   replaced. `loadRobot`'s promise settles from it.
 

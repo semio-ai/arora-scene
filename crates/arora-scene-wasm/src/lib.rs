@@ -18,7 +18,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use arora_scene::controls::{ControlCommand, ControlCommands, ControlEvent, ControlEvents};
+use arora_scene::controls::{
+    ControlCommand, ControlCommands, ControlEvent, ControlEvents, ControlPress, ControlPresses,
+};
 use arora_scene::instance::{RobotMeta, Selected};
 use arora_scene::redraw::RedrawOnChangePlugin;
 use arora_scene::stage::{Environment, Theme};
@@ -496,7 +498,21 @@ enum SceneEvent<'a> {
         /// The robot's joints, once it is showing.
         #[serde(skip_serializing_if = "Option::is_none")]
         joints: Option<Vec<JointInfo<'a>>>,
+        /// The robot's elements, once it is showing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elements: Option<Vec<ElementInfo<'a>>>,
     },
+    /// A press with a button other than the primary on a control, which the
+    /// page acts on as it likes.
+    ControlPress(&'a ControlPress),
+}
+
+/// An element as the page sees it: its id, which writes, poses and picks
+/// name it by, and what its author called it.
+#[derive(Serialize)]
+struct ElementInfo<'a> {
+    id: &'a str,
+    name: &'a str,
 }
 
 /// A joint as the page sees it: what to call it, what to write to move it,
@@ -642,6 +658,7 @@ fn emit_events(
     overlay: Res<Overlay>,
     mut picks: ResMut<Picks>,
     mut controls: ResMut<ControlEvents>,
+    mut presses: ResMut<ControlPresses>,
     mut robots: ResMut<arora_scene::RobotOutcomes>,
 ) {
     for outcome in std::mem::take(&mut robots.0) {
@@ -651,16 +668,27 @@ fn emit_events(
                 glb: &shown.glb,
                 error: None,
                 joints: Some(shown.joints.iter().map(JointInfo::from).collect()),
+                elements: Some(
+                    shown
+                        .elements
+                        .iter()
+                        .map(|(id, name)| ElementInfo { id, name })
+                        .collect(),
+                ),
             },
             Err((glb, why)) => SceneEvent::Robot {
                 glb,
                 error: Some(why),
                 joints: None,
+                elements: None,
             },
         });
     }
     for event in std::mem::take(&mut controls.0) {
         send(&SceneEvent::Control(&event));
+    }
+    for press in std::mem::take(&mut presses.0) {
+        send(&SceneEvent::ControlPress(&press));
     }
     let picks = std::mem::take(&mut picks.0);
     if SNAPSHOT.swap(false, Ordering::SeqCst) || overlay.is_changed() {

@@ -251,8 +251,14 @@ async function start(
   // Nothing may wait on the first robot, so its failure is the page's to hear
   // through its handler or a later `loadRobot`, not an unhandled rejection.
   track(wasm.first_robot(), key).catch(() => {});
+  // Whether the pointer is over a control, from the overlay, and whether the
+  // last press other than the primary's was (see the listeners below).
+  let overControl = false;
+  let pressedOnControl = false;
   const dispatch =
     (handler?: (event: SceneEvent) => void) => (event: WasmEvent) => {
+      if (event.type === "overlay")
+        overControl = event.pointer !== null && !event.pointer.held;
       if (event.type !== "robot") {
         handler?.(event);
         return;
@@ -266,6 +272,30 @@ async function start(
       handler?.({ ...outcome, key: robot.key });
     };
   wasm.set_event_handler(dispatch());
+  // A right-click over a control is the host's, to open its own menu there:
+  // the renderer prevents every context menu on its canvas, and a menu
+  // component skips an event already prevented. So one over a control is
+  // stopped before the renderer sees it and sent on, unprevented, from the
+  // canvas's container. Whether it is over a control is read from the
+  // overlay at the press, before the scene has seen the press, since a
+  // browser may fire the menu event only once the button is released.
+  canvas.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (e.button !== 0) pressedOnControl = overControl;
+    },
+    { capture: true },
+  );
+  canvas.addEventListener(
+    "contextmenu",
+    (e) => {
+      if (!e.isTrusted || !pressedOnControl) return;
+      pressedOnControl = false;
+      e.stopImmediatePropagation();
+      canvas.parentElement?.dispatchEvent(new MouseEvent("contextmenu", e));
+    },
+    { capture: true },
+  );
   return {
     backend,
     canvas,

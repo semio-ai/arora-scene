@@ -995,6 +995,17 @@ pub struct RobotOutcomes(pub Vec<Result<Shown, (String, String)>>);
 pub struct Shown {
     pub glb: String,
     pub joints: Vec<robot::Joint>,
+    /// Its elements, as `(id, name)`: the name is what the author called
+    /// the element (a link's `base_link`), empty where unnamed.
+    pub elements: Vec<(String, String)>,
+}
+
+/// An asset's elements as `(id, name)`, for [`Shown`].
+fn named(meta: &arora_visuals::meta::AssetMeta) -> Vec<(String, String)> {
+    meta.elements
+        .iter()
+        .map(|element| (element.id.clone(), element.name.clone()))
+        .collect()
 }
 
 /// Whether how the robot the scene started with ended up has been reported.
@@ -1152,6 +1163,7 @@ fn finish_swap(
     outcomes.0.push(Ok(Shown {
         glb: pending.glb.clone(),
         joints: pending.joints.clone(),
+        elements: named(&pending.meta),
     }));
     commands.remove_resource::<PendingRobot>();
     log::info!("swapped in {}", pending.glb);
@@ -1165,6 +1177,7 @@ fn report_first_robot(
     mut first: ResMut<FirstRobot>,
     spec: Res<RobotSpec>,
     joints: Option<Res<joints::RobotJoints>>,
+    meta: Option<Res<instance::RobotMeta>>,
     assets: Res<AssetServer>,
     roots: Query<(&WorldAssetRoot, Has<Children>), Without<Incoming>>,
     mut outcomes: ResMut<RobotOutcomes>,
@@ -1191,6 +1204,7 @@ fn report_first_robot(
         outcomes.0.push(Ok(Shown {
             glb: spec.glb.clone(),
             joints: joints.map(|j| j.0.clone()).unwrap_or_default(),
+            elements: meta.map(|m| named(&m.0)).unwrap_or_default(),
         }));
     }
 }

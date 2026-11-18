@@ -105,6 +105,12 @@ function Running({ robot: first }: { robot: Robot }) {
           : `robot ${event.key} showing`,
       );
     }
+    if (event.type === "controlPress")
+      return note(
+        `${event.button} press on ${event.key.slice(0, 8)} ${JSON.stringify(
+          event.handle,
+        )} at ${event.position.map((v) => Math.round(v)).join(",")}`,
+      );
     const scene = sceneRef.current;
     if (event.phase !== "move")
       note(
@@ -167,6 +173,28 @@ function Running({ robot: first }: { robot: Robot }) {
         });
       case "remove":
         return scene.control({ op: "remove", key });
+      case "highlight":
+      case "unhighlight":
+        return scene.control({
+          op: "highlight",
+          key,
+          on: submitter?.value === "highlight",
+        });
+      case "recolour":
+        // Every kind takes the colour it can: a joint one, a transform three.
+        return scene.control({
+          op: "configure",
+          key,
+          color: "#f59e0b",
+          colors: ["#f59e0b", "#a855f7", "#14b8a6"],
+        });
+      case "local":
+      case "world":
+        return scene.control({
+          op: "configure",
+          key,
+          local: submitter?.value === "local",
+        });
     }
   };
 
@@ -270,6 +298,23 @@ function Running({ robot: first }: { robot: Robot }) {
           <button type="submit" value="remove" disabled={!scene}>
             Remove
           </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="submit" value="highlight" disabled={!scene}>
+              Highlight
+            </button>
+            <button type="submit" value="unhighlight" disabled={!scene}>
+              Unhighlight
+            </button>
+            <button type="submit" value="recolour" disabled={!scene}>
+              Recolour
+            </button>
+            <button type="submit" value="local" disabled={!scene}>
+              Local axes
+            </button>
+            <button type="submit" value="world" disabled={!scene}>
+              World axes
+            </button>
+          </div>
           <label>
             <input
               type="checkbox"

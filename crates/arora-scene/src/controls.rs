@@ -25,8 +25,9 @@ use std::f32::consts::FRAC_PI_2;
 use arora_visuals::instance::EntityInstance;
 use arora_visuals::joint_gizmo::{JointDrag, JointGizmo};
 use arora_visuals::transform_gizmo::{
-    DragPhase, GizmoDrag, GizmoSpace, TransformGizmo, TransformModes,
+    DragPhase, GizmoDrag, GizmoHandle, GizmoPress, GizmoSpace, TransformGizmo, TransformModes,
 };
+use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use serde::{Deserialize, Serialize};
@@ -100,7 +101,11 @@ pub enum Mode {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Control {
     /// A ring or bar on the joint whose value animatable is the control's key.
-    Joint,
+    Joint {
+        /// A CSS hex colour; the joint's own when absent.
+        #[serde(default)]
+        color: Option<String>,
+    },
     Transform {
         target: Target,
         /// Every mode when absent.
@@ -109,7 +114,27 @@ pub enum Control {
         /// Handles along the target's own axes rather than the world's.
         #[serde(default)]
         local: bool,
+        /// The X, Y and Z handles' CSS hex colours; red, green and blue when
+        /// absent.
+        #[serde(default)]
+        colors: Option<[String; 3]>,
     },
+}
+
+/// A CSS hex colour, or `None`, said in the log, for one that is not.
+fn colour(hex: &str) -> Option<Color> {
+    match Srgba::hex(hex) {
+        Ok(colour) => Some(colour.into()),
+        Err(_) => {
+            log::warn!("{hex:?} is not a hex colour; ignored");
+            None
+        }
+    }
+}
+
+/// Three CSS hex colours, or `None` if any is not one.
+fn colours(hex: &[String; 3]) -> Option<[Color; 3]> {
+    Some([colour(&hex[0])?, colour(&hex[1])?, colour(&hex[2])?])
 }
 
 /// A driver's instruction about one control.
@@ -136,6 +161,29 @@ pub enum ControlCommand {
         #[serde(default)]
         scale: Option<[f32; 3]>,
     },
+    /// Changes how a control looks or works, in place: a joint control's
+    /// `color`, a transform control's `colors` and whether it is `local`.
+    /// What is absent stays as it is, and what the control's kind does not
+    /// take is ignored, so one command can recolour controls of both kinds.
+    Configure {
+        key: String,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        colors: Option<[String; 3]>,
+        #[serde(default)]
+        local: Option<bool>,
+    },
+    /// Draws a control as the one under the pointer is drawn, or stops: a
+    /// host pointing at it from elsewhere. `handle` names one handle of a
+    /// transform control, in the form the overlay gives it; the whole control
+    /// when absent.
+    Highlight {
+        key: String,
+        #[serde(default)]
+        handle: Option<GizmoHandle>,
+        on: bool,
+    },
 }
 
 impl ControlCommand {
@@ -144,7 +192,9 @@ impl ControlCommand {
             Self::Add { key, .. }
             | Self::Remove { key }
             | Self::Show { key, .. }
-            | Self::SetPose { key, .. } => key,
+            | Self::SetPose { key, .. }
+            | Self::Configure { key, .. }
+            | Self::Highlight { key, .. } => key,
         }
     }
 }
@@ -201,6 +251,32 @@ pub struct ControlEvent {
 #[derive(Resource, Default)]
 pub struct ControlEvents(pub Vec<ControlEvent>);
 
+/// The button of a press on a control that is the host's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PressButton {
+    Secondary,
+    Middle,
+}
+
+/// A press with a button other than the primary on a control, which is the
+/// host's to act on (to open a menu for it, say). It moves nothing, and turns
+/// and pans no view.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlPress {
+    pub key: String,
+    /// The handle pressed, in the form the overlay gives it.
+    pub handle: GizmoHandle,
+    pub button: PressButton,
+    /// Where the press was, in the canvas's CSS pixels.
+    pub position: [f32; 2],
+}
+
+/// Presses since a host last drained them.
+#[derive(Resource, Default)]
+pub struct ControlPresses(pub Vec<ControlPress>);
+
 /// The controls in the scene, by key.
 #[derive(Resource, Default)]
 pub struct Controls(HashMap<String, Placed>);
@@ -219,10 +295,12 @@ impl Plugin for ControlsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ControlCommands>()
             .init_resource::<ControlEvents>()
+            .init_resource::<ControlPresses>()
             .init_resource::<Controls>()
             .add_systems(Update, carry_out)
             .add_observer(report_transform_drag)
-            .add_observer(report_joint_drag);
+            .add_observer(report_joint_drag)
+            .add_observer(report_press);
     }
 }
 
@@ -241,6 +319,8 @@ fn carry_out(
     globals: Query<&GlobalTransform>,
     mut transforms: Query<&mut Transform>,
     gizmos: Query<(), AnyGizmo>,
+    mut transform_gizmos: Query<&mut TransformGizmo>,
+    mut joint_gizmos: Query<&mut JointGizmo>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     // A control whose gizmo is gone went with the robot it was on, when the
@@ -263,7 +343,7 @@ fn carry_out(
                     despawn(&mut commands, old);
                 }
                 let placed = match control {
-                    Control::Joint => {
+                    Control::Joint { color } => {
                         let joint = joints
                             .as_ref()
                             .and_then(|j| j.0.iter().find(|j| j.animatable.as_ref() == Some(&key)));
@@ -286,7 +366,10 @@ fn carry_out(
                             joint.min,
                             joint.max,
                             current,
-                            joint.color.into(),
+                            color
+                                .as_deref()
+                                .and_then(colour)
+                                .unwrap_or_else(|| joint.color.into()),
                         );
                         gizmo.limited = joint.is_limited();
                         gizmo.apply = false;
@@ -301,6 +384,7 @@ fn carry_out(
                         target,
                         modes,
                         local,
+                        colors,
                     } => {
                         let (target, goal) = match target {
                             Target::Robot => (root, None),
@@ -326,9 +410,11 @@ fn carry_out(
                                 scale: modes.iter().any(|m| matches!(m, Mode::Scale)),
                             },
                         };
+                        let base = TransformGizmo::new(target, camera);
                         let gizmo = commands
                             .spawn(TransformGizmo {
                                 key: key.clone(),
+                                colours: colors.as_ref().and_then(colours).unwrap_or(base.colours),
                                 modes,
                                 space: if local {
                                     GizmoSpace::Local
@@ -339,7 +425,7 @@ fn carry_out(
                                 // the view gizmo is.
                                 axes: TransformGizmo::Z_UP,
                                 apply: false,
-                                ..TransformGizmo::new(target, camera)
+                                ..base
                             })
                             .id();
                         Placed {
@@ -408,6 +494,76 @@ fn carry_out(
                     transform.scale = Vec3::from(scale);
                 }
             }
+            ControlCommand::Configure {
+                key,
+                color,
+                colors,
+                local,
+            } => {
+                // A control added this frame is spawned at the end of it, so
+                // its gizmo is not there yet; the change waits a frame for
+                // it, as one made before the add would.
+                let gizmo = controls.0.get(&key).map(|placed| placed.gizmo);
+                let spawned = gizmo.is_some_and(|gizmo| {
+                    transform_gizmos.contains(gizmo) || joint_gizmos.contains(gizmo)
+                });
+                let (Some(gizmo), true) = (gizmo, spawned) else {
+                    waiting.push(ControlCommand::Configure {
+                        key,
+                        color,
+                        colors,
+                        local,
+                    });
+                    continue;
+                };
+                if let Ok(mut gizmo) = transform_gizmos.get_mut(gizmo) {
+                    if let Some(colours) = colors.as_ref().and_then(colours) {
+                        gizmo.colours = colours;
+                    }
+                    if let Some(local) = local {
+                        gizmo.space = if local {
+                            GizmoSpace::Local
+                        } else {
+                            GizmoSpace::World
+                        };
+                    }
+                    if color.is_some() && colors.is_none() && local.is_none() {
+                        log::warn!("{key:?} is a transform control; give it colors");
+                    }
+                } else if let Ok(mut gizmo) = joint_gizmos.get_mut(gizmo) {
+                    if let Some(colour) = color.as_deref().and_then(colour) {
+                        gizmo.colour = colour;
+                    }
+                    if color.is_none() && (colors.is_some() || local.is_some()) {
+                        log::warn!("{key:?} is a joint control; give it a color");
+                    }
+                }
+            }
+            ControlCommand::Highlight { key, handle, on } => {
+                // Waits for a control added this frame, as a configure does.
+                let gizmo = controls.0.get(&key).map(|placed| placed.gizmo);
+                let spawned = gizmo.is_some_and(|gizmo| {
+                    transform_gizmos.contains(gizmo) || joint_gizmos.contains(gizmo)
+                });
+                let (Some(gizmo), true) = (gizmo, spawned) else {
+                    waiting.push(ControlCommand::Highlight { key, handle, on });
+                    continue;
+                };
+                if let Ok(mut gizmo) = transform_gizmos.get_mut(gizmo) {
+                    match (handle, on) {
+                        (Some(handle), true) => {
+                            if !gizmo.highlight.contains(&handle) {
+                                gizmo.highlight.push(handle);
+                            }
+                        }
+                        (Some(handle), false) => gizmo.highlight.retain(|h| *h != handle),
+                        (None, true) => gizmo.highlight = GizmoHandle::ALL.to_vec(),
+                        (None, false) => gizmo.highlight.clear(),
+                    }
+                } else if let Ok(mut gizmo) = joint_gizmos.get_mut(gizmo) {
+                    gizmo.show_in_hand = on;
+                }
+            }
         }
     }
     pending.0 = waiting;
@@ -449,6 +605,36 @@ fn report_transform_drag(
         value: None,
         pose: Some(Pose::from_scene(&world)),
         scale: Some(drag.transform.scale.to_array()),
+    });
+}
+
+fn report_press(
+    press: On<GizmoPress>,
+    transform_gizmos: Query<&TransformGizmo>,
+    joint_gizmos: Query<&JointGizmo>,
+    mut presses: ResMut<ControlPresses>,
+) {
+    let key = match (
+        transform_gizmos.get(press.entity),
+        joint_gizmos.get(press.entity),
+    ) {
+        (Ok(gizmo), _) => &gizmo.key,
+        (_, Ok(gizmo)) => &gizmo.key,
+        _ => return,
+    };
+    let button = match press.button {
+        PointerButton::Secondary => PressButton::Secondary,
+        PointerButton::Middle => PressButton::Middle,
+        PointerButton::Primary => return,
+    };
+    if key.is_empty() {
+        return;
+    }
+    presses.0.push(ControlPress {
+        key: key.clone(),
+        handle: press.handle,
+        button,
+        position: press.position.to_array(),
     });
 }
 
@@ -567,7 +753,7 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint,
+                control: Control::Joint { color: None },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).expect("a joint control");
@@ -599,7 +785,7 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint,
+                control: Control::Joint { color: None },
             },
         );
         send(
@@ -627,7 +813,7 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint,
+                control: Control::Joint { color: None },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).unwrap();
@@ -665,6 +851,7 @@ mod tests {
                     target: Target::Goal { pose: at },
                     modes: None,
                     local: false,
+                    colors: None,
                 },
             },
         );
@@ -714,6 +901,7 @@ mod tests {
             },
             modes: None,
             local: false,
+            colors: None,
         }
     }
 
@@ -752,7 +940,7 @@ mod tests {
         app.world_mut().resource_mut::<ControlCommands>().0.extend([
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint,
+                control: Control::Joint { color: None },
             },
             ControlCommand::Show {
                 key: TILT.into(),
@@ -775,7 +963,7 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint,
+                control: Control::Joint { color: None },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).unwrap();
@@ -804,6 +992,242 @@ mod tests {
         let turn = Quat::from_rotation_y(0.7);
         let pose = Pose::from_scene(&Transform::from_rotation(turn));
         assert!(Quat::from_array(pose.rotation).abs_diff_eq(Quat::from_rotation_z(0.7), 1e-6));
+    }
+
+    fn add_goal(app: &mut App, key: &str, colors: Option<[String; 3]>) -> Entity {
+        let mut control = goal_at([0.0, 0.0, 1.0]);
+        if let Control::Transform { colors: c, .. } = &mut control {
+            *c = colors;
+        }
+        send(
+            app,
+            ControlCommand::Add {
+                key: key.into(),
+                control,
+            },
+        );
+        only::<TransformGizmo>(app).expect("a transform control")
+    }
+
+    fn red() -> Color {
+        Srgba::hex("#ff0000").unwrap().into()
+    }
+
+    /// A control takes the host's colours when added, and changes them, and
+    /// a transform control its axes, when configured; a bad colour changes
+    /// nothing.
+    #[test]
+    fn a_control_takes_the_host_s_colours_and_axes() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let hex = |s: &str| s.to_string();
+        let gizmo = add_goal(
+            &mut app,
+            "goal",
+            Some([hex("#ff0000"), hex("#00ff00"), hex("#0000ff")]),
+        );
+        assert_eq!(
+            app.world().get::<TransformGizmo>(gizmo).unwrap().colours[0],
+            red()
+        );
+        send(
+            &mut app,
+            ControlCommand::Configure {
+                key: "goal".into(),
+                color: None,
+                colors: Some([hex("#0000ff"), hex("not a colour"), hex("#ff0000")]),
+                local: Some(true),
+            },
+        );
+        let configured = app.world().get::<TransformGizmo>(gizmo).unwrap();
+        assert_eq!(configured.colours[0], red(), "a bad colour changes none");
+        assert_eq!(configured.space, GizmoSpace::Local);
+
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint {
+                    color: Some(hex("#ff0000")),
+                },
+            },
+        );
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        assert_eq!(app.world().get::<JointGizmo>(joint).unwrap().colour, red());
+        send(
+            &mut app,
+            ControlCommand::Configure {
+                key: TILT.into(),
+                color: Some(hex("#00ff00")),
+                colors: None,
+                local: None,
+            },
+        );
+        assert_eq!(
+            app.world().get::<JointGizmo>(joint).unwrap().colour,
+            Srgba::hex("#00ff00").unwrap().into()
+        );
+    }
+
+    /// A highlight lights one handle, or every one, until it is turned off;
+    /// on a joint control it shows the control in hand.
+    #[test]
+    fn a_highlight_lights_a_handle_or_the_whole_control() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let gizmo = add_goal(&mut app, "goal", None);
+        let highlight = |app: &mut App, handle, on| {
+            send(
+                app,
+                ControlCommand::Highlight {
+                    key: "goal".into(),
+                    handle,
+                    on,
+                },
+            );
+            app.world()
+                .get::<TransformGizmo>(gizmo)
+                .unwrap()
+                .highlight
+                .clone()
+        };
+        let ring = GizmoHandle::Ring(1);
+        assert_eq!(highlight(&mut app, Some(ring), true), vec![ring]);
+        assert_eq!(highlight(&mut app, Some(ring), true), vec![ring], "once");
+        assert_eq!(highlight(&mut app, Some(ring), false), vec![]);
+        assert_eq!(
+            highlight(&mut app, None, true).len(),
+            GizmoHandle::ALL.len()
+        );
+        assert_eq!(highlight(&mut app, None, false), vec![]);
+
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint { color: None },
+            },
+        );
+        send(
+            &mut app,
+            ControlCommand::Highlight {
+                key: TILT.into(),
+                handle: None,
+                on: true,
+            },
+        );
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        assert!(app.world().get::<JointGizmo>(joint).unwrap().show_in_hand);
+    }
+
+    /// A highlight or a change sent in the frame its control is added applies
+    /// once the control exists, rather than being lost.
+    #[test]
+    fn a_change_sent_with_the_add_is_not_lost() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let mut control = goal_at([0.0, 0.0, 1.0]);
+        if let Control::Transform { colors, .. } = &mut control {
+            *colors = None;
+        }
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            ControlCommand::Add {
+                key: "goal".into(),
+                control,
+            },
+            ControlCommand::Highlight {
+                key: "goal".into(),
+                handle: None,
+                on: true,
+            },
+            ControlCommand::Configure {
+                key: "goal".into(),
+                color: None,
+                colors: None,
+                local: Some(true),
+            },
+        ]);
+        app.update();
+        app.update();
+        let gizmo = only::<TransformGizmo>(&mut app).unwrap();
+        let gizmo = app.world().get::<TransformGizmo>(gizmo).unwrap();
+        assert_eq!(gizmo.highlight.len(), GizmoHandle::ALL.len());
+        assert_eq!(gizmo.space, GizmoSpace::Local);
+    }
+
+    /// A host's press on a control's handle is reported by the control's
+    /// key, with where it was.
+    #[test]
+    fn a_press_with_another_button_is_reported_by_key() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let gizmo = add_goal(&mut app, "goal", None);
+        app.world_mut().trigger(GizmoPress {
+            entity: gizmo,
+            handle: GizmoHandle::Arrow(2),
+            button: PointerButton::Secondary,
+            position: Vec2::new(40.0, 30.0),
+        });
+        let presses = std::mem::take(&mut app.world_mut().resource_mut::<ControlPresses>().0);
+        assert_eq!(presses.len(), 1);
+        assert_eq!(
+            (
+                presses[0].key.as_str(),
+                presses[0].handle,
+                presses[0].button,
+                presses[0].position
+            ),
+            (
+                "goal",
+                GizmoHandle::Arrow(2),
+                PressButton::Secondary,
+                [40.0, 30.0]
+            )
+        );
+        let json = serde_json::to_value(&presses[0]).unwrap();
+        assert_eq!(json["handle"], serde_json::json!({ "Arrow": 2 }));
+        assert_eq!(json["button"], "secondary");
+    }
+
+    /// The JSON a host sends reads as the commands it means.
+    #[test]
+    fn commands_read_from_the_host_s_json() {
+        let read =
+            |json: serde_json::Value| -> ControlCommand { serde_json::from_value(json).unwrap() };
+        assert!(matches!(
+            read(serde_json::json!({ "op": "add", "key": "k", "control": { "kind": "joint" } })),
+            ControlCommand::Add {
+                control: Control::Joint { color: None },
+                ..
+            }
+        ));
+        assert!(matches!(
+            read(
+                serde_json::json!({ "op": "highlight", "key": "k", "handle": { "Ring": 0 }, "on": true })
+            ),
+            ControlCommand::Highlight {
+                handle: Some(GizmoHandle::Ring(0)),
+                on: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read(serde_json::json!({ "op": "highlight", "key": "k", "on": false })),
+            ControlCommand::Highlight {
+                handle: None,
+                on: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read(serde_json::json!({ "op": "configure", "key": "k", "local": true })),
+            ControlCommand::Configure {
+                local: Some(true),
+                color: None,
+                colors: None,
+                ..
+            }
+        ));
     }
 
     #[test]
