@@ -331,8 +331,32 @@ fn carry_out(
     }
     let camera = cameras.iter().next();
     let robot = instances.iter().next();
+    let asked = std::mem::take(&mut pending.0);
+    // Keys an add is coming for, in this batch or waiting from an earlier one.
+    let adding: std::collections::HashSet<String> = asked
+        .iter()
+        .filter_map(|command| match command {
+            ControlCommand::Add { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    // Whether a change for `key` should wait: for its control's gizmo, which
+    // an add this frame spawns at the end of it, or for an add still to come.
+    // Anything else is for a key nothing will add, such as one whose control
+    // went with a swapped robot, and waiting would hold it, and the frames it
+    // asks for, for good.
+    let worth_waiting = |key: &str, controls: &Controls| {
+        controls.0.contains_key(key) || robot.is_none() || adding.contains(key)
+    };
     let mut waiting = Vec::new();
-    for command in std::mem::take(&mut pending.0) {
+    // Whether to draw another frame: for a command that changed something, or
+    // one waiting on a gizmo spawned at the end of this one.
+    let mut again = false;
+    for command in asked {
+        again |= !matches!(
+            command,
+            ControlCommand::Configure { .. } | ControlCommand::Highlight { .. }
+        );
         match command {
             ControlCommand::Add { key, control } => {
                 let (Some(camera), Some((root, instance, rig))) = (camera, robot) else {
@@ -508,14 +532,20 @@ fn carry_out(
                     transform_gizmos.contains(gizmo) || joint_gizmos.contains(gizmo)
                 });
                 let (Some(gizmo), true) = (gizmo, spawned) else {
-                    waiting.push(ControlCommand::Configure {
-                        key,
-                        color,
-                        colors,
-                        local,
-                    });
+                    if worth_waiting(&key, &controls) {
+                        again |= controls.0.contains_key(&key);
+                        waiting.push(ControlCommand::Configure {
+                            key,
+                            color,
+                            colors,
+                            local,
+                        });
+                    } else {
+                        log::debug!("no control {key:?} to configure");
+                    }
                     continue;
                 };
+                again = true;
                 if let Ok(mut gizmo) = transform_gizmos.get_mut(gizmo) {
                     if let Some(colours) = colors.as_ref().and_then(colours) {
                         gizmo.colours = colours;
@@ -546,9 +576,15 @@ fn carry_out(
                     transform_gizmos.contains(gizmo) || joint_gizmos.contains(gizmo)
                 });
                 let (Some(gizmo), true) = (gizmo, spawned) else {
-                    waiting.push(ControlCommand::Highlight { key, handle, on });
+                    if worth_waiting(&key, &controls) {
+                        again |= controls.0.contains_key(&key);
+                        waiting.push(ControlCommand::Highlight { key, handle, on });
+                    } else {
+                        log::debug!("no control {key:?} to highlight");
+                    }
                     continue;
                 };
+                again = true;
                 if let Ok(mut gizmo) = transform_gizmos.get_mut(gizmo) {
                     match (handle, on) {
                         (Some(handle), true) => {
@@ -567,7 +603,9 @@ fn carry_out(
         }
     }
     pending.0 = waiting;
-    redraw.write(RequestRedraw);
+    if again {
+        redraw.write(RequestRedraw);
+    }
 }
 
 fn despawn(commands: &mut Commands, placed: Placed) {
@@ -1153,6 +1191,67 @@ mod tests {
         let gizmo = app.world().get::<TransformGizmo>(gizmo).unwrap();
         assert_eq!(gizmo.highlight.len(), GizmoHandle::ALL.len());
         assert_eq!(gizmo.space, GizmoSpace::Local);
+    }
+
+    /// A highlight or a change for a key nothing will add is dropped, rather
+    /// than waiting, and asking for a frame, for good; one for a key whose add
+    /// is still coming waits for it.
+    #[test]
+    fn a_change_for_a_key_nothing_will_add_is_dropped() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        app.update();
+        let frames_asked = |app: &mut App| {
+            let mut messages = app.world_mut().resource_mut::<Messages<RequestRedraw>>();
+            let asked = messages.len();
+            messages.clear();
+            asked
+        };
+        frames_asked(&mut app);
+        send(
+            &mut app,
+            ControlCommand::Highlight {
+                key: "nobody".into(),
+                handle: None,
+                on: true,
+            },
+        );
+        send(
+            &mut app,
+            ControlCommand::Configure {
+                key: "nobody".into(),
+                color: Some("#ff0000".into()),
+                colors: None,
+                local: None,
+            },
+        );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+        app.update();
+        app.update();
+        assert_eq!(frames_asked(&mut app), 0, "the scene can idle");
+
+        // Before the robot, a highlight waits for the add it will follow.
+        let (mut app, body) = scene();
+        send(
+            &mut app,
+            ControlCommand::Highlight {
+                key: TILT.into(),
+                handle: None,
+                on: true,
+            },
+        );
+        assert_eq!(app.world().resource::<ControlCommands>().0.len(), 1);
+        robot(&mut app, body);
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: TILT.into(),
+                control: Control::Joint { color: None },
+            },
+        );
+        app.update();
+        let joint = only::<JointGizmo>(&mut app).unwrap();
+        assert!(app.world().get::<JointGizmo>(joint).unwrap().show_in_hand);
     }
 
     /// A host's press on a control's handle is reported by the control's

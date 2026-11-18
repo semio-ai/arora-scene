@@ -1152,14 +1152,15 @@ fn finish_swap(
     commands.insert_resource(instance::Selected(Vec::new()));
     commands.insert_resource(instance::RobotMeta(pending.meta.clone()));
     commands.insert_resource(joints::RobotJoints(pending.joints.clone()));
-    spec.glb = pending.glb.clone();
-    census.taken = false;
-    census.since = frames.elapsed;
-    framing.fitted = false;
+    // While no swap has finished, `spec` still names the first robot.
     if !first.reported {
         first.reported = true;
         outcomes.0.push(Err((spec.glb.clone(), REPLACED.into())));
     }
+    spec.glb = pending.glb.clone();
+    census.taken = false;
+    census.since = frames.elapsed;
+    framing.fitted = false;
     outcomes.0.push(Ok(Shown {
         glb: pending.glb.clone(),
         joints: pending.joints.clone(),

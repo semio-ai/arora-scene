@@ -194,9 +194,10 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   handle, with its `key`, `handle`, `button` and `position` in the canvas's CSS
   pixels. It is the host's to act on, to open a menu for the control, say: it
   moves nothing and turns or pans no view. A right-click over a control also
-  reaches the page as an ordinary `contextmenu` event, not prevented, so a
-  context menu wrapped around `<Scene>` opens there; anywhere else on the
-  scene, a right-click pans the view and opens no menu.
+  reaches the elements around the scene as an ordinary `contextmenu` event,
+  not prevented, sent from `<Scene>`'s element, so a context menu wrapped
+  around `<Scene>` opens there; the browser's own menu stays shut. Anywhere
+  else on the scene, a right-click pans the view and opens no menu.
 - **`robot`**: how each robot the scene was given ended up, the one it started
   with included, by its `key`. Once the robot is showing it carries `joints`:
   each joint's name, kind, the element it moves, the animatable that moves it
@@ -244,7 +245,8 @@ wasm host is the reference for wiring it.
   not indexed or driven), and swaps it in once it has loaded whole and
   spawned. How each robot ended up, the one the scene started with included,
   lands in `RobotOutcomes`, in the order they ended: `Ok(Shown { glb,
-  joints })` once the robot is showing, with that robot's own joints,
+  joints, elements })` once the robot is showing, with that robot's own
+  joints and elements,
   `Err((glb, why))` if it failed to load or another replaced it first, the
   old robot kept.
 

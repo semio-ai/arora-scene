@@ -278,12 +278,16 @@ async function start(
       robots.delete(glb);
       if (!robot) return;
       if (outcome.error === undefined) {
-        if (running)
+        // Set before the handler hears of it, so the handle already says
+        // which robot is showing when it does.
+        if (running) {
+          running.key = robot.key;
           running.robot = {
             key: robot.key,
             joints: outcome.joints ?? [],
             elements: outcome.elements ?? [],
           };
+        }
         robot.resolve();
       } else robot.reject(new Error(outcome.error));
       handler?.({ ...outcome, key: robot.key });
@@ -292,14 +296,26 @@ async function start(
   // A right-click over a control is the host's, to open its own menu there:
   // the renderer prevents every context menu on its canvas, and a menu
   // component skips an event already prevented. So one over a control is
-  // stopped before the renderer sees it and sent on, unprevented, from the
-  // canvas's container. Whether it is over a control is read from the
-  // overlay at the press, before the scene has seen the press, since a
-  // browser may fire the menu event only once the button is released.
+  // prevented here, which keeps the browser's own menu shut, kept from the
+  // renderer, and sent on as a fresh, unprevented copy from the canvas's
+  // container, where a menu wrapped around the scene hears it.
+  //
+  // Whether it is over a control is read from the overlay at the press,
+  // before the scene has seen the press, since a browser may fire the menu
+  // event only once the button is released. That reading lasts for the one
+  // press: the next press replaces it, and it lapses once the button is up,
+  // so a menu opened from the keyboard later is never taken for it.
   canvas.addEventListener(
     "pointerdown",
     (e) => {
-      if (e.button !== 0) pressedOnControl = overControl;
+      pressedOnControl = e.button !== 0 && overControl;
+    },
+    { capture: true },
+  );
+  canvas.addEventListener(
+    "pointerup",
+    () => {
+      setTimeout(() => (pressedOnControl = false));
     },
     { capture: true },
   );
@@ -308,6 +324,7 @@ async function start(
     (e) => {
       if (!e.isTrusted || !pressedOnControl) return;
       pressedOnControl = false;
+      e.preventDefault();
       e.stopImmediatePropagation();
       canvas.parentElement?.dispatchEvent(new MouseEvent("contextmenu", e));
     },
