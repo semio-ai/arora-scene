@@ -168,7 +168,7 @@ pub enum ControlCommand {
     /// absent stays as it is, and what the control's kind does not take is
     /// ignored, so one command can recolour controls of both kinds.
     ///
-    /// `opacity`, from 0 to 1, is eased into over [`FADE_SECS`] (longer while
+    /// `opacity`, from 0 to 1, is faded to evenly over [`FADE_SECS`] (longer while
     /// frames come slower than thirty a second), so a host sends the value it
     /// wants once. It is how the control looks only: a faded control still
     /// takes the pointer. A control that is not `interactive` takes no hover,
@@ -300,7 +300,7 @@ struct Placed {
     target: Option<Entity>,
     /// A goal the control brought with it, which goes when it goes.
     goal: Option<Entity>,
-    /// The opacity the host asked for, which the gizmo's eases toward.
+    /// The opacity the host asked for, which the gizmo's fades toward.
     opacity: f32,
     /// The fade toward `opacity` under way, if one is.
     fade: Option<Fade>,
@@ -1421,11 +1421,11 @@ mod tests {
         }
     }
 
-    /// A control eases to the opacity its host asks for, over the fade's
+    /// A control fades to the opacity its host asks for, over the fade's
     /// length rather than at once, and stays there; a frame that comes long
     /// after the last takes one step of it, not the whole fade.
     #[test]
-    fn a_control_eases_to_the_opacity_asked_for() {
+    fn a_control_fades_to_the_opacity_asked_for() {
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
 

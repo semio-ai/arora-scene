@@ -171,9 +171,9 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   whether it is `interactive`. What it leaves out stays as it is, and what a
   control's kind does not take is ignored, so one command can recolour
   controls of both kinds.
-- **`opacity` fades a control**, from 0 to 1, eased in over a fifth of a
-  second (longer while the scene draws fewer than thirty frames a second), so
-  a host sends the value it wants once. Sent with the control's `add`, the
+- **`opacity` fades a control** evenly to a value from 0 to 1 over a fifth of
+  a second (longer while the scene draws fewer than thirty frames a second),
+  so a host sends the value it wants once. Sent with the control's `add`, the
   control first shows at it, and `interactive: false` sent with it holds from
   its first frame. It multiplies any alpha the colours the host gave carry
   (`#22c55e80`); a robot's own joint colours draw opaque. It is how a control
