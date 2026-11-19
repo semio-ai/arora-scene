@@ -524,14 +524,19 @@ fn carry_out(
         controls.0.contains_key(key) || adding.contains(key) || loading
     };
     let mut waiting = Vec::new();
-    // Keys whose add waits for its robot. A later add under the same key
-    // waits behind it, so adds land in the order they were asked: the one
-    // asked for last is the control left.
+    // Keys whose add waits for its robot. Every later command under the same
+    // key waits behind it, so they land in the order they were asked: a later
+    // add is the control left, and a change acts on the control the add
+    // makes, not the one it replaces.
     let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Whether to draw another frame: for a command that changed something, or
     // one waiting on a gizmo spawned at the end of this pass.
     let mut again = false;
     for command in asked {
+        if held.contains(command.key()) {
+            waiting.push(command);
+            continue;
+        }
         again |= !matches!(
             command,
             ControlCommand::Configure { .. }
@@ -540,10 +545,6 @@ fn carry_out(
         );
         match command {
             ControlCommand::Add { key, control } => {
-                if held.contains(&key) {
-                    waiting.push(ControlCommand::Add { key, control });
-                    continue;
-                }
                 // A control on a robot waits for it while it is loading; one
                 // on a robot nothing is loading is dropped.
                 let on = control
@@ -1122,7 +1123,8 @@ mod tests {
     }
 
     /// Of two adds under one key, the one asked for last is the control
-    /// left, even when the first waits for its robot to load.
+    /// left, even when the first waits for its robot to load; and a change
+    /// sent behind an add that waits acts on the control it makes.
     #[test]
     fn a_later_add_under_a_key_outlasts_one_waiting_for_its_robot() {
         let (mut app, body) = scene();
@@ -1148,6 +1150,52 @@ mod tests {
         let mut gizmos = app.world_mut().query::<&JointGizmo>();
         let on: Vec<Entity> = gizmos.iter(app.world()).map(|gizmo| gizmo.target).collect();
         assert_eq!(on, vec![other]);
+    }
+
+    /// A change sent behind an add waiting for its robot acts on the
+    /// control that add makes, not the one under that key it replaces.
+    #[test]
+    fn a_change_behind_a_waiting_add_reaches_the_control_it_makes() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        send(&mut app, on("robot-1"));
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            on(ROBOT),
+            ControlCommand::Show {
+                key: "k".into(),
+                visible: false,
+            },
+        ]);
+        app.update();
+        let mut hidden = app
+            .world_mut()
+            .query_filtered::<&JointGizmo, With<HiddenByDriver>>();
+        assert_eq!(
+            hidden.iter(app.world()).count(),
+            0,
+            "the old control is left alone"
+        );
+
+        robot(&mut app, body);
+        app.update();
+        app.update();
+        let mut gizmos = app
+            .world_mut()
+            .query::<(&JointGizmo, Has<HiddenByDriver>)>();
+        let on: Vec<(Entity, bool)> = gizmos
+            .iter(app.world())
+            .map(|(gizmo, hidden)| (gizmo.target, hidden))
+            .collect();
+        assert_eq!(on, vec![(body, true)]);
     }
 
     fn send(app: &mut App, command: ControlCommand) {
