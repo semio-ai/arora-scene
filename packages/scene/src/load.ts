@@ -297,6 +297,10 @@ async function start(
           robots.set(event.instance, robot);
           settled?.resolve();
         } else settled?.reject(new Error(event.error));
+        // With nothing it asked for left unsettled, the instance is no longer
+        // loading — said before the handler hears of it, as the robot is.
+        if (!held.pending.some((waiting) => !waiting.unloaded))
+          held.loading = undefined;
       }
       handler?.(event);
     };
