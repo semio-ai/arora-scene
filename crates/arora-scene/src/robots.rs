@@ -24,13 +24,17 @@
 //!
 //! What a swap takes away with the old robot: its entities, and the controls on
 //! its joints and elements. A selection is the host's and is kept, by the
-//! instance's id; goals are nobody's and stay.
+//! instance's id, since a swap is usually a newer version of the same robot,
+//! whose element ids carry over; goals are nobody's and stay. An unload takes
+//! the selection away too: an id loaded later is a new instance, and must not
+//! light up what an old one had selected.
 
 use bevy::asset::RecursiveDependencyLoadState;
 use bevy::prelude::*;
 
 use arora_visuals::joint_gizmo::JointGizmo;
 use arora_visuals::meta::AssetMeta;
+use arora_visuals::select::Selections;
 use arora_visuals::transform_gizmo::TransformGizmo;
 
 use crate::controls::Pose;
@@ -198,6 +202,7 @@ pub(crate) fn take_requests(
     transform_gizmos: Query<(Entity, &TransformGizmo)>,
     joint_gizmos: Query<(Entity, &JointGizmo)>,
     mut outcomes: ResMut<RobotOutcomes>,
+    mut selections: ResMut<Selections>,
 ) {
     if requests.robots.is_empty() {
         return;
@@ -215,6 +220,9 @@ pub(crate) fn take_requests(
     for request in std::mem::take(&mut requests.robots) {
         match request {
             RobotRequest::Unload(instance) => {
+                if selections.0.contains_key(&instance) {
+                    selections.0.remove(&instance);
+                }
                 let Some(was) = held.remove(&instance) else {
                     continue;
                 };
@@ -395,6 +403,7 @@ mod tests {
             .init_asset::<WorldAsset>()
             .init_resource::<RobotRequests>()
             .init_resource::<RobotOutcomes>()
+            .init_resource::<Selections>()
             .add_message::<RobotLoaded>()
             .add_systems(Update, systems);
         app
@@ -526,6 +535,15 @@ mod tests {
             position: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
         };
+        {
+            let mut selections = app.world_mut().resource_mut::<Selections>();
+            for instance in ["a", "b"] {
+                selections.0.insert(
+                    instance.into(),
+                    vec![arora_visuals::select::Selection::of("x")],
+                );
+            }
+        }
         ask(
             &mut app,
             [
@@ -540,6 +558,9 @@ mod tests {
         }
         assert_eq!(outcomes(&mut app), vec![("a".into(), Err(UNLOADED.into()))]);
         assert_eq!(app.world().get::<Transform>(b), Some(&pose.to_scene()));
+        let selections = app.world().resource::<Selections>();
+        assert!(!selections.0.contains_key("a"), "its selection went");
+        assert!(selections.0.contains_key("b"));
     }
 
     fn ask(app: &mut App, requests: impl IntoIterator<Item = RobotRequest>) {

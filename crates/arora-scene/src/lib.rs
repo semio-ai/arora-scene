@@ -242,6 +242,7 @@ fn robot_requests(app: &mut App) {
     app.init_resource::<robots::RobotRequests>()
         .init_resource::<FrameOnly>()
         .init_resource::<robots::RobotOutcomes>()
+        .init_resource::<arora_visuals::select::Selections>()
         .add_message::<robots::RobotLoaded>()
         .add_systems(
             PreUpdate,
@@ -967,15 +968,25 @@ pub struct FrameOnly(pub Vec<String>);
 /// already showing, so there is nothing to wait for to settle, but a robot
 /// posed in the same frame is measured by its propagated transform, which
 /// the census reads only after this frame's propagation.
+///
+/// Only robots showing are framed: one still loading or unknown has nothing
+/// to measure, and a framing waiting on it would wait for good. A request
+/// naming none showing is dropped.
 fn frame_on_request(
     mut requests: ResMut<robots::RobotRequests>,
     frames: Res<Frames>,
     mut census: ResMut<Census>,
     mut only: ResMut<FrameOnly>,
+    showing: Query<&robots::RobotAsset, Without<robots::Incoming>>,
 ) {
-    let Some(instances) = requests.frame.take() else {
+    let Some(mut instances) = requests.frame.take() else {
         return;
     };
+    let named = !instances.is_empty();
+    instances.retain(|id| showing.iter().any(|robot| &robot.instance == id));
+    if showing.is_empty() || (named && instances.is_empty()) {
+        return;
+    }
     census.taken = false;
     census.since = frames.elapsed - CENSUS_SETTLE;
     only.0 = instances;
@@ -1745,6 +1756,20 @@ mod tests {
         };
         assert!((centre(&mut app, vec!["far".into()]) - 10.0).abs() < 1e-4);
         assert!((centre(&mut app, vec![]) - 5.0).abs() < 1e-4, "every robot");
+        assert!(
+            (centre(&mut app, vec!["far".into(), "gone".into()]) - 10.0).abs() < 1e-4,
+            "an instance not showing is passed over"
+        );
+
+        // Naming only robots not showing asks nothing: the framing stays as
+        // it was rather than waiting on robots that may never come, or
+        // falling back to every robot.
+        app.world_mut()
+            .resource_mut::<robots::RobotRequests>()
+            .frame = Some(vec!["gone".into()]);
+        app.update();
+        assert!(app.world().resource::<Census>().taken);
+        assert!((app.world().resource::<Framing>().center.x - 10.0).abs() < 1e-4);
     }
 
     /// A robot posed and framed in one frame is framed where the pose put
@@ -1801,7 +1826,11 @@ mod tests {
         let framing = app.world().resource::<Framing>();
         assert!(framing.fitted);
         let moved = pose.to_scene().translation;
-        assert!((framing.center - moved).length() < 1e-4, "{:?}", framing.center);
+        assert!(
+            (framing.center - moved).length() < 1e-4,
+            "{:?}",
+            framing.center
+        );
     }
 
     /// What the view gizmo's request asks the controller to face, looking

@@ -62,6 +62,8 @@ struct ReportSender(Sender<Entity>);
 /// One drawing robot, as the render world follows it.
 #[derive(Default)]
 struct Watch {
+    /// The instance it is, for the log.
+    instance: String,
     /// Its meshes.
     meshes: HashSet<MainEntity>,
     /// Frames since it started drawing.
@@ -101,7 +103,7 @@ impl Plugin for ReadyPlugin {
 
 /// Follow each robot still drawing, with its meshes, and the scene's camera.
 fn extract_drawing(
-    robots: Extract<Query<Entity, With<Drawing>>>,
+    robots: Extract<Query<(Entity, &RobotAsset), With<Drawing>>>,
     children: Extract<Query<&Children>>,
     meshes: Extract<Query<(), With<Mesh3d>>>,
     cameras: Extract<Query<Entity, With<OrbitCamera>>>,
@@ -111,10 +113,13 @@ fn extract_drawing(
         .iter()
         .next()
         .map(|camera| RetainedViewEntity::new(camera.into(), None, 0));
-    let drawing: HashSet<Entity> = robots.iter().collect();
+    let drawing: HashSet<Entity> = robots.iter().map(|(root, _)| root).collect();
     watched.robots.retain(|root, _| drawing.contains(root));
-    for root in drawing {
-        let watch = watched.robots.entry(root).or_default();
+    for (root, robot) in &robots {
+        let watch = watched.robots.entry(root).or_insert_with(|| Watch {
+            instance: robot.instance.clone(),
+            ..default()
+        });
         watch.frames += 1;
         if watch.meshes.is_empty() {
             watch.meshes = children
@@ -141,6 +146,10 @@ fn watch_drawing(
 ) {
     for (root, watch) in &mut watched.robots {
         if watch.frames >= GIVE_UP_FRAMES && !watch.given_up {
+            log::warn!(
+                "{}: not seen drawn within {GIVE_UP_FRAMES} frames; reported ready as it draws",
+                watch.instance
+            );
             watch.given_up = true;
             watch.submitted = true;
             let _ = sender.0.send(*root);
