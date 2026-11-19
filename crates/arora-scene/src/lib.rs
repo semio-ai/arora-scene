@@ -1462,8 +1462,15 @@ fn take_census(
     only: Res<FrameOnly>,
     parents: Query<&ChildOf>,
     robots: Query<&robots::RobotAsset>,
+    showing: Query<&robots::RobotAsset, Without<robots::Incoming>>,
 ) {
     if census.taken || frames.elapsed - census.since < CENSUS_SETTLE {
+        return;
+    }
+    // A framing whose robots all went before it was measured has nothing
+    // left to fit, and waiting for them would wait for good.
+    if !only.0.is_empty() && !showing.iter().any(|robot| only.0.contains(&robot.instance)) {
+        census.taken = true;
         return;
     }
     // Whether a mesh belongs to a robot the framing fits: any, unless the
@@ -1767,6 +1774,18 @@ mod tests {
         app.world_mut()
             .resource_mut::<robots::RobotRequests>()
             .frame = Some(vec!["gone".into()]);
+        app.update();
+        assert!(app.world().resource::<Census>().taken);
+        assert!((app.world().resource::<Framing>().center.x - 10.0).abs() < 1e-4);
+
+        // A framing whose robots went before it was measured is given up,
+        // the framing kept as it was.
+        app.world_mut().resource_mut::<FrameOnly>().0 = vec!["gone".into()];
+        {
+            let mut census = app.world_mut().resource_mut::<Census>();
+            census.taken = false;
+            census.since = -CENSUS_SETTLE;
+        }
         app.update();
         assert!(app.world().resource::<Census>().taken);
         assert!((app.world().resource::<Framing>().center.x - 10.0).abs() < 1e-4);

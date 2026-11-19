@@ -111,7 +111,12 @@ which backend a page would get.
   instance still loading another replaces that one, whose promise rejects.
   **The robot asked for last is the one left showing** in its instance, the
   one already showing included. `scene.robots` maps each instance to the
-  robot showing in it.
+  robot showing in it, and `scene.loading` names the instances with a load
+  under way.
+- **Calls act in the order they were made**, within a frame too: a load then
+  an unload of one instance leaves it empty, and a selection set after an
+  unload and a load is the new robot's. Unloading an instance takes its
+  selection with it.
 - **Where a robot stands is the host's**: a `pose` on its load, or
   `scene.setPose(instance, pose)` later; the origin otherwise. The camera
   frames every robot present when the scene first has robots to show, and
@@ -270,12 +275,13 @@ wasm host is the reference for wiring it.
 
 - **Start it.** Add Bevy's `DefaultPlugins` and `ScenePlugin`, and insert
   `SceneOptions`. The scene starts empty.
-- **Load robots** by pushing `robots::RobotLoad`s onto
-  `robots::RobotRequests::loads`, each a `robots::RobotAsset { instance, key,
-  glb, meta, joints }` (`RobotLoad::read` fills one from a GLB's bytes) with an
-  optional `pose`; `glb` is an asset path the asset server can load.
-  `load_from_file` does it from disk. Unloads and poses go on the same
-  requests. A robot loads hidden in its instance (its root carries
+- **Load robots** by pushing `robots::RobotRequest::Load`s onto
+  `robots::RobotRequests::robots`, each a `robots::RobotLoad` of a
+  `robots::RobotAsset { instance, key, glb, meta, joints }` (`RobotLoad::read`
+  fills one from a GLB's bytes) with an optional `pose`; `glb` is an asset
+  path the asset server can load. `load_from_file` does it from disk.
+  Unloads, poses and selections go on the same queue, and act in the order
+  they were pushed. A robot loads hidden in its instance (its root carries
   `robots::Incoming` and is not indexed or driven), and swaps in once it has
   loaded whole and spawned. How each load ended lands in
   `robots::RobotOutcomes`, in the order they ended: `Outcome::Loaded` with

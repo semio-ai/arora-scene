@@ -127,6 +127,8 @@ export interface SceneHandle {
    * read this rather than rely on hearing it.
    */
   readonly robots: ReadonlyMap<string, ShownRobot>;
+  /** The instances with a load under way, showing a robot yet or not. */
+  readonly loading: ReadonlySet<string>;
   /**
    * Where an element of the robot in `instance` stood in the last frame
    * drawn, by its `RobotData` id: Z up, in metres, the rotation a quaternion
@@ -340,6 +342,11 @@ async function start(
     backend,
     canvas,
     robots,
+    get loading() {
+      const ids = new Set<string>();
+      for (const [id, held] of instances) if (held.loading) ids.add(id);
+      return ids;
+    },
     elementPose(id, element) {
       return wasm.element_pose(id, element);
     },
