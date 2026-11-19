@@ -89,7 +89,9 @@ export function Scene({
 
   // Each instance's key is asked for once: `load` itself leaves alone a key
   // that is showing or loading in its instance. An instance this `<Scene>`
-  // asked for that is no longer in `robots` is unloaded. A robot that cannot
+  // asked for that is no longer in `robots` is unloaded, and so, given
+  // `robots`, is one showing that it does not name: the scene outlives a
+  // `<Scene>`, so a later one finds the robots an earlier one left. A robot that cannot
   // be read or loaded reaches `onError`, the instance's old robot kept; the
   // same key is not tried again.
   const asked = useRef(new Map<string, string>());
@@ -105,7 +107,9 @@ export function Scene({
           onError ? onError(error) : console.error(error),
         );
     }
-    for (const id of [...asked.current.keys()]) {
+    const stale = new Set(asked.current.keys());
+    if (robots) for (const id of scene.robots.keys()) stale.add(id);
+    for (const id of stale) {
       if (Object.hasOwn(wanted, id)) continue;
       asked.current.delete(id);
       scene.unload(id);

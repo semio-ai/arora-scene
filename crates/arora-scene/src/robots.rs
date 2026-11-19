@@ -102,6 +102,10 @@ pub enum RobotRequest {
     Unload(String),
     /// Stand an instance's robot, and anything loading into it, at a pose.
     Pose(String, Pose),
+    /// Outline these elements of an instance, by their ids, in place of what
+    /// it outlined before; none clears it. Taken in order with the rest, so
+    /// a selection asked for after an unload and a load is the new one's.
+    Select(String, Vec<arora_visuals::select::Selection>),
 }
 
 /// What a host asks of the scene's robots, taken at the start of each frame.
@@ -263,6 +267,13 @@ pub(crate) fn take_requests(
                     ))
                     .id();
                 at.incoming = Some((root, asset));
+            }
+            RobotRequest::Select(instance, elements) => {
+                if elements.is_empty() {
+                    selections.0.remove(&instance);
+                } else {
+                    selections.0.insert(instance, elements);
+                }
             }
             RobotRequest::Pose(instance, pose) => {
                 let Some(at) = held.get_mut(&instance) else {
@@ -684,6 +695,24 @@ mod tests {
         );
         app.update();
         assert!(app.world().get_entity(showing).is_err());
+    }
+
+    /// A selection asked for after an unload of its instance is kept: it is
+    /// the next robot's there.
+    #[test]
+    fn a_selection_after_an_unload_is_kept() {
+        let mut app = app(take_requests);
+        let (_, _) = root(&mut app, asset("a", "a1.glb"), false);
+        ask(
+            &mut app,
+            [
+                RobotRequest::Unload("a".into()),
+                load("a", "a2.glb", None),
+                RobotRequest::Select("a".into(), vec![arora_visuals::select::Selection::of("x")]),
+            ],
+        );
+        app.update();
+        assert!(app.world().resource::<Selections>().0.contains_key("a"));
     }
 
     /// A pose asked for with a load, before it has loaded, places it.

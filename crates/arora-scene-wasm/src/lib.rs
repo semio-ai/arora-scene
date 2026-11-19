@@ -33,7 +33,7 @@ use arora_visuals::active_area::ActiveArea;
 use arora_visuals::meta::FeatureKind;
 use arora_visuals::overlay::Overlay;
 use arora_visuals::pick::Picked;
-use arora_visuals::select::{Selection, Selections};
+use arora_visuals::select::Selection;
 use arora_visuals::value::Decoded;
 use bevy::asset::io::memory::{Dir, MemoryAssetReader};
 use bevy::asset::io::AssetSourceBuilder;
@@ -64,7 +64,6 @@ static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
 
 enum Request {
     Robot(RobotRequest),
-    Select(String, Vec<String>),
     Frame(Vec<String>),
     Theme(Theme),
     Environment(Environment),
@@ -144,10 +143,11 @@ pub fn set_pose(instance: String, pose: String) -> Result<(), JsValue> {
 /// A selection is the page's and is kept, by the instance, across a swap.
 #[wasm_bindgen]
 pub fn set_selection(instance: String, elements: Vec<String>) {
+    let elements = elements.iter().map(Selection::of).collect();
     REQUESTS
         .lock()
         .unwrap()
-        .push(Request::Select(instance, elements));
+        .push(Request::Robot(RobotRequest::Select(instance, elements)));
     wake();
 }
 
@@ -222,7 +222,6 @@ fn asset_id(path: &str) -> String {
 /// Hands what the page asked since the last frame to the scene, in order.
 fn take_requests(
     mut requests: ResMut<RobotRequests>,
-    mut selections: ResMut<Selections>,
     mut stage: ResMut<arora_scene::stage::Stage>,
     cameras: Query<Entity, With<arora_scene::OrbitCamera>>,
     mut commands: Commands,
@@ -241,15 +240,6 @@ fn take_requests(
                 }
             }
             Request::Robot(request) => requests.robots.push(request),
-            Request::Select(instance, elements) => {
-                if elements.is_empty() {
-                    selections.0.remove(&instance);
-                } else {
-                    selections
-                        .0
-                        .insert(instance, elements.iter().map(Selection::of).collect());
-                }
-            }
         }
     }
 }

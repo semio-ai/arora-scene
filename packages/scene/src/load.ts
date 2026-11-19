@@ -161,9 +161,9 @@ interface Pending {
   key?: string;
   resolve: () => void;
   reject: (error: Error) => void;
+  /** Its instance was unloaded after it was asked for. */
+  unloaded?: true;
 }
-
-const settledAlready = () => {};
 
 /** What the package knows of one instance. */
 interface Instance {
@@ -283,7 +283,11 @@ async function start(
       if (event.type === "loaded" || event.type === "loadFailed") {
         const held = instance(event.instance);
         const settled = held.pending.shift();
-        if (event.type === "loaded") {
+        // A load whose instance was unloaded since is answered already, and
+        // what it loaded is going: the scene takes it away next frame.
+        if (settled?.unloaded) {
+          // Nothing to settle or show.
+        } else if (event.type === "loaded") {
           const { type: _, ...robot } = event;
           // Set before the handler hears of it, so the handle already says
           // which robot is showing when it does.
@@ -375,9 +379,9 @@ async function start(
       // with a `loadFailed` later. Each stays queued, settled, to take that
       // answer, so a load asked for after this one settles on its own.
       for (const waiting of held.pending) {
+        if (waiting.unloaded) continue;
         waiting.reject(new Error("its instance was unloaded"));
-        waiting.resolve = settledAlready;
-        waiting.reject = settledAlready;
+        waiting.unloaded = true;
       }
     },
     load(id, glb, { key, pose } = {}) {

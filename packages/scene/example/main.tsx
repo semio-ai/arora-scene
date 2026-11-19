@@ -150,13 +150,18 @@ function Running({ robot: first }: { robot: Robot }) {
     setScene(handle);
   };
 
-  // Another robot like the first, a metre along from the last one.
+  // Another robot like the first, a metre along from the last one, under an
+  // id not in use: counting the robots would name one still there once an
+  // earlier one is removed.
+  const added = useRef(0);
   const addRobot = () => {
-    const ids = Object.keys(robots);
-    const id = `robot-${ids.length + 1}`;
+    let id: string;
+    do id = `robot-${++added.current + 1}`;
+    while (Object.hasOwn(robots, id));
+    const along = Object.keys(robots).length;
     setRobots((r) => ({
       ...r,
-      [id]: { ...first, pose: { position: [ids.length, 0, 0] } },
+      [id]: { ...first, pose: { position: [along, 0, 0] } },
     }));
     setCurrent(id);
   };
@@ -321,7 +326,9 @@ function Running({ robot: first }: { robot: Robot }) {
             <button
               type="button"
               disabled={!scene || !current}
-              onClick={() => change((robot) => ({ ...robot, key: `${robot.key}+` }))}
+              onClick={() =>
+                change((robot) => ({ ...robot, key: `${robot.key}+` }))
+              }
             >
               Swap it, under a new key
             </button>
