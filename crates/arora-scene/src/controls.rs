@@ -469,7 +469,9 @@ fn carry_out(
     for command in asked {
         again |= !matches!(
             command,
-            ControlCommand::Configure { .. } | ControlCommand::Highlight { .. }
+            ControlCommand::Configure { .. }
+                | ControlCommand::Highlight { .. }
+                | ControlCommand::SetPose { .. }
         );
         match command {
             ControlCommand::Add { key, control } => {
@@ -618,11 +620,15 @@ fn carry_out(
                 else {
                     if target.is_none() && controls.0.contains_key(&key) {
                         log::warn!("{key:?} is a joint control; write its value instead");
-                    } else {
+                    } else if worth_waiting(&key, &controls) {
+                        again |= controls.0.contains_key(&key);
                         waiting.push(ControlCommand::SetPose { key, pose, scale });
+                    } else {
+                        log::debug!("no control {key:?} to pose");
                     }
                     continue;
                 };
+                again = true;
                 let world = pose.to_scene();
                 // The pose is in the world; the target's transform is in its
                 // parent's frame.
@@ -1396,7 +1402,24 @@ mod tests {
                 interactive: None,
             },
         );
+        send(
+            &mut app,
+            ControlCommand::SetPose {
+                key: "nobody".into(),
+                pose: Pose {
+                    position: [0.0, 0.0, 1.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                },
+                scale: None,
+            },
+        );
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
+        // Read before another update: a frame request outlives only two.
+        assert_eq!(
+            frames_asked(&mut app),
+            0,
+            "a dropped change asks for no frame"
+        );
         app.update();
         app.update();
         assert_eq!(frames_asked(&mut app), 0, "the scene can idle");
