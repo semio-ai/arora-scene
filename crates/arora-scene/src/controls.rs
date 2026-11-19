@@ -533,7 +533,9 @@ fn carry_out(
     // one waiting on a gizmo spawned at the end of this pass.
     let mut again = false;
     for command in asked {
-        if held.contains(command.key()) {
+        // A remove is not held: it cancels the waiting add and what waits
+        // behind it, and takes away the control the add would have replaced.
+        if held.contains(command.key()) && !matches!(command, ControlCommand::Remove { .. }) {
             waiting.push(command);
             continue;
         }
@@ -692,6 +694,7 @@ fn carry_out(
                 // waiting goes too, or an add made before the robot arrived
                 // would bring back a control the driver has since removed.
                 waiting.retain(|waiting| waiting.key() != key);
+                held.remove(&key);
             }
             ControlCommand::Show { key, visible } => match controls.0.get_mut(&key) {
                 Some(placed) => {
@@ -1196,6 +1199,39 @@ mod tests {
             .map(|(gizmo, hidden)| (gizmo.target, hidden))
             .collect();
         assert_eq!(on, vec![(body, true)]);
+    }
+
+    /// A remove sent behind an add waiting for its robot takes the control
+    /// away at once, the one the add would have replaced included, and the
+    /// add with it.
+    #[test]
+    fn a_remove_behind_a_waiting_add_cancels_both() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        send(&mut app, on("robot-1"));
+        app.world_mut()
+            .resource_mut::<ControlCommands>()
+            .0
+            .extend([on(ROBOT), ControlCommand::Remove { key: "k".into() }]);
+        app.update();
+        assert!(only::<JointGizmo>(&mut app).is_none(), "removed at once");
+
+        robot(&mut app, body);
+        app.update();
+        app.update();
+        assert!(
+            only::<JointGizmo>(&mut app).is_none(),
+            "and not brought back"
+        );
     }
 
     fn send(app: &mut App, command: ControlCommand) {
