@@ -7,33 +7,24 @@
 //! outline can address an element by the id `RobotData` gives it rather than
 //! by whatever Bevy called the node.
 //!
-//! **Every join is scoped to its own root.** A world holding several copies of
-//! one robot has several entities under each glTF node name, so a lookup
-//! across the whole world binds an element to whichever copy it reaches first
-//! — silently, because a name collision is a successful lookup. The walk here
-//! is over one root's descendants.
+//! **Every join is scoped to its own root.** A world holding several robots —
+//! several of one asset among them — has several entities under each glTF
+//! node name, so a lookup across the whole world binds an element to whichever
+//! robot it reaches first — silently, because a name collision is a successful
+//! lookup. The walk here is over one root's descendants, with the declaration
+//! and joints that root's own [`RobotAsset`] carries, and the instance takes
+//! the host's id for it.
 
 use arora_visuals::binding::{ElementTargets, SceneBinding, SceneBindings};
 use arora_visuals::instance::EntityInstance;
-use arora_visuals::meta::{AssetMeta, FeatureKind};
+use arora_visuals::meta::FeatureKind;
 use bevy::ecs::system::SystemParam;
 use bevy::mesh::morph::MorphWeights;
 use bevy::prelude::*;
 
-use crate::joints::{JointBinding, JointRig, RobotJoints};
+use crate::joints::{JointBinding, JointRig};
+use crate::robots::RobotAsset;
 use crate::OrbitCamera;
-
-/// What the robot's GLB declares, read before the app runs.
-///
-/// One asset for every copy: the scene spawns the same GLB `n` times, so the
-/// declaration is shared and only the joins differ.
-#[derive(Resource)]
-pub struct RobotMeta(pub AssetMeta);
-
-/// The elements a run outlines, by their `RobotData` ids, each with the colour
-/// it asks to be shown in, if any.
-#[derive(Resource, Default)]
-pub struct Selected(pub Vec<arora_visuals::select::Selection>);
 
 /// The spawned scene, as the join reads it.
 #[derive(SystemParam)]
@@ -47,18 +38,12 @@ pub struct SpawnedScene<'w, 's> {
 
 /// A robot root not indexed yet. An incoming robot is indexed once its swap
 /// is finished, so until then values, controls and picks keep addressing the
-/// robot that is showing.
+/// robot that is showing in its instance.
 type Unindexed = (
     With<WorldAssetRoot>,
     Without<EntityInstance>,
-    Without<crate::Incoming>,
+    Without<crate::robots::Incoming>,
 );
-
-/// The id of a copy of the robot's [`EntityInstance`]: `robot-0` for the
-/// first, the one a host that draws a single robot reads.
-pub fn instance_id(copy: usize) -> String {
-    format!("robot-{copy}")
-}
 
 /// Joins each spawned robot's elements to its entities, once its scene exists.
 ///
@@ -66,19 +51,17 @@ pub fn instance_id(copy: usize) -> String {
 /// asynchronously and there is no event that says all of it has arrived.
 #[allow(clippy::too_many_arguments)]
 pub fn index_instances(
-    meta: Res<RobotMeta>,
-    joints: Option<Res<RobotJoints>>,
-    selected: Res<Selected>,
-    mut selections: ResMut<arora_visuals::select::Selections>,
     camera: Query<Entity, With<OrbitCamera>>,
-    roots: Query<Entity, Unindexed>,
+    roots: Query<(Entity, &RobotAsset), Unindexed>,
     scene: SpawnedScene,
     mut commands: Commands,
 ) {
     let Ok(camera) = camera.single() else {
         return;
     };
-    for (copy, root) in roots.iter().enumerate() {
+    for (root, asset) in &roots {
+        let id = &asset.instance;
+        let meta = &asset.meta;
         let mut by_name = std::collections::HashMap::new();
         for entity in scene.children.iter_descendants(root) {
             if let Ok(name) = scene.names.get(entity) {
@@ -91,7 +74,7 @@ pub fn index_instances(
         }
 
         let mut elements = std::collections::HashMap::new();
-        for element in &meta.0.elements {
+        for element in &meta.elements {
             let Some(&node) = by_name.get(&element.node_name) else {
                 continue;
             };
@@ -116,23 +99,23 @@ pub fn index_instances(
         // from here and would otherwise be silent forever.
         if elements.is_empty() {
             log::debug!(
-                "robot {copy}: {} named descendants, none of the {} declared nodes",
+                "{id}: {} named descendants, none of the {} declared nodes",
                 by_name.len(),
-                meta.0.elements.len()
+                meta.elements.len()
             );
             continue;
         }
         log::info!(
-            "robot {copy}: joined {}/{} declared elements",
+            "{id}: joined {}/{} declared elements",
             elements.len(),
-            meta.0.elements.len()
+            meta.elements.len()
         );
 
         // Every place each animatable lands: its nodes for a transform
         // feature, the mesh at or under each node for a material one.
         let mut by_id: std::collections::HashMap<String, Vec<SceneBinding>> =
             std::collections::HashMap::new();
-        for (animatable, binding) in &meta.0.animatables {
+        for (animatable, binding) in &meta.animatables {
             // A morph target is found by name among a mesh's targets, which
             // this scene does not read; a robot's declaration carries none.
             if matches!(binding.feature, FeatureKind::Morph(_)) {
@@ -170,7 +153,7 @@ pub fn index_instances(
         // Every joint whose value is animated, bound to the body it moves
         // as that body stands now: the rest every pose is taken from.
         let mut rig = JointRig::default();
-        for joint in joints.iter().flat_map(|joints| joints.0.iter()) {
+        for joint in &asset.joints {
             let (Some(animatable), Some(body)) = (
                 &joint.animatable,
                 elements.get(&joint.child).map(|e| e.node),
@@ -185,14 +168,10 @@ pub fn index_instances(
             }
         }
 
-        let id = instance_id(copy);
-        if !selected.0.is_empty() {
-            selections.0.insert(id.clone(), selected.0.clone());
-        }
         commands.entity(root).insert(rig).insert(EntityInstance {
-            id,
-            asset_path: String::new(),
-            meta: meta.0.clone(),
+            id: id.clone(),
+            asset_path: asset.glb.clone(),
+            meta: meta.clone(),
             bindings: SceneBindings {
                 by_id,
                 elements,

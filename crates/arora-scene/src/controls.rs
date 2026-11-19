@@ -33,7 +33,8 @@ use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use serde::{Deserialize, Serialize};
 
-use crate::joints::{JointRig, RobotJoints};
+use crate::joints::JointRig;
+use crate::robots::RobotAsset;
 use crate::OrbitCamera;
 
 /// A pose as a driver sees it: Z up, in metres, with the rotation as a
@@ -80,12 +81,23 @@ impl Pose {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Target {
-    /// The robot as a whole.
-    Robot,
-    /// One element, by the id `RobotData` gives it.
-    Element { id: String },
-    /// A goal standing at `pose`, with nothing drawn but the control.
+    /// A robot as a whole: its root, by the host's id for its instance.
+    Robot { instance: String },
+    /// One element of a robot, by the id `RobotData` gives it.
+    Element { instance: String, id: String },
+    /// A goal standing at `pose`, in the world, with nothing drawn but the
+    /// control.
     Goal { pose: Pose },
+}
+
+impl Target {
+    /// The instance the target is on, if it is on one.
+    fn instance(&self) -> Option<&str> {
+        match self {
+            Target::Robot { instance } | Target::Element { instance, .. } => Some(instance),
+            Target::Goal { .. } => None,
+        }
+    }
 }
 
 /// What a transform control's handles can do.
@@ -101,8 +113,12 @@ pub enum Mode {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Control {
-    /// A ring or bar on the joint whose value animatable is the control's key.
+    /// A ring or bar on a robot's joint.
     Joint {
+        /// The host's id for the robot's instance.
+        instance: String,
+        /// The joint, by the animatable that drives its value.
+        joint: String,
         /// A CSS hex colour; the joint's own when absent.
         #[serde(default)]
         color: Option<String>,
@@ -197,6 +213,16 @@ pub enum ControlCommand {
         handle: Option<GizmoHandle>,
         on: bool,
     },
+}
+
+impl Control {
+    /// The instance the control is on, if it is on one.
+    fn instance(&self) -> Option<&str> {
+        match self {
+            Control::Joint { instance, .. } => Some(instance),
+            Control::Transform { target, .. } => target.instance(),
+        }
+    }
 }
 
 impl ControlCommand {
@@ -427,8 +453,9 @@ fn carry_out(
     mut controls: ResMut<Controls>,
     mut commands: Commands,
     cameras: Query<Entity, With<OrbitCamera>>,
-    instances: Query<(Entity, &EntityInstance, Option<&JointRig>)>,
-    joints: Option<Res<RobotJoints>>,
+    instances: Query<(Entity, &EntityInstance, Option<&JointRig>, &RobotAsset)>,
+    robots: Query<&RobotAsset>,
+    incoming: Query<(), With<crate::robots::Incoming>>,
     parents: Query<&ChildOf>,
     globals: Query<&GlobalTransform>,
     mut transforms: Query<&mut Transform>,
@@ -444,7 +471,15 @@ fn carry_out(
         return;
     }
     let camera = cameras.iter().next();
-    let robot = instances.iter().next();
+    // The robot showing in an instance, once it is indexed.
+    let robot = |name: &str| {
+        instances
+            .iter()
+            .find(|(_, instance, ..)| instance.id == name)
+    };
+    // Whether a robot is showing or loading in an instance: what a control on
+    // it waits for.
+    let coming = |name: &str| robots.iter().any(|robot| robot.instance == name);
     let asked = std::mem::take(&mut pending.0);
     // Keys an add is coming for, in this batch or waiting from an earlier one.
     let adding: std::collections::HashSet<String> = asked
@@ -455,12 +490,14 @@ fn carry_out(
         })
         .collect();
     // Whether a change for `key` should wait: for its control's gizmo, which
-    // an add spawns at the end of its pass, or for an add still to come.
-    // Anything else is for a key nothing will add, such as one whose control
-    // went with a swapped robot, and waiting would hold it, and the frames it
-    // asks for, for good.
+    // an add spawns at the end of its pass, or for an add still to come, in
+    // this batch or behind a robot still loading, as a change sent before
+    // its add is. Anything else is for a key nothing will add, such as one
+    // whose control went with a swapped robot, and waiting would hold it, and
+    // the frames it asks for, for good.
+    let loading = !incoming.is_empty();
     let worth_waiting = |key: &str, controls: &Controls| {
-        controls.0.contains_key(key) || robot.is_none() || adding.contains(key)
+        controls.0.contains_key(key) || adding.contains(key) || loading
     };
     let mut waiting = Vec::new();
     // Whether to draw another frame: for a command that changed something, or
@@ -475,25 +512,49 @@ fn carry_out(
         );
         match command {
             ControlCommand::Add { key, control } => {
-                let (Some(camera), Some((root, instance, rig))) = (camera, robot) else {
-                    waiting.push(ControlCommand::Add { key, control });
+                // A control on a robot waits for it while it is loading; one
+                // on a robot nothing is loading is dropped.
+                let on = control
+                    .instance()
+                    .map(|name| (name.to_string(), robot(name)));
+                let robot = match (&on, camera) {
+                    (Some((_, Some(robot))), Some(_)) => Some(*robot),
+                    (None, Some(_)) => None,
+                    (Some((name, None)), _) if !coming(name) => {
+                        log::warn!("no robot {name:?}; no control added for {key:?}");
+                        continue;
+                    }
+                    _ => {
+                        waiting.push(ControlCommand::Add { key, control });
+                        continue;
+                    }
+                };
+                let Some(camera) = camera else {
                     continue;
                 };
                 if let Some(old) = controls.0.remove(&key) {
                     despawn(&mut commands, old);
                 }
                 let placed = match control {
-                    Control::Joint { color } => {
-                        let joint = joints
-                            .as_ref()
-                            .and_then(|j| j.0.iter().find(|j| j.animatable.as_ref() == Some(&key)));
-                        let binding = rig
-                            .and_then(|rig| rig.0.get(&key))
-                            .and_then(|b| b.iter().find(|b| b.mimic.is_none()).or(b.first()));
-                        let (Some(joint), Some(binding)) = (joint, binding) else {
-                            log::warn!("no joint is driven by {key:?}; no control added");
+                    Control::Joint { joint, color, .. } => {
+                        let Some((_, _, rig, asset)) = robot else {
                             continue;
                         };
+                        let declared = asset
+                            .joints
+                            .iter()
+                            .find(|j| j.animatable.as_ref() == Some(&joint));
+                        let binding = rig
+                            .and_then(|rig| rig.0.get(&joint))
+                            .and_then(|b| b.iter().find(|b| b.mimic.is_none()).or(b.first()));
+                        let (Some(declared), Some(binding)) = (declared, binding) else {
+                            log::warn!(
+                                "no joint of {} is driven by {joint:?}; no control added for {key:?}",
+                                asset.instance
+                            );
+                            continue;
+                        };
+                        let joint = declared;
                         let current = transforms
                             .get(binding.body)
                             .map(|t| binding.value_of(t))
@@ -529,16 +590,22 @@ fn carry_out(
                         local,
                         colors,
                     } => {
-                        let (target, goal) = match target {
-                            Target::Robot => (root, None),
-                            Target::Element { id } => match instance.bindings.elements.get(&id) {
-                                Some(element) => (element.node, None),
-                                None => {
-                                    log::warn!("no element {id:?}; no control added for {key:?}");
-                                    continue;
+                        let (target, goal) = match (target, robot) {
+                            (Target::Robot { .. }, Some((root, ..))) => (root, None),
+                            (Target::Element { id, .. }, Some((_, instance, ..))) => {
+                                match instance.bindings.elements.get(&id) {
+                                    Some(element) => (element.node, None),
+                                    None => {
+                                        log::warn!(
+                                            "no element {id:?} on {}; no control added for {key:?}",
+                                            instance.id
+                                        );
+                                        continue;
+                                    }
                                 }
-                            },
-                            Target::Goal { pose } => {
+                            }
+                            (Target::Robot { .. } | Target::Element { .. }, None) => continue,
+                            (Target::Goal { pose }, _) => {
                                 let goal = commands
                                     .spawn((pose.to_scene(), Visibility::default()))
                                     .id();
@@ -889,15 +956,29 @@ mod tests {
         }
     }
 
-    /// A scene with a camera and a body the tilt joint moves, but no robot
-    /// instance yet: `robot` adds one.
+    /// The instance the fixture's robot loads into.
+    const ROBOT: &str = "robot-0";
+
+    /// What the fixture's robot declares: the tilt joint.
+    fn asset() -> RobotAsset {
+        RobotAsset {
+            instance: ROBOT.into(),
+            key: None,
+            glb: String::new(),
+            meta: Default::default(),
+            joints: vec![tilt()],
+        }
+    }
+
+    /// A scene with a camera and a body the tilt joint moves, and a robot
+    /// loading into `robot-0` but not yet indexed: `robot` indexes it.
     fn scene() -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_message::<RequestRedraw>()
-            .add_plugins(ControlsPlugin)
-            .insert_resource(RobotJoints(vec![tilt()]));
+            .add_plugins(ControlsPlugin);
         app.world_mut().spawn(OrbitCamera);
+        app.world_mut().spawn((asset(), crate::robots::Incoming));
         let body = app.world_mut().spawn(Transform::default()).id();
         (app, body)
     }
@@ -916,18 +997,27 @@ mod tests {
             TILT.into(),
             vec![JointBinding::new(&tilt(), body, Transform::default()).unwrap()],
         );
-        world.spawn((
-            rig,
-            EntityInstance {
-                id: "robot-0".into(),
-                asset_path: String::new(),
-                meta: Default::default(),
-                bindings: SceneBindings::default(),
-                camera,
-                draw_order: 0,
-                ready: true,
-            },
-        ));
+        // The robot loading into `robot-0` has loaded: it is no longer
+        // incoming, and is indexed.
+        let loading = world
+            .query_filtered::<Entity, With<crate::robots::Incoming>>()
+            .single(world)
+            .unwrap();
+        world
+            .entity_mut(loading)
+            .remove::<crate::robots::Incoming>()
+            .insert((
+                rig,
+                EntityInstance {
+                    id: ROBOT.into(),
+                    asset_path: String::new(),
+                    meta: Default::default(),
+                    bindings: SceneBindings::default(),
+                    camera,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ));
     }
 
     fn send(app: &mut App, command: ControlCommand) {
@@ -960,7 +1050,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).expect("a joint control");
@@ -992,7 +1086,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         send(
@@ -1020,7 +1118,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).unwrap();
@@ -1098,6 +1200,18 @@ mod tests {
         assert!(app.world().get_entity(goal).is_err());
     }
 
+    /// A transform control on the fixture's robot as a whole.
+    fn on_robot() -> Control {
+        Control::Transform {
+            target: Target::Robot {
+                instance: ROBOT.into(),
+            },
+            modes: None,
+            local: false,
+            colors: None,
+        }
+    }
+
     fn goal_at(position: [f32; 3]) -> Control {
         Control::Transform {
             target: Target::Goal {
@@ -1147,7 +1261,11 @@ mod tests {
         app.world_mut().resource_mut::<ControlCommands>().0.extend([
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
             ControlCommand::Show {
                 key: TILT.into(),
@@ -1170,7 +1288,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).unwrap();
@@ -1257,6 +1379,8 @@ mod tests {
             ControlCommand::Add {
                 key: TILT.into(),
                 control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
                     color: Some(hex("#ff0000")),
                 },
             },
@@ -1316,7 +1440,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         send(
@@ -1440,7 +1568,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         app.update();
@@ -1576,7 +1708,11 @@ mod tests {
             });
             asked.0.push(ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             });
             for key in ["goal", TILT] {
                 asked.0.push(configure(key, Some(0.25), Some(false)));
@@ -1695,7 +1831,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let joint = only::<JointGizmo>(&mut app).unwrap();
@@ -1723,7 +1863,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let joint = only::<JointGizmo>(&mut app).unwrap();
@@ -1749,10 +1893,10 @@ mod tests {
         {
             let mut asked = app.world_mut().resource_mut::<ControlCommands>();
             asked.0.push(ControlCommand::Add {
-                key: "goal".into(),
-                control: goal_at([0.0, 0.0, 1.0]),
+                key: "whole".into(),
+                control: on_robot(),
             });
-            asked.0.push(configure("goal", Some(0.25), Some(false)));
+            asked.0.push(configure("whole", Some(0.25), Some(false)));
         }
         app.update();
         assert!(only::<TransformGizmo>(&mut app).is_none(), "no robot yet");
@@ -1858,7 +2002,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let joint = only::<JointGizmo>(&mut app).unwrap();
@@ -1928,9 +2076,13 @@ mod tests {
         let read =
             |json: serde_json::Value| -> ControlCommand { serde_json::from_value(json).unwrap() };
         assert!(matches!(
-            read(serde_json::json!({ "op": "add", "key": "k", "control": { "kind": "joint" } })),
+            read(serde_json::json!({
+                "op": "add",
+                "key": "k",
+                "control": { "kind": "joint", "instance": "arm", "joint": "tilt" },
+            })),
             ControlCommand::Add {
-                control: Control::Joint { color: None },
+                control: Control::Joint { color: None, .. },
                 ..
             }
         ));

@@ -11,19 +11,21 @@ import type {
 /** The wasm module's exports this package uses. */
 interface Module {
   default: (input?: unknown) => Promise<unknown>;
-  mount: (canvas: string, glb: Uint8Array, options: string) => void;
-  set_value: (target: string, feature: string, values: Float32Array) => void;
+  mount: (canvas: string, options: string) => void;
+  load: (instance: string, glb: Uint8Array, options: string) => void;
+  unload: (instance: string) => void;
+  set_pose: (instance: string, pose: string) => void;
+  set_selection: (instance: string, elements: string[]) => void;
+  set_value: (
+    instance: string,
+    target: string,
+    feature: string,
+    values: Float32Array,
+  ) => void;
   control: (command: string) => void;
-  load_robot: (glb: Uint8Array) => string;
-  first_robot: () => string;
-  element_pose: (element: string) => Pose | undefined;
-  set_event_handler: (handler: (event: WasmEvent) => void) => void;
+  element_pose: (instance: string, element: string) => Pose | undefined;
+  set_event_handler: (handler: (event: SceneEvent) => void) => void;
 }
-
-/** An event as the module sends it: a robot named by its swap id. */
-type WasmEvent =
-  | Exclude<SceneEvent, { type: "robot" }>
-  | (Omit<Extract<SceneEvent, { type: "robot" }>, "key"> & { glb: string });
 
 // One import per backend, each a separate chunk, so a page downloads only
 // the module it runs.
@@ -49,63 +51,104 @@ export async function chooseBackend(): Promise<Backend> {
   }
 }
 
-/** A running scene. */
+/** How a robot is loaded into an instance. */
+export interface LoadOptions {
+  /**
+   * Names the model: Studio's asset id, a content hash, any string the host
+   * keeps stable for the same model. Loading a key an instance already shows,
+   * with none loading, or the key it is loading, changes nothing.
+   */
+  key?: string;
+  /**
+   * Where the robot stands, Z up, in metres. Absent, it stands where the
+   * robot it replaces stood, or at the origin.
+   */
+  pose?: Pose;
+}
+
+/**
+ * A running scene. **Every robot in it is an instance the host names**: its
+ * own string, never rewritten, which every call about that robot and every
+ * event from it carries.
+ */
 export interface SceneHandle {
   readonly backend: Backend;
   /** The canvas the scene draws into, wherever it is currently placed. */
   readonly canvas: HTMLCanvasElement;
   /**
-   * Writes a value. `target` is an animatable's id as the robot's `RobotData`
-   * declares it, which carries its own feature (a joint's value among them),
-   * or an element's id together with the `feature` to change, as `RobotData`
-   * names it (`rotation`, `translation`, `color`, ...). Drawn in the next
-   * frame; before the robot has spawned, in the frame it arrives in.
+   * Loads the robot in `glb` into the instance `instance`. Under a new id it
+   * adds a robot; under one the scene shows it swaps that robot, which keeps
+   * showing until the new one has loaded whole, and then goes with the
+   * controls on its joints and elements. Resolves once the robot is showing.
+   * Rejects, keeping what the instance showed, if `glb` is not a robot the
+   * scene can read, fails to load, or a later load into the same instance
+   * replaces it first.
    */
-  setValue(target: string, value: FeatureValue, feature?: string): void;
+  load(instance: string, glb: Uint8Array, options?: LoadOptions): Promise<void>;
+  /**
+   * Takes the robot in `instance` away, with the controls on it and anything
+   * still loading into it, whose promise rejects.
+   */
+  unload(instance: string): void;
+  /** Moves the robot in `instance`: Z up, in metres. */
+  setPose(instance: string, pose: Pose): void;
+  /**
+   * Outlines `elements` of the robot in `instance`, by their `RobotData` ids,
+   * in place of whatever it outlined; none clears it. Kept across a swap.
+   */
+  setSelection(instance: string, elements: string[]): void;
+  /**
+   * Writes a value to the robot in `instance`. `target` is an animatable's id
+   * as the robot's `RobotData` declares it, which carries its own feature (a
+   * joint's value among them), or an element's id together with the `feature`
+   * to change, as `RobotData` names it (`rotation`, `translation`, `color`,
+   * ...). Drawn in the next frame; for a robot still loading, in the frame it
+   * arrives in.
+   */
+  setValue(
+    instance: string,
+    target: string,
+    value: FeatureValue,
+    feature?: string,
+  ): void;
   /**
    * Adds, removes, shows, hides or moves a control, by the driver's key for
-   * it. A drag on a control moves nothing: it arrives as a `control` event,
-   * and the driver writes the change.
+   * it, unique in the scene. A drag on a control moves nothing: it arrives as
+   * a `control` event, and the driver writes the change.
    */
   control(command: ControlCommand): void;
   /**
-   * Replaces the robot with the one in `glb`, in the same running scene.
-   * `key` names the model, and is what decides whether it is a different
-   * one: Studio's asset id, a content hash, any string the host keeps stable
-   * for the same model. The new robot loads beside the old, which keeps
-   * showing until it is replaced. Resolves once the new robot is showing;
-   * the old robot's joint and element controls have gone with it, and goals
-   * stay. Rejects, keeping the old robot, if `glb` is not a robot the scene
-   * can read or fails to load.
-   *
-   * The robot asked for last is the one left showing. A later call replaces
-   * a robot still loading, whose promise rejects; that holds for the robot
-   * showing too, so asking for it again while another loads keeps it. Asking
-   * for the key showing, with none loading, or for the key loading, changes
-   * nothing.
+   * The robots showing, by instance, as their `loaded` events described
+   * them. A robot's event can come before a page has set its handler, so
+   * read this rather than rely on hearing it.
    */
-  loadRobot(glb: Uint8Array, key: string): Promise<void>;
+  readonly robots: ReadonlyMap<string, ShownRobot>;
   /**
-   * The key of the robot showing: `undefined` until the robot the scene
-   * started with is showing, and for good if that one could not be loaded.
-   */
-  readonly key: string | undefined;
-  /**
-   * The robot showing, with its joints and elements, as its `robot` event
-   * described it: `undefined` while `key` is. The first robot's event can
-   * come before a page has set its handler, so read this rather than rely
-   * on hearing it.
-   */
-  readonly robot: ShownRobot | undefined;
-  /**
-   * Where an element of the robot showing stood in the last frame drawn, by
-   * its `RobotData` id: Z up, in metres, the rotation a quaternion
+   * Where an element of the robot in `instance` stood in the last frame
+   * drawn, by its `RobotData` id: Z up, in metres, the rotation a quaternion
    * `[x, y, z, w]`, the frame goal poses are given in. `undefined` for an id
    * the robot does not declare, or before it has spawned.
    */
-  elementPose(element: string): Pose | undefined;
+  elementPose(instance: string, element: string): Pose | undefined;
   /** Sets where the scene's events go, replacing any earlier handler. */
   onEvent(handler: (event: SceneEvent) => void): void;
+}
+
+/** A load waiting for its outcome. */
+interface Pending {
+  key?: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+/** What the package knows of one instance. */
+interface Instance {
+  /** The robot showing, once one is. */
+  robot?: ShownRobot;
+  /** Loads asked for and not yet settled, oldest first. */
+  pending: Pending[];
+  /** The load asked for last and not yet settled, so a repeat joins it. */
+  loading?: { key?: string; done: Promise<void> };
 }
 
 /**
@@ -116,19 +159,7 @@ export interface SceneHandle {
 let running:
   | {
       canvas: HTMLCanvasElement;
-      /**
-       * The key of the robot showing, set only once its robot is: a robot
-       * that failed is never taken for the one showing.
-       */
-      key?: string;
-      /** What the robot showing's `robot` event said of it. */
-      robot?: ShownRobot;
       handle: Promise<SceneHandle>;
-      /**
-       * The robot loading, the one the scene started with included, so a
-       * second request for it joins the first.
-       */
-      loading?: { key: string; done: Promise<void> };
     }
   | undefined;
 
@@ -150,34 +181,13 @@ function parking(): HTMLElement {
 }
 
 /**
- * Shows the page's scene in `container`, starting it with the robot in `glb`,
- * named by `key`, and `options` the first time. Later calls move the running
- * scene into their container and swap in their robot if `key` names a
- * different one (see `loadRobot`), resolving once it is showing and
- * rejecting if it cannot be; their `options` are ignored, the scene having
- * started with the first call's.
+ * Shows the page's scene in `container`, starting it, empty, with `options`
+ * if it is not running; later calls move the running scene into their
+ * container, and their `options` are ignored. Robots are loaded through the
+ * handle.
  */
 export function mountScene(
   container: HTMLElement,
-  glb: Uint8Array,
-  key: string,
-  options: SceneOptions & { backend?: Backend } = {},
-): Promise<SceneHandle> {
-  return showScene(container, glb, key, options).then(async (scene) => {
-    await scene.loadRobot(glb, key);
-    return scene;
-  });
-}
-
-/**
- * Shows the page's scene in `container`, starting it with the robot in `glb`,
- * named by `key`, and `options` if it is not running, and otherwise leaving
- * its robot as it is.
- */
-export function showScene(
-  container: HTMLElement,
-  glb: Uint8Array,
-  key: string,
   options: SceneOptions & { backend?: Backend } = {},
 ): Promise<SceneHandle> {
   if (!running) {
@@ -186,9 +196,9 @@ export function showScene(
     canvas.style.cssText =
       "display:block;width:100%;height:100%;outline:none;touch-action:none";
     container.append(canvas);
-    const handle = start(canvas, glb, key, options);
+    const handle = start(canvas, options);
     running = { canvas, handle };
-    // A start that fails (a module that did not download, a robot the scene
+    // A start that fails (a module that did not download, options the scene
     // refused) never reached the event loop, so the next call may try again.
     handle.catch(() => {
       if (running?.handle !== handle) return;
@@ -212,85 +222,53 @@ export function unmountScene(container: HTMLElement): void {
 
 async function start(
   canvas: HTMLCanvasElement,
-  glb: Uint8Array,
-  key: string,
   { backend: asked, ...options }: SceneOptions & { backend?: Backend },
 ): Promise<SceneHandle> {
   const backend = asked ?? (await chooseBackend());
   const wasm = await modules[backend]();
   await wasm.default();
   try {
-    wasm.mount(`#${CSS.escape(canvas.id)}`, glb, JSON.stringify(options));
+    wasm.mount(`#${CSS.escape(canvas.id)}`, JSON.stringify(options));
   } catch (error) {
     // winit hands the event loop to the browser by throwing, on purpose, once
     // the scene is running. Anything else is a real failure.
     if (!String(error).includes("Using exceptions for control flow"))
       throw error;
   }
-  // Robots given to the scene and not yet settled, by the id the module
-  // names each one by in its `robot` event, with the host's key for it. Every
-  // handler the page sets goes through `dispatch`, so each robot is settled
-  // whether or not the page listens, and the page hears of robots by its own
-  // keys.
-  const robots = new Map<
-    string,
-    { key: string; resolve: () => void; reject: (error: Error) => void }
-  >();
-  // Loading until its `robot` event says how it ended, the robot the scene
-  // started with as much as any swapped in after it.
-  const track = (id: string, robotKey: string): Promise<void> => {
-    const settled = new Promise<void>((resolve, reject) =>
-      robots.set(id, { key: robotKey, resolve, reject }),
-    );
-    const loading = {
-      key: robotKey,
-      done: settled.then(
-        () => {
-          if (running) running.key = robotKey;
-          if (running?.loading === loading) running.loading = undefined;
-        },
-        (error: unknown) => {
-          if (running?.loading === loading) running.loading = undefined;
-          throw error;
-        },
-      ),
-    };
-    if (running) running.loading = loading;
-    return loading.done;
+  const instances = new Map<string, Instance>();
+  const robots = new Map<string, ShownRobot>();
+  const instance = (id: string): Instance => {
+    let held = instances.get(id);
+    if (!held) {
+      held = { pending: [] };
+      instances.set(id, held);
+    }
+    return held;
   };
-  // Nothing may wait on the first robot, so its failure is the page's to hear
-  // through its handler or a later `loadRobot`, not an unhandled rejection.
-  track(wasm.first_robot(), key).catch(() => {});
   // Whether the pointer is over a control, from the overlay, and whether the
   // last press other than the primary's was (see the listeners below).
   let overControl = false;
   let pressedOnControl = false;
+  // Every handler the page sets goes through this, so each load is settled
+  // whether or not the page listens. An instance's outcomes arrive in the
+  // order its loads were asked for, so each settles the oldest still waiting.
   const dispatch =
-    (handler?: (event: SceneEvent) => void) => (event: WasmEvent) => {
+    (handler?: (event: SceneEvent) => void) => (event: SceneEvent) => {
       if (event.type === "overlay")
         overControl = event.pointer !== null && !event.pointer.held;
-      if (event.type !== "robot") {
-        handler?.(event);
-        return;
+      if (event.type === "loaded" || event.type === "loadFailed") {
+        const held = instance(event.instance);
+        const settled = held.pending.shift();
+        if (event.type === "loaded") {
+          const { type: _, ...robot } = event;
+          // Set before the handler hears of it, so the handle already says
+          // which robot is showing when it does.
+          held.robot = robot;
+          robots.set(event.instance, robot);
+          settled?.resolve();
+        } else settled?.reject(new Error(event.error));
       }
-      const { glb, ...outcome } = event;
-      const robot = robots.get(glb);
-      robots.delete(glb);
-      if (!robot) return;
-      if (outcome.error === undefined) {
-        // Set before the handler hears of it, so the handle already says
-        // which robot is showing when it does.
-        if (running) {
-          running.key = robot.key;
-          running.robot = {
-            key: robot.key,
-            joints: outcome.joints ?? [],
-            elements: outcome.elements ?? [],
-          };
-        }
-        robot.resolve();
-      } else robot.reject(new Error(outcome.error));
-      handler?.({ ...outcome, key: robot.key });
+      handler?.(event);
     };
   wasm.set_event_handler(dispatch());
   // A right-click over a control is the host's, to open its own menu there:
@@ -333,38 +311,62 @@ async function start(
   return {
     backend,
     canvas,
-    get key() {
-      return running?.key;
+    robots,
+    elementPose(id, element) {
+      return wasm.element_pose(id, element);
     },
-    get robot() {
-      return running?.robot;
-    },
-    elementPose(element) {
-      return wasm.element_pose(element);
-    },
-    setValue(target, value, feature) {
+    setValue(id, target, value, feature) {
       const values = typeof value === "number" ? [value] : value;
-      wasm.set_value(target, feature ?? "", Float32Array.from(values));
+      wasm.set_value(id, target, feature ?? "", Float32Array.from(values));
     },
     control(command) {
       wasm.control(JSON.stringify(command));
     },
-    loadRobot(next, nextKey) {
+    setPose(id, pose) {
+      wasm.set_pose(id, JSON.stringify(pose));
+    },
+    setSelection(id, elements) {
+      wasm.set_selection(id, elements);
+    },
+    unload(id) {
+      const held = instances.get(id);
+      instances.delete(id);
+      robots.delete(id);
+      wasm.unload(id);
+      // Anything still loading into it is answered by the scene; the module
+      // sends `loadFailed` for each, which finds no instance here, so settle
+      // them now.
+      for (const waiting of held?.pending ?? [])
+        waiting.reject(new Error("its instance was unloaded"));
+    },
+    load(id, glb, { key, pose } = {}) {
+      const held = instance(id);
       // Compared with the robot last asked for, not only the one showing: a
       // request for the robot showing while another loads must replace that
       // one, or the robot asked for last would not be the one left showing.
-      if (running?.loading) {
-        if (running.loading.key === nextKey) return running.loading.done;
-      } else if (nextKey === running?.key) {
-        return Promise.resolve();
+      if (key !== undefined) {
+        if (held.loading) {
+          if (held.loading.key === key) return held.loading.done;
+        } else if (held.robot?.key === key) {
+          return Promise.resolve();
+        }
       }
-      let id: string;
       try {
-        id = wasm.load_robot(next);
+        wasm.load(id, glb, JSON.stringify({ key, pose }));
       } catch (error) {
         return Promise.reject(error);
       }
-      return track(id, nextKey);
+      const settled = new Promise<void>((resolve, reject) =>
+        held.pending.push({ key, resolve, reject }),
+      );
+      const loading = {
+        key,
+        done: settled.finally(() => {
+          if (held.loading === loading) held.loading = undefined;
+        }),
+      };
+      held.loading = loading;
+      return loading.done;
     },
     onEvent(handler) {
       wasm.set_event_handler(dispatch(handler));

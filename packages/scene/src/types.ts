@@ -11,12 +11,10 @@ export interface SceneOptions {
    * default) is the ground colour all the way up.
    */
   environment?: "plain" | "sky";
-  /** Element ids to select from the start. */
-  select?: string[];
   /**
    * The part of the canvas left visible beside the host's panels,
-   * `[x, y, width, height]` in CSS pixels. The camera frames the robot in it.
-   * The whole canvas when absent.
+   * `[x, y, width, height]` in CSS pixels. The camera frames the robots in
+   * it. The whole canvas when absent.
    */
   activeArea?: [number, number, number, number];
   /** Physical pixels per CSS pixel, instead of `devicePixelRatio`. */
@@ -101,19 +99,26 @@ export interface Pose {
   rotation?: [number, number, number, number];
 }
 
-/** What a transform control moves. */
+/**
+ * What a transform control moves: a frame in the scene. A robot's root or one
+ * of its elements names the robot by its instance; a goal stands on its own.
+ */
 export type ControlTarget =
-  | { kind: "robot" }
-  /** One element, by the id the robot's `RobotData` gives it. */
-  | { kind: "element"; id: string }
+  | { kind: "robot"; instance: string }
+  /** One element of a robot, by the id its `RobotData` gives it. */
+  | { kind: "element"; instance: string; id: string }
   /** A goal at `pose`, with nothing drawn but the control: an IK target. */
   | { kind: "goal"; pose: Pose };
 
 /** A control a driver adds. */
 export type Control =
-  /** A ring or bar on the joint whose value animatable is the control's key. */
+  /** A ring or bar on a robot's joint. */
   | {
       kind: "joint";
+      /** The robot, by its instance. */
+      instance: string;
+      /** The joint, by the animatable that drives its value. */
+      joint: string;
       /** A CSS hex colour (`"#22c55e"`); the joint's own when absent. */
       color?: string;
     }
@@ -128,7 +133,10 @@ export type Control =
       colors?: [string, string, string];
     };
 
-/** An instruction about one control, by the driver's key for it. */
+/**
+ * An instruction about one control, by the driver's key for it, which is
+ * unique in the scene: an Arora path, say.
+ */
 export type ControlCommand =
   | { op: "add"; key: string; control: Control }
   | { op: "remove"; key: string }
@@ -196,8 +204,8 @@ export type SceneEvent =
   /** Sent each frame the overlay changed. */
   | ({ type: "overlay" } & OverlayFrame)
   /**
-   * A press on the robot: the element under it, or `null` for a press that
-   * hit no element.
+   * A click on a robot, by its instance: the element under it, or `null` for
+   * a click that hit no element.
    */
   | { type: "pick"; instance: string; element: string | null }
   /** A drag on a control the driver added. */
@@ -217,24 +225,23 @@ export type SceneEvent =
       position: [number, number];
     }
   /**
-   * How a robot the scene was given ended up, the one it started with
-   * included, by the key the host gave it. Once it is showing, `error` is
-   * absent, `joints` lists its joints and `elements` its elements, each with
-   * the name its author gave it (`""` where unnamed). Otherwise `error` says
-   * why it could not be loaded or what replaced it, the old robot still
-   * showing. `loadRobot`'s promise settles from this.
+   * A robot loaded whole and showing in its instance, with its joints and
+   * its elements, each with the name its author gave it (`""` where
+   * unnamed). `load`'s promise resolves from this.
    */
-  | {
-      type: "robot";
-      key: string;
-      error?: string;
-      joints?: Joint[];
-      elements?: { id: string; name: string }[];
-    };
+  | ({ type: "loaded" } & ShownRobot)
+  /**
+   * A load into an instance that did not finish, and why: the GLB failed, a
+   * later load into the same instance replaced it, or the instance was
+   * unloaded. Whatever the instance showed before still shows. `load`'s
+   * promise rejects from this.
+   */
+  | { type: "loadFailed"; instance: string; key?: string; error: string };
 
-/** The robot showing, as its `robot` event described it. */
+/** A robot showing in an instance, as its `loaded` event described it. */
 export interface ShownRobot {
-  key: string;
+  instance: string;
+  key?: string;
   joints: Joint[];
   /** Each element's id with the name its author gave it, `""` where unnamed. */
   elements: { id: string; name: string }[];
@@ -247,8 +254,8 @@ export interface Joint {
   /** The element the joint moves, by its `RobotData` id. */
   element: string;
   /**
-   * The animatable to write with `setValue` to move it, and the key of its
-   * joint control. Absent for a joint that is not animated; joints that mimic
+   * The animatable to write with `setValue` to move it, and the `joint` a
+   * joint control on it names. Absent for a joint that is not animated; joints that mimic
    * one another share their leader's.
    */
   animatable?: string;

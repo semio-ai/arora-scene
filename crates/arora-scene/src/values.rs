@@ -76,6 +76,7 @@ pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
     mut applied: ResMut<AppliedValues>,
     instances: Query<(&EntityInstance, Option<&JointRig>)>,
+    robots: Query<&crate::robots::RobotAsset>,
     mut transforms: Query<&mut Transform>,
     mut weights: Query<&mut MorphWeights>,
     mut material_handles: Query<&mut MeshMaterial3d<StandardMaterial>>,
@@ -87,14 +88,30 @@ pub fn apply_values(
 ) {
     applied.count = 0;
     applied.stamps.clear();
-    // Before the robot has spawned there is nowhere for a write to land, and
-    // a host may well write as soon as the scene starts: keep the writes for
-    // the frame the robot arrives in, rather than dropping them.
-    if writes.0.is_empty() || instances.is_empty() {
+    if writes.0.is_empty() {
         return;
     }
-    let mut count = 0;
+    // A write for a robot still loading has nowhere to land yet, and a host
+    // may well write as soon as it asks for the robot: keep it for the frame
+    // the robot arrives in, rather than dropping it. A write for every
+    // instance waits while there are none. A write for an instance nothing is
+    // loading is dropped, as nothing will ever take it.
+    let indexed = |id: &str| instances.iter().any(|(instance, _)| instance.id == id);
+    let coming = |id: &str| robots.iter().any(|robot| robot.instance == id);
+    let mut later = Vec::new();
+    let mut now = Vec::new();
     for write in writes.0.drain(..) {
+        match &write.instance {
+            Some(id) if indexed(id) => now.push(write),
+            Some(id) if coming(id) => later.push(write),
+            Some(id) => log::debug!("no robot {id:?} for a write to {:?}", write.target),
+            None if instances.is_empty() => later.push(write),
+            None => now.push(write),
+        }
+    }
+    writes.0 = later;
+    let mut count = 0;
+    for write in now {
         let before = count;
         for (instance, rig) in &instances {
             if write.instance.as_ref().is_some_and(|id| *id != instance.id) {

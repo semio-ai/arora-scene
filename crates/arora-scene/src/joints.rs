@@ -19,11 +19,6 @@ use bevy::prelude::*;
 
 use crate::robot::{Joint, JointKind};
 
-/// The joints the robot declares, read from its GLB before the app runs, as
-/// the robot's metadata is.
-#[derive(Resource, Default)]
-pub struct RobotJoints(pub Vec<Joint>);
-
 /// One body a joint's value moves.
 #[derive(Clone, Debug)]
 pub struct JointBinding {

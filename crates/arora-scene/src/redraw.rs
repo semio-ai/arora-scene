@@ -83,15 +83,19 @@ impl Plugin for RedrawOnChangePlugin {
 }
 
 fn note_pipelines(cache: Res<PipelineCache>, pending: Res<PipelinesPending>) {
-    pending
-        .0
-        .store(cache.waiting_pipelines().next().is_some(), Ordering::Relaxed);
+    pending.0.store(
+        cache.waiting_pipelines().next().is_some(),
+        Ordering::Relaxed,
+    );
 }
 
 /// What says another frame is owed.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Owed<'w, 's> {
     framing: Res<'w, Framing>,
+    /// Every robot, loading or showing: an empty scene has nothing to frame,
+    /// so its unframed camera owes nothing.
+    robots: Query<'w, 's, (), With<crate::robots::RobotAsset>>,
     pending: Res<'w, PipelinesPending>,
     glides: Query<'w, 's, (), With<Glide>>,
     moved: Query<'w, 's, (Entity, &'static GlobalTransform), Changed<GlobalTransform>>,
@@ -139,11 +143,11 @@ impl Owed<'_, '_> {
         let moved = self.moved_any();
         let shown = self.shown_any();
         // Every reader is drained, so a change is seen once.
-        let assets = self.meshes.read().count() + self.materials.read().count()
-            + self.images.read().count()
-            > 0;
+        let assets =
+            self.meshes.read().count() + self.materials.read().count() + self.images.read().count()
+                > 0;
         assets
-            || !self.framing.fitted
+            || (!self.framing.fitted && !self.robots.is_empty())
             || self.pending.0.load(Ordering::Relaxed)
             || !self.glides.is_empty()
             || moved

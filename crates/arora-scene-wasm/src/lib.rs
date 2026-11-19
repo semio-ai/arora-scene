@@ -1,16 +1,18 @@
 //! The browser host for the scene: the wasm module `@semio/scene` loads.
 //!
-//! A page calls [`mount`] once with a canvas and the robot's GLB bytes, then
-//! drives the scene with [`set_value`] and hears from it through the handler
-//! it gives [`set_event_handler`].
+//! A page calls [`mount`] once with a canvas, which starts an empty scene,
+//! then loads robots into it with [`load`], each under an instance id the page
+//! chooses, drives them with [`set_value`] and [`control`], and hears from the
+//! scene through the handler it gives [`set_event_handler`]. Everything about
+//! a robot names its instance.
 //!
 //! **One scene per page, for the life of the page.** Bevy's windowing runs on
 //! winit, and winit allows one event loop per page and never returns from it,
 //! so a second `mount` is refused rather than attempted. A host that shows and
 //! hides the scene keeps its canvas mounted and hides that.
 //!
-//! The GLB is handed over as bytes and served to Bevy's asset server from
-//! memory, so the page decides where the robot comes from (a URL, an upload, a
+//! Each GLB is handed over as bytes and served to Bevy's asset server from
+//! memory, so the page decides where a robot comes from (a URL, an upload, a
 //! database) and the scene never fetches anything itself.
 
 use std::cell::RefCell;
@@ -18,19 +20,20 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use arora_scene::controls::Pose;
 use arora_scene::controls::{
     ControlCommand, ControlCommands, ControlEvent, ControlEvents, ControlPress, ControlPresses,
 };
-use arora_scene::instance::{RobotMeta, Selected};
 use arora_scene::redraw::RedrawOnChangePlugin;
+use arora_scene::robots::{Outcome, RobotLoad, RobotRequests};
 use arora_scene::stage::{Environment, Theme};
 use arora_scene::values::{ApplyValues, ValueWrite, ValueWrites};
-use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
+use arora_scene::{SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
 use arora_visuals::meta::FeatureKind;
 use arora_visuals::overlay::Overlay;
 use arora_visuals::pick::Picked;
-use arora_visuals::select::Selection;
+use arora_visuals::select::{Selection, Selections};
 use arora_visuals::value::Decoded;
 use bevy::asset::io::memory::{Dir, MemoryAssetReader};
 use bevy::asset::io::AssetSourceBuilder;
@@ -44,110 +47,132 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "bench")]
 mod bench;
 
-/// The asset source the robot is served from, and the first robot's path
-/// within it.
+/// The asset source robots are served from.
 const SOURCE: &str = "memory";
-const ROBOT: &str = "robot.glb";
 
-/// The memory the robots are served from, and the paths it holds, oldest
-/// first. A robot's bytes stay until its load has ended: removed while the
-/// asset server is still reading them, they fail the load they were for.
-static ROBOTS: Mutex<Option<(Dir, Vec<String>)>> = Mutex::new(None);
+/// The memory robots are served from. A robot's bytes stay until its load has
+/// ended, either way: removed while the asset server is still reading them,
+/// they fail the load they were for. Once it has loaded, the asset server
+/// holds what it read.
+static ROBOTS: Mutex<Option<Dir>> = Mutex::new(None);
 /// How many robots have been loaded, which names each new one: a fresh path
-/// per robot, so the asset server never answers with the one it replaced.
+/// per load, so the asset server never answers with one it held before.
 static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-/// Robots asked for since the last frame, oldest first. The last takes the
-/// old one's place; every earlier one is answered as replaced, since the page
-/// holds a promise for each.
-static NEXT: Mutex<Vec<arora_scene::NextRobot>> = Mutex::new(Vec::new());
 
-/// Starts replacing the robot the scene shows with the one in `glb`, and
-/// returns the id the swap's `robot` event will name. Refused at once if
-/// `glb` declares nothing the scene can read. Otherwise the new robot loads
-/// beside the old, which keeps showing; once it has loaded whole it takes the
-/// old one's place, and the old robot's joint and element controls go with
-/// it, goals staying. If it fails to load, the old robot stays and the event
-/// carries the error.
+/// What the page asked of the robots since the last frame, in order.
+static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
+
+enum Request {
+    Load(RobotLoad),
+    Unload(String),
+    Pose(String, Pose),
+    Select(String, Vec<String>),
+}
+
+/// How a load is asked for, as JSON from the page. Every field is optional.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LoadOptions {
+    /// The page's name for the content, handed back in the load's events.
+    /// Deciding that a load of what an instance already shows is a repeat is
+    /// the package's, which compares keys before it calls.
+    key: Option<String>,
+    /// Where the robot stands, Z up, in metres. Absent, it stands where the
+    /// robot it replaces stood, or at the origin.
+    pose: Option<Pose>,
+}
+
+/// Loads the robot in `glb` into the instance `instance`, the page's own name
+/// for it, with `options` as JSON (`{ key, pose }`). Under a new id it adds a
+/// robot; under one the scene shows it swaps that robot, which keeps showing
+/// until this one has loaded whole and then goes, with the controls on its
+/// joints and elements. A `loaded` or `loadFailed` event naming the instance
+/// says how it ended. Refused at once if `glb` declares nothing the scene can
+/// read.
 #[wasm_bindgen]
-pub fn load_robot(glb: Vec<u8>) -> Result<String, JsValue> {
-    let meta = arora_visuals::meta::AssetMeta::from_glb_bytes(&glb)
-        .map_err(|e| error(format!("{e:#}")))?;
-    let joints = arora_scene::robot::find_joints(&glb).unwrap_or_else(|e| {
-        log::warn!("could not read the robot's joints: {e:#}");
-        Vec::new()
-    });
-    let mut robots = ROBOTS.lock().unwrap();
-    let Some((dir, held)) = robots.as_mut() else {
+pub fn load(instance: String, glb: Vec<u8>, options: String) -> Result<(), JsValue> {
+    let options: LoadOptions = match options.as_str() {
+        "" => LoadOptions::default(),
+        json => serde_json::from_str(json).map_err(error)?,
+    };
+    let robots = ROBOTS.lock().unwrap();
+    let Some(dir) = robots.as_ref() else {
         return Err(error("the scene is not mounted yet"));
     };
     let path = format!("robot-{}.glb", LOADED.fetch_add(1, Ordering::SeqCst) + 1);
+    let mut load = RobotLoad::read(instance, options.key, asset_id(&path), &glb)
+        .map_err(|e| error(format!("{e:#}")))?;
+    load.pose = options.pose;
     dir.insert_asset(Path::new(&path), glb);
-    held.push(path.clone());
-    let glb = asset_id(&path);
-    NEXT.lock().unwrap().push(arora_scene::NextRobot {
-        glb: glb.clone(),
-        meta,
-        joints,
-    });
+    REQUESTS.lock().unwrap().push(Request::Load(load));
     wake();
-    Ok(glb)
+    Ok(())
 }
 
-/// Lets go of the bytes a robot's load no longer needs, once it has ended:
-/// the asset server holds whatever it loaded from them. A robot showing makes
-/// every robot asked for before it unneeded too; one that failed or was
-/// replaced needs only its own bytes gone.
-fn release_bytes(outcome: &Result<arora_scene::Shown, (String, String)>) {
-    let mut robots = ROBOTS.lock().unwrap();
-    let Some((dir, held)) = robots.as_mut() else {
+/// Takes the robot in the instance `instance` away, with the controls on it
+/// and anything still loading into it.
+#[wasm_bindgen]
+pub fn unload(instance: String) {
+    REQUESTS.lock().unwrap().push(Request::Unload(instance));
+    wake();
+}
+
+/// Moves the robot in the instance `instance` to `pose`, as JSON
+/// (`{ position, rotation }`, Z up, in metres, the rotation a quaternion
+/// `[x, y, z, w]`).
+#[wasm_bindgen]
+pub fn set_pose(instance: String, pose: String) -> Result<(), JsValue> {
+    let pose: Pose = serde_json::from_str(&pose).map_err(error)?;
+    REQUESTS.lock().unwrap().push(Request::Pose(instance, pose));
+    wake();
+    Ok(())
+}
+
+/// Outlines the elements `elements` of the instance `instance`, by their
+/// `RobotData` ids, in place of whatever it outlined before; none clears it.
+/// A selection is the page's and is kept, by the instance, across a swap.
+#[wasm_bindgen]
+pub fn set_selection(instance: String, elements: Vec<String>) {
+    REQUESTS
+        .lock()
+        .unwrap()
+        .push(Request::Select(instance, elements));
+    wake();
+}
+
+/// Lets go of the bytes a load no longer needs once it has ended.
+fn release_bytes(outcome: &Outcome) {
+    let robots = ROBOTS.lock().unwrap();
+    let (Some(dir), Some(path)) = (robots.as_ref(), outcome.glb().strip_prefix(&asset_id("")))
+    else {
         return;
     };
-    let prefix = asset_id("");
-    let path = |glb: &str| glb.strip_prefix(&prefix).map(str::to_string);
-    let gone: Vec<String> = match outcome {
-        Ok(shown) => match path(&shown.glb).and_then(|p| held.iter().position(|h| *h == p)) {
-            Some(at) => held.drain(..at).collect(),
-            None => Vec::new(),
-        },
-        Err((glb, _)) => match path(glb) {
-            Some(p) => {
-                held.retain(|h| *h != p);
-                vec![p]
-            }
-            None => Vec::new(),
-        },
-    };
-    for p in gone {
-        dir.remove_asset(Path::new(&p));
-    }
+    dir.remove_asset(Path::new(path));
 }
 
-/// The id the `robot` event names the robot the scene was mounted with by,
-/// as `load_robot` returns one for each robot after it.
-#[wasm_bindgen]
-pub fn first_robot() -> String {
-    asset_id(ROBOT)
-}
-
-/// How the asset server names the robot served at `path`, which is also the
-/// id the robot's `robot` event carries.
+/// How the asset server names the robot served at `path`.
 fn asset_id(path: &str) -> String {
     format!("{SOURCE}://{path}")
 }
 
-/// Hands the latest robot the page loaded to the scene, which swaps it in,
-/// and reports any asked for before it in the same frame as replaced.
-fn take_next_robot(mut commands: Commands, mut outcomes: ResMut<arora_scene::RobotOutcomes>) {
-    let mut asked = std::mem::take(&mut *NEXT.lock().unwrap());
-    let Some(next) = asked.pop() else {
-        return;
-    };
-    for earlier in asked {
-        outcomes
-            .0
-            .push(Err((earlier.glb, arora_scene::REPLACED.into())));
+/// Hands what the page asked since the last frame to the scene, in order.
+fn take_requests(mut requests: ResMut<RobotRequests>, mut selections: ResMut<Selections>) {
+    for request in std::mem::take(&mut *REQUESTS.lock().unwrap()) {
+        match request {
+            Request::Load(load) => requests.loads.push(load),
+            Request::Unload(instance) => requests.unloads.push(instance),
+            Request::Pose(instance, pose) => requests.poses.push((instance, pose)),
+            Request::Select(instance, elements) => {
+                if elements.is_empty() {
+                    selections.0.remove(&instance);
+                } else {
+                    selections
+                        .0
+                        .insert(instance, elements.iter().map(Selection::of).collect());
+                }
+            }
+        }
     }
-    commands.insert_resource(next);
 }
 
 /// How the scene starts, as JSON from the page. Every field is optional.
@@ -161,8 +186,6 @@ struct Options {
     /// `"sky"` for the sky, which under the dark theme shows the aurora;
     /// anything else is the ground colour all the way up.
     environment: Option<String>,
-    /// Element ids to select from the start.
-    select: Vec<String>,
     /// The part of the canvas left visible beside the host's panels,
     /// `[x, y, width, height]` in CSS pixels; the camera frames the robot in
     /// it. The whole canvas when absent.
@@ -198,36 +221,25 @@ fn error(message: impl std::fmt::Display) -> JsValue {
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 
-/// Starts the scene in the canvas whose CSS selector is `canvas` (`#scene`),
-/// drawing the robot in `glb`, with `options` as JSON (see the package's
-/// `SceneOptions` type). Returns once the scene is running; the robot appears
-/// over the next frames.
+/// Starts an empty scene in the canvas whose CSS selector is `canvas`
+/// (`#scene`), with `options` as JSON (see the package's `SceneOptions`
+/// type). Robots come after, through [`load`].
 #[wasm_bindgen]
-pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValue> {
+pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     if MOUNTED.load(Ordering::SeqCst) {
         return Err(error("the scene is already mounted; a page holds one"));
     }
     mark("start");
     let opts: Options = serde_json::from_str(&options).map_err(error)?;
-    let meta = arora_visuals::meta::AssetMeta::from_glb_bytes(&glb)
-        .map_err(|e| error(format!("{e:#}")))?;
-    // A robot whose joints cannot be read still draws; its joints just stay
-    // where the GLB put them.
-    let joints = arora_scene::robot::find_joints(&glb).unwrap_or_else(|e| {
-        log::warn!("could not read the robot's joints: {e:#}");
-        Vec::new()
-    });
-    mark("meta-parsed");
-    // Claimed only once the inputs are known good, so a mount refused for bad
-    // options or a bad robot leaves the page free to mount again.
+    // Claimed only once the options are known good, so a mount refused for
+    // bad options leaves the page free to mount again.
     if MOUNTED.swap(true, Ordering::SeqCst) {
         return Err(error("the scene is already mounted; a page holds one"));
     }
 
-    let robot = Dir::default();
-    robot.insert_asset(Path::new(ROBOT), glb);
-    *ROBOTS.lock().unwrap() = Some((robot.clone(), vec![ROBOT.to_string()]));
+    let robots = Dir::default();
+    *ROBOTS.lock().unwrap() = Some(robots.clone());
 
     let mut resolution = WindowResolution::default();
     if let Some(sf) = opts.scale_factor {
@@ -235,8 +247,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     }
 
     #[cfg(feature = "bench")]
-    let (copies, still, cpu_preprocess, gizmo) = (
-        opts.bench.copies.max(1),
+    let (still, cpu_preprocess, gizmo) = (
         opts.bench.still,
         opts.bench.cpu_preprocess,
         opts.bench
@@ -248,7 +259,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
     // measure a moving view. Nor is there a gizmo of the scene's own: every
     // control on a page is a driver's, added through `control`.
     #[cfg(not(feature = "bench"))]
-    let (copies, still, cpu_preprocess, gizmo) = (1, true, false, None);
+    let (still, cpu_preprocess, gizmo) = (true, false, None);
 
     let mut app = App::new();
     // Sources are built when the asset plugin is added, so this comes first.
@@ -256,7 +267,7 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
         SOURCE,
         AssetSourceBuilder::new(move || {
             Box::new(MemoryAssetReader {
-                root: robot.clone(),
+                root: robots.clone(),
             })
         }),
     );
@@ -305,27 +316,13 @@ pub fn mount(canvas: String, glb: Vec<u8>, options: String) -> Result<(), JsValu
         angle: opts.angle.unwrap_or(SceneOptions::default().angle),
         ..default()
     })
-    .insert_resource(RobotSpec {
-        glb: first_robot(),
-        copies,
-    })
-    // What `arora_scene::mount_instances` does from a file, done from bytes.
-    .insert_resource(RobotMeta(meta))
-    .insert_resource(arora_scene::joints::RobotJoints(joints))
-    .insert_resource(Selected(opts.select.iter().map(Selection::of).collect()))
-    // Before the control commands, as the native mount orders it.
-    .add_systems(
-        Update,
-        arora_scene::instance::index_instances
-            .before(arora_scene::controls::ControlSystems::Commands),
-    )
     .add_systems(Startup, keep_waker)
     .add_systems(Update, take_pushed.before(ApplyValues))
     // Before Update, where the scene carries control commands out.
     .add_systems(PreUpdate, take_controls)
-    // Before the scene's own PreUpdate swap, so a robot loaded between
-    // frames is swapped in on the next one.
-    .add_systems(First, take_next_robot)
+    // Before the scene takes its robot requests in PreUpdate, so a robot
+    // asked for between frames starts loading on the next one.
+    .add_systems(First, take_requests)
     // Poses first, so a handler reading one in an event's handler reads
     // the frame the event is about.
     .add_systems(Last, (keep_poses, emit_events).chain());
@@ -429,14 +426,20 @@ fn take_pushed(mut writes: ResMut<ValueWrites>) {
     writes.0.append(&mut PUSHED.lock().unwrap());
 }
 
-/// Writes one value, one number or three, to `target`: an animatable's id as
-/// the robot's `RobotData` declares it, which carries its own feature (a
-/// joint's value among them), or an element's id with the `feature` to change
-/// as `RobotData` names it (`rotation`, `translation`, `color`, ...). An empty
-/// `feature` writes an animatable. Takes effect in the next frame, which the
-/// call wakes the scene to draw.
+/// Writes one value, one number or three, to `target` on the robot in the
+/// instance `instance`: an animatable's id as the robot's `RobotData` declares
+/// it, which carries its own feature (a joint's value among them), or an
+/// element's id with the `feature` to change as `RobotData` names it
+/// (`rotation`, `translation`, `color`, ...). An empty `feature` writes an
+/// animatable. Takes effect in the next frame, which the call wakes the scene
+/// to draw, or, for a robot still loading, in the frame it arrives in.
 #[wasm_bindgen]
-pub fn set_value(target: String, feature: String, values: Vec<f32>) -> Result<(), JsValue> {
+pub fn set_value(
+    instance: String,
+    target: String,
+    feature: String,
+    values: Vec<f32>,
+) -> Result<(), JsValue> {
     let feature = match feature.as_str() {
         "" => None,
         name => Some(
@@ -450,7 +453,7 @@ pub fn set_value(target: String, feature: String, values: Vec<f32>) -> Result<()
         _ => return Err(error("a value is one number or three")),
     };
     PUSHED.lock().unwrap().push(ValueWrite {
-        instance: None,
+        instance: Some(instance),
         target,
         feature,
         value,
@@ -493,19 +496,23 @@ enum SceneEvent<'a> {
     /// A drag on a control: what it asks for. Nothing has moved; the page
     /// writes the change if it wants it.
     Control(&'a ControlEvent),
-    /// How a robot swap ended: `error` is absent once the robot named by
-    /// `glb` (the id `load_robot` returned) is showing, and says why it could
-    /// not load otherwise, the old robot still showing.
-    Robot {
-        glb: &'a str,
+    /// A robot loaded whole and showing in its instance, with what it
+    /// declares.
+    Loaded {
+        instance: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<&'a str>,
-        /// The robot's joints, once it is showing.
+        key: Option<&'a str>,
+        joints: Vec<JointInfo<'a>>,
+        elements: Vec<ElementInfo<'a>>,
+    },
+    /// A load that did not finish, and why: the GLB failed, a later load into
+    /// the same instance replaced it, or the instance was unloaded. Whatever
+    /// the instance showed before still shows.
+    LoadFailed {
+        instance: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
-        joints: Option<Vec<JointInfo<'a>>>,
-        /// The robot's elements, once it is showing.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        elements: Option<Vec<ElementInfo<'a>>>,
+        key: Option<&'a str>,
+        error: &'a str,
     },
     /// A press with a button other than the primary on a control, which the
     /// page acts on as it likes.
@@ -574,28 +581,31 @@ impl<'a> From<&'a arora_scene::robot::Joint> for JointInfo<'a> {
     }
 }
 
+/// Where each element of each robot showing stood in the last frame, by its
+/// instance and `RobotData` id, Z up.
+type Poses = std::collections::HashMap<(String, String), Pose>;
+
 thread_local! {
-    /// Where each element of the robot showing stood in the last frame, by
-    /// its `RobotData` id, Z up.
-    static POSES: RefCell<std::collections::HashMap<String, arora_scene::controls::Pose>> =
-        RefCell::new(std::collections::HashMap::new());
+    static POSES: RefCell<Poses> = RefCell::new(Poses::new());
 }
 
-/// Records where each element of the robot showing stands, for
+/// Records where each element of each robot showing stands, for
 /// [`element_pose`]. Runs after transforms have propagated, so it reads the
 /// frame about to be drawn.
 fn keep_poses(
-    instances: Query<&arora_visuals::instance::EntityInstance, Without<arora_scene::Incoming>>,
+    instances: Query<
+        &arora_visuals::instance::EntityInstance,
+        Without<arora_scene::robots::Incoming>,
+    >,
     placed: Query<&GlobalTransform>,
 ) {
-    let mut poses = std::collections::HashMap::new();
-    let showing = arora_scene::instance::instance_id(0);
-    for instance in instances.iter().filter(|i| i.id == showing) {
+    let mut poses = Poses::new();
+    for instance in &instances {
         for (id, targets) in &instance.bindings.elements {
             if let Ok(placed) = placed.get(targets.node) {
                 poses.insert(
-                    id.clone(),
-                    arora_scene::controls::Pose::from_scene(&placed.compute_transform()),
+                    (instance.id.clone(), id.clone()),
+                    Pose::from_scene(&placed.compute_transform()),
                 );
             }
         }
@@ -603,16 +613,16 @@ fn keep_poses(
     POSES.with(|kept| *kept.borrow_mut() = poses);
 }
 
-/// Where an element of the robot showing stood in the last frame drawn, in
-/// the scene's world, Z up: `{ position, rotation }`, the rotation a
-/// quaternion `[x, y, z, w]`. `undefined` for an id the robot does not
-/// declare, or before it has spawned.
+/// Where an element of the robot in the instance `instance` stood in the last
+/// frame drawn, in the scene's world, Z up: `{ position, rotation }`, the
+/// rotation a quaternion `[x, y, z, w]`. `undefined` for an id the robot does
+/// not declare, or before it has spawned.
 #[wasm_bindgen]
-pub fn element_pose(element: &str) -> JsValue {
+pub fn element_pose(instance: &str, element: &str) -> JsValue {
     POSES.with(|poses| {
         poses
             .borrow()
-            .get(element)
+            .get(&(instance.to_string(), element.to_string()))
             .and_then(|pose| serde_json::to_string(pose).ok())
             .and_then(|json| js_sys::JSON::parse(&json).ok())
             .unwrap_or(JsValue::UNDEFINED)
@@ -624,7 +634,7 @@ static CONTROLS: Mutex<Vec<ControlCommand>> = Mutex::new(Vec::new());
 
 /// Adds, removes, shows, hides or moves a control, by a command as JSON (see
 /// the package's `ControlCommand` type). Takes effect in the next frame, or,
-/// before the robot has spawned, in the frame it arrives in.
+/// for a control on a robot still loading, in the frame it arrives in.
 #[wasm_bindgen]
 pub fn control(command: String) -> Result<(), JsValue> {
     let command: ControlCommand = serde_json::from_str(&command).map_err(error)?;
@@ -667,28 +677,35 @@ fn emit_events(
     rigged: Query<(), With<arora_scene::joints::JointRig>>,
     mut controls: ResMut<ControlEvents>,
     mut presses: ResMut<ControlPresses>,
-    mut robots: ResMut<arora_scene::RobotOutcomes>,
+    mut robots: ResMut<arora_scene::robots::RobotOutcomes>,
 ) {
     for outcome in std::mem::take(&mut robots.0) {
         release_bytes(&outcome);
         send(&match &outcome {
-            Ok(shown) => SceneEvent::Robot {
-                glb: &shown.glb,
-                error: None,
-                joints: Some(shown.joints.iter().map(JointInfo::from).collect()),
-                elements: Some(
-                    shown
-                        .elements
-                        .iter()
-                        .map(|(id, name)| ElementInfo { id, name })
-                        .collect(),
-                ),
+            Outcome::Loaded {
+                instance,
+                key,
+                joints,
+                elements,
+                ..
+            } => SceneEvent::Loaded {
+                instance,
+                key: key.as_deref(),
+                joints: joints.iter().map(JointInfo::from).collect(),
+                elements: elements
+                    .iter()
+                    .map(|(id, name)| ElementInfo { id, name })
+                    .collect(),
             },
-            Err((glb, why)) => SceneEvent::Robot {
-                glb,
-                error: Some(why),
-                joints: None,
-                elements: None,
+            Outcome::Failed {
+                instance,
+                key,
+                error,
+                ..
+            } => SceneEvent::LoadFailed {
+                instance,
+                key: key.as_deref(),
+                error,
             },
         });
     }

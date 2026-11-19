@@ -25,6 +25,7 @@ pub mod instance;
 pub mod joints;
 pub mod redraw;
 pub mod robot;
+pub mod robots;
 pub mod stage;
 pub mod toggles;
 #[cfg(feature = "test_window")]
@@ -33,11 +34,9 @@ pub mod values;
 
 use std::path::PathBuf;
 
-use bevy::asset::RecursiveDependencyLoadState;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
-use bevy::gltf::GltfAssetLabel;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
@@ -60,8 +59,8 @@ use bevy::math::DVec3;
 ///
 /// Deliberately not the CLI. A wasm host has no flags, and a measurement
 /// harness sets these per run. Everything here describes *rendering*; what to
-/// load is [`RobotSpec`] and the mount functions, because loading is an action
-/// a host takes rather than a setting it declares.
+/// load is [`robots::RobotRequests`], because loading is an action a host takes
+/// rather than a setting it declares.
 #[derive(Resource, Clone)]
 pub struct SceneOptions {
     /// Hold the camera still instead of orbiting, to separate the cost of a
@@ -160,25 +159,8 @@ impl Default for SceneOptions {
     }
 }
 
-/// Which robot to load, and how many of it.
-///
-/// A resource read at startup, which is the shape this spike inherited and not
-/// the shape Studio needs: an editor loads an asset after the instance is
-/// already running, and swaps and removes them while it runs. Moving this to a
-/// runtime command is the next change, and it is the same change the face
-/// renderer needs for its own state.
-#[derive(Resource, Clone)]
-pub struct RobotSpec {
-    /// The robot GLB, resolved by the asset server.
-    pub glb: String,
-    /// Spawn it this many times, in a grid. Multiplying the real asset states
-    /// the headroom in the units that matter: how many robots' worth of scene
-    /// a frame budget holds.
-    pub copies: u32,
-}
-
-/// The scene's systems. A host adds this, inserts [`SceneOptions`] and
-/// [`RobotSpec`], and runs.
+/// The scene's systems. A host adds this and inserts [`SceneOptions`], runs,
+/// and loads robots through [`robots::RobotRequests`].
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
@@ -214,7 +196,6 @@ impl Plugin for ScenePlugin {
         )
         .add_systems(Startup, spawn_readout)
         .init_resource::<arora_visuals::select::Selections>()
-        .init_resource::<instance::Selected>()
         // Bevy's own mesh picking is not added: it casts base vertices,
         // and a pick has to meet the mesh where a morph put it. The
         // shared cast decides picks instead, from presses and releases
@@ -227,11 +208,28 @@ impl Plugin for ScenePlugin {
         .init_resource::<OrbitHeld>()
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
-        .init_resource::<RobotOutcomes>()
-        .init_resource::<FirstRobot>()
+        .init_resource::<robots::RobotRequests>()
+        .init_resource::<robots::RobotOutcomes>()
+        .add_message::<robots::RobotLoaded>()
         .add_systems(
             PreUpdate,
-            (report_first_robot, begin_swap, finish_swap).chain(),
+            (
+                robots::take_requests,
+                robots::finish_loads,
+                frame_initial_robots,
+            )
+                .chain(),
+        )
+        // Before the control commands, so a robot indexed this frame is there
+        // for both passes: one indexed between them would leave a change sent
+        // with an add a pass short, and the control showing a frame without
+        // it. And before values are applied, so a write sent in the frame a
+        // robot is indexed lands on it.
+        .add_systems(
+            Update,
+            instance::index_instances
+                .before(controls::ControlSystems::Commands)
+                .before(values::ApplyValues),
         )
         .add_systems(
             Update,
@@ -697,18 +695,15 @@ fn reading_text(reading: &arora_visuals::overlay::Reading) -> String {
     }
 }
 
-/// Makes every spawned robot an entity instance the shared layer can address.
-///
-/// Reads what the GLB declares before the app runs, for the same reason the
-/// other mounts do: a wasm host has no filesystem and an editor loads its
-/// assets after startup, so driving this from the asset's own load is what
-/// would let either happen.
-///
-/// `select` outlines those elements by their `RobotData` ids on every copy.
-pub fn mount_instances(
+/// Asks for the robot GLB at `robot_glb`, under `assets`, to be loaded into the
+/// instance `instance`, standing at `pose`, with `select` outlined. The native
+/// host's way in; a browser host hands over bytes instead.
+pub fn load_from_file(
     app: &mut App,
     assets: &std::path::Path,
     robot_glb: &str,
+    instance: &str,
+    pose: Option<controls::Pose>,
     select: Vec<arora_visuals::select::Selection>,
 ) {
     let bytes = match std::fs::read(assets.join(robot_glb)) {
@@ -718,52 +713,45 @@ pub fn mount_instances(
             return;
         }
     };
-    let meta = match arora_visuals::meta::AssetMeta::from_glb_bytes(&bytes) {
-        Ok(meta) => meta,
-        Err(error) => {
-            log::error!("could not read what {robot_glb} declares: {error:#}");
-            return;
-        }
-    };
-    // A robot whose joints cannot be read still draws; its joints just stay
-    // where the GLB put them.
-    let joints = robot::find_joints(&bytes).unwrap_or_else(|error| {
-        log::warn!("could not read the robot's joints: {error:#}");
-        Vec::new()
-    });
-    app.insert_resource(joints::RobotJoints(joints));
+    let mut load =
+        match robots::RobotLoad::read(instance.to_string(), None, robot_glb.to_string(), &bytes) {
+            Ok(load) => load,
+            Err(error) => {
+                log::error!("could not read what {robot_glb} declares: {error:#}");
+                return;
+            }
+        };
     log::info!(
         "{} declares {} elements and {} animatables",
         robot_glb,
-        meta.elements.len(),
-        meta.animatables.len()
+        load.asset.meta.elements.len(),
+        load.asset.meta.animatables.len()
     );
     if !select.is_empty() {
-        let known: Vec<&str> = meta
+        let known = load
+            .asset
+            .meta
             .elements
             .iter()
             .filter(|e| select.iter().any(|selection| selection.element == e.id))
-            .map(|e| e.id.as_str())
-            .collect();
-        if known.len() < select.len() {
+            .count();
+        if known < select.len() {
             log::warn!(
                 "{} of {} selected ids are declared; pass --list-elements to see them",
-                known.len(),
+                known,
                 select.len()
             );
         }
+        app.world_mut()
+            .resource_mut::<arora_visuals::select::Selections>()
+            .0
+            .insert(instance.to_string(), select);
     }
-    app.insert_resource(instance::RobotMeta(meta))
-        .insert_resource(instance::Selected(select))
-        // Registered by the mount rather than by the plugin, so the system
-        // exists only where the resources it needs do. Before the control
-        // commands, so a robot indexed this frame is there for both passes:
-        // one indexed between them would leave a change sent with an add a
-        // pass short, and the control showing a frame without it.
-        .add_systems(
-            Update,
-            instance::index_instances.before(controls::ControlSystems::Commands),
-        );
+    load.pose = pose;
+    app.world_mut()
+        .resource_mut::<robots::RobotRequests>()
+        .loads
+        .push(load);
 }
 
 /// Builds the screen the robot declares and hands back the texture it shows.
@@ -872,19 +860,11 @@ fn spawn_screen(
     log::info!("screen quad attached under {wanted}");
 }
 
-pub fn setup(
-    mut commands: Commands,
-    opts: Res<SceneOptions>,
-    spec: Res<RobotSpec>,
-    assets: Res<AssetServer>,
-    mut images: ResMut<Assets<Image>>,
-) {
+pub fn setup(mut commands: Commands, opts: Res<SceneOptions>, mut images: ResMut<Assets<Image>>) {
     log::info!(
-        "loading {} ({})",
-        spec.glb,
+        "starting ({})",
         if opts.uncapped { "uncapped" } else { "vsync" }
     );
-    spawn_robot(&mut commands, &assets, &spec);
 
     // Placed properly once the model's bounds are known; see `take_census`.
     // Until then it stands well back from where a robot of ordinary size
@@ -946,274 +926,21 @@ pub fn setup(
     }
 }
 
-/// Spawns the robot `spec` names, `spec.copies` times.
-fn spawn_robot(commands: &mut Commands, assets: &AssetServer, spec: &RobotSpec) {
-    spawn_robot_roots(commands, assets, &spec.glb, spec.copies, ());
-}
-
-/// Spawns `copies` roots of the robot at `glb`, each with `extra`, and
-/// returns them.
-fn spawn_robot_roots(
-    commands: &mut Commands,
-    assets: &AssetServer,
-    glb: &str,
-    copies: u32,
-    extra: impl Bundle + Clone,
-) -> Vec<Entity> {
-    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(glb.to_string()));
-    // A square-ish grid, spaced by roughly a robot's width. The exact spacing
-    // does not matter — the camera fits whatever bounds result.
-    let stride = (copies as f32).sqrt().ceil().max(1.0) as u32;
-    (0..copies.max(1))
-        .map(|i| {
-            let (x, z) = ((i % stride) as f32, (i / stride) as f32);
-            commands
-                .spawn((
-                    WorldAssetRoot(scene.clone()),
-                    Transform::from_xyz((x - (stride - 1) as f32 * 0.5) * 0.8, 0.0, z * 0.8),
-                    extra.clone(),
-                ))
-                .id()
-        })
-        .collect()
-}
-
-/// A robot to put in place of the one the scene is showing: where its GLB is
-/// served from, and what it declares. A host inserts it; the scene starts
-/// loading it on the next frame and removes it.
-#[derive(Resource)]
-pub struct NextRobot {
-    pub glb: String,
-    pub meta: arora_visuals::meta::AssetMeta,
-    pub joints: Vec<robot::Joint>,
-}
-
-/// How each robot the scene was given ended up, the one it started with
-/// included, in the order they ended: `Ok` once it is showing, `Err` with
-/// its `glb` and why it could not be loaded or was replaced, the old robot
-/// still showing.
-#[derive(Resource, Default)]
-pub struct RobotOutcomes(pub Vec<Result<Shown, (String, String)>>);
-
-/// A robot that is now showing: its `glb`, and its own joints, which are not
-/// necessarily [`joints::RobotJoints`] by the time a host reads this, since a
-/// later robot may have replaced it in the same frame.
-pub struct Shown {
-    pub glb: String,
-    pub joints: Vec<robot::Joint>,
-    /// Its elements, as `(id, name)`: the name is what the author called
-    /// the element (a link's `base_link`), empty where unnamed.
-    pub elements: Vec<(String, String)>,
-}
-
-/// An asset's elements as `(id, name)`, for [`Shown`].
-fn named(meta: &arora_visuals::meta::AssetMeta) -> Vec<(String, String)> {
-    meta.elements
-        .iter()
-        .map(|element| (element.id.clone(), element.name.clone()))
-        .collect()
-}
-
-/// Whether how the robot the scene started with ended up has been reported.
-/// Whichever of [`report_first_robot`] and [`finish_swap`] settles it first
-/// does, so a swap that overtakes the first robot reports it replaced before
-/// reporting itself.
-#[derive(Resource, Default)]
-struct FirstRobot {
-    reported: bool,
-}
-
-/// A robot loading in the background to replace the one showing. It is not
-/// indexed, drawn or driven until it has loaded whole.
-#[derive(Component, Clone)]
-pub struct Incoming;
-
-/// The swap under way: the robot's declaration, and the roots loading it.
-#[derive(Resource)]
-struct PendingRobot {
-    glb: String,
-    meta: arora_visuals::meta::AssetMeta,
-    joints: Vec<robot::Joint>,
-    roots: Vec<Entity>,
-}
-
-/// The error a swap reports when a robot asked for later replaced it before
-/// it finished loading.
-pub const REPLACED: &str = "replaced by a later robot before it finished loading";
-
-/// Starts loading the robot [`NextRobot`] names, hidden beside the one
-/// showing, which stays until the new one has loaded. A robot asked for while
-/// another is still loading replaces that one.
-fn begin_swap(
-    next: Option<Res<NextRobot>>,
-    pending: Option<Res<PendingRobot>>,
-    mut commands: Commands,
-    assets: Res<AssetServer>,
-    spec: Res<RobotSpec>,
-    mut outcomes: ResMut<RobotOutcomes>,
-) {
-    let Some(next) = next else {
-        return;
-    };
-    if let Some(earlier) = pending {
-        for &root in &earlier.roots {
-            commands.entity(root).despawn();
-        }
-        outcomes.0.push(Err((earlier.glb.clone(), REPLACED.into())));
-    }
-    let roots = spawn_robot_roots(
-        &mut commands,
-        &assets,
-        &next.glb,
-        spec.copies,
-        (Incoming, Visibility::Hidden),
-    );
-    commands.insert_resource(PendingRobot {
-        glb: next.glb.clone(),
-        meta: next.meta.clone(),
-        joints: next.joints.clone(),
-        roots,
-    });
-    commands.remove_resource::<NextRobot>();
-    log::info!("loading {} to swap in", next.glb);
-}
-
-/// Finishes a swap once the incoming robot has loaded whole and spawned, or
-/// abandons it, keeping the old robot, if it failed to load.
-///
-/// Everything bound to the old robot goes with it: its entities, the controls
-/// on its joints and elements, and the selection made of its element ids,
-/// which mean nothing on another robot. Goals stay, being nobody's. The new
-/// robot is measured and framed afresh once it has had its own time to
-/// settle.
-#[allow(clippy::too_many_arguments)]
-fn finish_swap(
-    pending: Option<Res<PendingRobot>>,
-    mut commands: Commands,
-    assets: Res<AssetServer>,
-    showing: Query<Entity, (With<WorldAssetRoot>, Without<Incoming>)>,
-    incoming: Query<(&WorldAssetRoot, Has<Children>), With<Incoming>>,
-    children: Query<&Children>,
-    transform_gizmos: Query<(Entity, &TransformGizmo)>,
-    joint_gizmos: Query<(Entity, &JointGizmo)>,
-    mut spec: ResMut<RobotSpec>,
+/// Frames the robots present at the start: each robot that finishes loading
+/// before the camera has first been fitted joins that first framing, so
+/// robots loaded together are framed together. Later robots leave the camera
+/// where it is; a host that wants them in view asks for it.
+fn frame_initial_robots(
+    mut loaded: MessageReader<robots::RobotLoaded>,
     frames: Res<Frames>,
     mut census: ResMut<Census>,
-    mut framing: ResMut<Framing>,
-    mut selections: ResMut<arora_visuals::select::Selections>,
-    mut outcomes: ResMut<RobotOutcomes>,
-    mut first: ResMut<FirstRobot>,
+    framing: Res<Framing>,
 ) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let mut spawned = true;
-    for &root in &pending.roots {
-        let Ok((scene, has_children)) = incoming.get(root) else {
-            return;
-        };
-        if let Some(RecursiveDependencyLoadState::Failed(error)) =
-            assets.get_recursive_dependency_load_state(scene.0.id())
-        {
-            log::warn!("could not load {}: {error}", pending.glb);
-            for &root in &pending.roots {
-                commands.entity(root).despawn();
-            }
-            outcomes
-                .0
-                .push(Err((pending.glb.clone(), error.to_string())));
-            commands.remove_resource::<PendingRobot>();
-            return;
-        }
-        spawned &= has_children;
-    }
-    // Loaded whole and spawned: a scene spawns its entities once everything
-    // it depends on has arrived.
-    if !spawned {
+    if loaded.read().count() == 0 || framing.fitted {
         return;
     }
-    let mut old = std::collections::HashSet::new();
-    for root in &showing {
-        old.insert(root);
-        old.extend(children.iter_descendants(root));
-        commands.entity(root).despawn();
-    }
-    for (gizmo, control) in &transform_gizmos {
-        if old.contains(&control.target) {
-            commands.entity(gizmo).despawn();
-        }
-    }
-    for (gizmo, control) in &joint_gizmos {
-        if old.contains(&control.target) {
-            commands.entity(gizmo).despawn();
-        }
-    }
-    for &root in &pending.roots {
-        commands
-            .entity(root)
-            .remove::<Incoming>()
-            .insert(Visibility::Inherited);
-    }
-    selections.0.clear();
-    commands.insert_resource(instance::Selected(Vec::new()));
-    commands.insert_resource(instance::RobotMeta(pending.meta.clone()));
-    commands.insert_resource(joints::RobotJoints(pending.joints.clone()));
-    // While no swap has finished, `spec` still names the first robot.
-    if !first.reported {
-        first.reported = true;
-        outcomes.0.push(Err((spec.glb.clone(), REPLACED.into())));
-    }
-    spec.glb = pending.glb.clone();
     census.taken = false;
     census.since = frames.elapsed;
-    framing.fitted = false;
-    outcomes.0.push(Ok(Shown {
-        glb: pending.glb.clone(),
-        joints: pending.joints.clone(),
-        elements: named(&pending.meta),
-    }));
-    commands.remove_resource::<PendingRobot>();
-    log::info!("swapped in {}", pending.glb);
-}
-
-/// Reports how the robot the scene started with ended up, once: `Ok` once it
-/// has loaded whole and spawned, `Err` if it failed to load or a swap
-/// replaced it first. A host learns that the first robot is showing the same
-/// way it learns that a swapped one is.
-fn report_first_robot(
-    mut first: ResMut<FirstRobot>,
-    spec: Res<RobotSpec>,
-    joints: Option<Res<joints::RobotJoints>>,
-    meta: Option<Res<instance::RobotMeta>>,
-    assets: Res<AssetServer>,
-    roots: Query<(&WorldAssetRoot, Has<Children>), Without<Incoming>>,
-    mut outcomes: ResMut<RobotOutcomes>,
-) {
-    // Until a swap has finished, the robot showing, or loading to show, is
-    // the one `spec` names; a swap that finishes reports it itself.
-    if first.reported {
-        return;
-    }
-    let mut spawned = !roots.is_empty();
-    for (scene, has_children) in &roots {
-        if let Some(RecursiveDependencyLoadState::Failed(error)) =
-            assets.get_recursive_dependency_load_state(scene.0.id())
-        {
-            log::warn!("could not load {}: {error}", spec.glb);
-            first.reported = true;
-            outcomes.0.push(Err((spec.glb.clone(), error.to_string())));
-            return;
-        }
-        spawned &= has_children;
-    }
-    if spawned {
-        first.reported = true;
-        outcomes.0.push(Ok(Shown {
-            glb: spec.glb.clone(),
-            joints: joints.map(|j| j.0.clone()).unwrap_or_default(),
-            elements: meta.map(|m| named(&m.0)).unwrap_or_default(),
-        }));
-    }
 }
 
 /// Where the camera is kept above, as Studio keeps its camera a centimetre
