@@ -1020,6 +1020,73 @@ mod tests {
             ));
     }
 
+    /// A second robot, `robot-1`, showing and indexed, with a tilt joint of its
+    /// own moving `body`.
+    fn second_robot(app: &mut App, body: Entity) {
+        let world = app.world_mut();
+        let camera = world
+            .query_filtered::<Entity, With<OrbitCamera>>()
+            .single(world)
+            .unwrap();
+        let mut rig = JointRig::default();
+        rig.0.insert(
+            TILT.into(),
+            vec![JointBinding::new(&tilt(), body, Transform::default()).unwrap()],
+        );
+        world.spawn((
+            rig,
+            RobotAsset {
+                instance: "robot-1".into(),
+                ..asset()
+            },
+            EntityInstance {
+                id: "robot-1".into(),
+                asset_path: String::new(),
+                meta: Default::default(),
+                bindings: SceneBindings::default(),
+                camera,
+                draw_order: 0,
+                ready: true,
+            },
+        ));
+    }
+
+    /// Each joint control lands on the joint of the robot it names, though
+    /// both robots' joints are driven by one animatable id; one on a robot
+    /// nothing is loading is refused rather than kept waiting.
+    #[test]
+    fn a_joint_control_lands_on_the_robot_it_names() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let joint_on = |instance: &str| Control::Joint {
+            instance: instance.into(),
+            joint: TILT.into(),
+            color: None,
+        };
+        for (key, instance) in [("first", ROBOT), ("second", "robot-1"), ("nobody", "ghost")] {
+            send(
+                &mut app,
+                ControlCommand::Add {
+                    key: key.into(),
+                    control: joint_on(instance),
+                },
+            );
+        }
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let mut on: Vec<(String, Entity)> = gizmos
+            .iter(app.world())
+            .map(|gizmo| (gizmo.key.clone(), gizmo.target))
+            .collect();
+        on.sort();
+        assert_eq!(on, vec![("first".into(), body), ("second".into(), other)]);
+        assert!(
+            app.world().resource::<ControlCommands>().0.is_empty(),
+            "nothing waits for a robot nothing is loading",
+        );
+    }
+
     fn send(app: &mut App, command: ControlCommand) {
         app.world_mut()
             .resource_mut::<ControlCommands>()

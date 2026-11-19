@@ -337,3 +337,120 @@ fn apply(
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use arora_visuals::binding::SceneBindings;
+
+    use super::*;
+    use crate::joints::{JointBinding, JointRig};
+    use crate::robot::{Joint, JointKind};
+    use crate::robots::{Incoming, RobotAsset};
+
+    const TILT: &str = "tilt-value";
+
+    fn tilt() -> Joint {
+        Joint {
+            name: "tilt".into(),
+            kind: JointKind::Revolute,
+            axis: Vec3::X,
+            child_node: 0,
+            child: "head".into(),
+            animatable: Some(TILT.into()),
+            mimic: None,
+            min: -1.0,
+            max: 1.0,
+            default: 0.0,
+            color: Srgba::WHITE,
+        }
+    }
+
+    fn asset(instance: &str) -> RobotAsset {
+        RobotAsset {
+            instance: instance.into(),
+            key: None,
+            glb: String::new(),
+            meta: Default::default(),
+            joints: vec![tilt()],
+        }
+    }
+
+    /// A robot showing in `instance`, indexed, whose tilt joint moves the
+    /// body it returns.
+    fn showing(app: &mut App, instance: &str) -> Entity {
+        let world = app.world_mut();
+        let body = world.spawn(Transform::default()).id();
+        let mut rig = JointRig::default();
+        rig.0.insert(
+            TILT.into(),
+            vec![JointBinding::new(&tilt(), body, Transform::default()).unwrap()],
+        );
+        world.spawn((
+            rig,
+            asset(instance),
+            EntityInstance {
+                id: instance.into(),
+                asset_path: String::new(),
+                meta: Default::default(),
+                bindings: SceneBindings::default(),
+                camera: Entity::PLACEHOLDER,
+                draw_order: 0,
+                ready: true,
+            },
+        ));
+        body
+    }
+
+    fn write(app: &mut App, instance: &str, value: f32) {
+        app.world_mut()
+            .resource_mut::<ValueWrites>()
+            .0
+            .push(ValueWrite {
+                instance: Some(instance.into()),
+                target: TILT.into(),
+                feature: None,
+                value: Decoded::Scalar(value),
+                stamp: None,
+            });
+    }
+
+    fn turned(app: &App, body: Entity) -> f32 {
+        app.world()
+            .get::<Transform>(body)
+            .unwrap()
+            .rotation
+            .to_axis_angle()
+            .1
+    }
+
+    /// A write lands on the robot it names and no other; one for a robot
+    /// still loading waits for it; one for an instance nothing is loading is
+    /// dropped.
+    #[test]
+    fn a_write_reaches_the_instance_it_names() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_message::<RequestRedraw>()
+            .add_plugins(ValuesPlugin);
+        let a = showing(&mut app, "a");
+        let b = showing(&mut app, "b");
+        app.world_mut().spawn((asset("c"), Incoming));
+
+        write(&mut app, "a", 0.5);
+        write(&mut app, "c", 0.25);
+        write(&mut app, "nobody", 0.75);
+        app.update();
+
+        assert!((turned(&app, a) - 0.5).abs() < 1e-5);
+        assert_eq!(turned(&app, b), 0.0, "b was not written");
+        let waiting: Vec<_> = app
+            .world()
+            .resource::<ValueWrites>()
+            .0
+            .iter()
+            .map(|write| write.instance.clone())
+            .collect();
+        assert_eq!(waiting, vec![Some("c".to_string())]);
+    }
+}
