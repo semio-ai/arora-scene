@@ -242,6 +242,11 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   by name can find its id. `scene.robots` keeps what each event said: a
   robot's event can come before a page has set its handler. `load`'s promise
   resolves from it.
+- **`ready`**: a robot showing in its `instance` has been drawn whole: every
+  mesh of it in the camera's view with its pipeline compiled, and the GPU done
+  with that frame. It follows `loaded`, which says the robot is showing, not
+  that it has drawn: a browser can take a while compiling its pipelines. A
+  robot with nothing in view is ready at once.
 - **`loadFailed`**: a load into an `instance` that did not finish, with its
   `key` and the `error`: the GLB could not be loaded, a later load into the
   same instance replaced it, or the instance was unloaded. `load`'s promise

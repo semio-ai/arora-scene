@@ -277,7 +277,7 @@ pub(crate) fn finish_loads(
         commands
             .entity(root)
             .remove::<Incoming>()
-            .insert(Visibility::Inherited);
+            .insert((Visibility::Inherited, crate::ready::Drawing));
         outcomes.0.push(Outcome::Loaded {
             instance: asset.instance.clone(),
             key: asset.key.clone(),

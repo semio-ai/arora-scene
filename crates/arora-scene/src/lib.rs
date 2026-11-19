@@ -23,6 +23,7 @@ pub mod aurora;
 pub mod controls;
 pub mod instance;
 pub mod joints;
+pub mod ready;
 pub mod redraw;
 pub mod robot;
 pub mod robots;
@@ -179,7 +180,7 @@ impl Plugin for ScenePlugin {
             arora_visuals::active_area::ActiveAreaPlugin,
             values::ValuesPlugin,
         ))
-        .add_plugins(controls::ControlsPlugin)
+        .add_plugins((controls::ControlsPlugin, ready::ReadyPlugin))
         .add_plugins(hide_ghosted_controls)
         .init_resource::<WashChoice>()
         // Read by the scene's gizmo systems; the test window's toggles set it.

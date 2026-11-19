@@ -115,6 +115,7 @@ function Running({ robot: first }: { robot: Robot }) {
       setJoints((j) => ({ ...j, [event.instance]: event.joints }));
       return note(`${event.instance} shows ${event.key ?? "a robot"}`);
     }
+    if (event.type === "ready") return note(`${event.instance} drawn`);
     if (event.type === "loadFailed")
       return note(`${event.instance} refused ${event.key}: ${event.error}`);
     if (event.type === "controlPress")

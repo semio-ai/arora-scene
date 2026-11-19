@@ -234,6 +234,13 @@ export type SceneEvent =
    */
   | ({ type: "loaded" } & ShownRobot)
   /**
+   * A robot showing in its instance has been drawn whole: every mesh of it in
+   * the camera's view with its pipeline compiled, and the frame done. After
+   * `loaded`: a robot can be loaded and still drawing nothing while its
+   * pipelines compile.
+   */
+  | { type: "ready"; instance: string }
+  /**
    * A load into an instance that did not finish, and why: the GLB failed, a
    * later load into the same instance replaced it, or the instance was
    * unloaded. Whatever the instance showed before still shows. `load`'s

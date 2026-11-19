@@ -568,6 +568,10 @@ enum SceneEvent<'a> {
         joints: Vec<JointInfo<'a>>,
         elements: Vec<ElementInfo<'a>>,
     },
+    /// A robot showing in its instance has been drawn whole: every mesh of
+    /// it in the camera's view with its pipeline compiled, and the frame
+    /// done.
+    Ready { instance: &'a str },
     /// A load that did not finish, and why: the GLB failed, a later load into
     /// the same instance replaced it, or the instance was unloaded. Whatever
     /// the instance showed before still shows.
@@ -741,6 +745,7 @@ fn emit_events(
     mut controls: ResMut<ControlEvents>,
     mut presses: ResMut<ControlPresses>,
     mut robots: ResMut<arora_scene::robots::RobotOutcomes>,
+    mut drawn: ResMut<arora_scene::ready::RobotsReady>,
 ) {
     for outcome in std::mem::take(&mut robots.0) {
         release_bytes(&outcome);
@@ -770,6 +775,11 @@ fn emit_events(
                 key: key.as_deref(),
                 error,
             },
+        });
+    }
+    for instance in std::mem::take(&mut drawn.0) {
+        send(&SceneEvent::Ready {
+            instance: &instance,
         });
     }
     for event in std::mem::take(&mut controls.0) {
