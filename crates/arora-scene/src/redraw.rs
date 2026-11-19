@@ -96,6 +96,16 @@ struct Owed<'w, 's> {
     /// Every robot, loading or showing: an empty scene has nothing to frame,
     /// so its unframed camera owes nothing.
     robots: Query<'w, 's, (), With<crate::robots::RobotAsset>>,
+    /// Active areas, with where each stands as it eases: one still on its way,
+    /// or newly set, moves the view.
+    areas: Query<
+        'w,
+        's,
+        (
+            Ref<'static, arora_visuals::active_area::ActiveArea>,
+            Option<&'static arora_visuals::active_area::ActiveAreaShown>,
+        ),
+    >,
     pending: Res<'w, PipelinesPending>,
     glides: Query<'w, 's, (), With<Glide>>,
     moved: Query<'w, 's, (Entity, &'static GlobalTransform), Changed<GlobalTransform>>,
@@ -146,7 +156,12 @@ impl Owed<'_, '_> {
         let assets =
             self.meshes.read().count() + self.materials.read().count() + self.images.read().count()
                 > 0;
+        let easing = self
+            .areas
+            .iter()
+            .any(|(area, shown)| area.is_changed() || shown.is_none_or(|shown| shown.0 != area.0));
         assets
+            || easing
             || (!self.framing.fitted && !self.robots.is_empty())
             || self.pending.0.load(Ordering::Relaxed)
             || !self.glides.is_empty()

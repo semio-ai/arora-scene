@@ -1,7 +1,10 @@
 /** Which GPU interface a scene draws with. */
 export type Backend = "webgpu" | "webgl2";
 
-/** How a scene starts. Every field is optional. */
+/**
+ * How a scene starts. Every field is optional. The theme, environment and
+ * active area can be changed later through the handle.
+ */
 export interface SceneOptions {
   /** Cast shadows. On unless turned off. */
   shadows?: boolean;

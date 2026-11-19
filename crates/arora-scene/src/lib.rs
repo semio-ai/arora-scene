@@ -209,11 +209,13 @@ impl Plugin for ScenePlugin {
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
         .init_resource::<robots::RobotRequests>()
+        .init_resource::<FrameOnly>()
         .init_resource::<robots::RobotOutcomes>()
         .add_message::<robots::RobotLoaded>()
         .add_systems(
             PreUpdate,
             (
+                frame_on_request,
                 robots::take_requests,
                 robots::finish_loads,
                 frame_initial_robots,
@@ -935,13 +937,39 @@ fn frame_initial_robots(
     frames: Res<Frames>,
     mut census: ResMut<Census>,
     framing: Res<Framing>,
+    mut only: ResMut<FrameOnly>,
 ) {
     if loaded.read().count() == 0 || framing.fitted {
         return;
     }
     census.taken = false;
     census.since = frames.elapsed;
+    only.0.clear();
 }
+
+/// The instances the next framing fits, or every robot for none.
+#[derive(Resource, Default)]
+pub struct FrameOnly(pub Vec<String>);
+
+/// Frames what a host asked for, at once: the robots it names are already
+/// showing, so there is nothing to wait for to settle.
+fn frame_on_request(
+    mut requests: ResMut<robots::RobotRequests>,
+    frames: Res<Frames>,
+    mut census: ResMut<Census>,
+    mut only: ResMut<FrameOnly>,
+) {
+    let Some(instances) = requests.frame.take() else {
+        return;
+    };
+    census.taken = false;
+    census.since = frames.elapsed - CENSUS_SETTLE;
+    only.0 = instances;
+}
+
+/// How long the scene's meshes are given to settle after robots arrive
+/// before they are counted and framed.
+const CENSUS_SETTLE: f32 = 0.5;
 
 /// Where the camera is kept above, as Studio keeps its camera a centimetre
 /// above the floor, so the view never looks up from beneath it.
@@ -1352,6 +1380,7 @@ type CensusMeshes<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static Mesh3d,
         &'static GlobalTransform,
         Option<&'static Aabb>,
@@ -1397,6 +1426,7 @@ type MaterialMeshes<'w, 's> = Query<
 /// Waits out the first half-second: transform propagation and bounds
 /// calculation both run after `Update`, so a census taken on the frame the
 /// meshes appear would measure them at the origin with no bounds at all.
+#[allow(clippy::too_many_arguments)]
 fn take_census(
     frames: Res<Frames>,
     mut census: ResMut<Census>,
@@ -1404,19 +1434,39 @@ fn take_census(
     meshes: CensusMeshes,
     materials: MaterialMeshes,
     assets: Res<Assets<Mesh>>,
+    only: Res<FrameOnly>,
+    parents: Query<&ChildOf>,
+    robots: Query<&robots::RobotAsset>,
 ) {
-    if census.taken || frames.elapsed - census.since < 0.5 {
+    if census.taken || frames.elapsed - census.since < CENSUS_SETTLE {
         return;
     }
+    // Whether a mesh belongs to a robot the framing fits: any, unless the
+    // host named which.
+    let framed = |mesh: Entity| {
+        if only.0.is_empty() {
+            return true;
+        }
+        let mut at = mesh;
+        loop {
+            if let Ok(robot) = robots.get(at) {
+                return only.0.contains(&robot.instance);
+            }
+            match parents.get(at) {
+                Ok(parent) => at = parent.parent(),
+                Err(_) => return false,
+            }
+        }
+    };
     let mut count = 0;
     let mut triangles = 0;
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for (handle, global, aabb, layers) in &meshes {
+    for (mesh, handle, global, aabb, layers) in &meshes {
         // The face lives in this world too, off to one side and metres wide.
         // Counting it would price the wrong scene, and fitting the camera to
         // it would push the robot into the distance.
-        if on_mounted_layer(layers) {
+        if on_mounted_layer(layers) || !framed(mesh) {
             continue;
         }
         count += 1;
@@ -1450,7 +1500,7 @@ fn take_census(
     census.taken = true;
     census.mounted_meshes = meshes
         .iter()
-        .filter(|(_, _, _, layers)| on_mounted_layer(*layers))
+        .filter(|(_, _, _, _, layers)| on_mounted_layer(*layers))
         .count();
     *framing = Framing {
         center: (min + max) * 0.5,
@@ -1638,6 +1688,50 @@ pub fn report(opts: &SceneOptions, frames: &Frames, census: &Census) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host asking to frame some robots has the camera fit those alone; asked
+    /// with none named, it fits every robot.
+    #[test]
+    fn a_framing_asked_for_fits_the_robots_named() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<robots::RobotRequests>()
+            .init_resource::<Frames>()
+            .init_resource::<Census>()
+            .init_resource::<Framing>()
+            .init_resource::<FrameOnly>()
+            .add_systems(Update, (frame_on_request, take_census).chain());
+        for (instance, x) in [("near", 0.0), ("far", 10.0)] {
+            let root = app
+                .world_mut()
+                .spawn(robots::RobotAsset {
+                    instance: instance.into(),
+                    key: None,
+                    glb: String::new(),
+                    meta: Default::default(),
+                    joints: Vec::new(),
+                })
+                .id();
+            app.world_mut().spawn((
+                Mesh3d(Handle::default()),
+                GlobalTransform::from_xyz(x, 0.0, 0.0),
+                Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)),
+                ChildOf(root),
+            ));
+        }
+        let centre = |app: &mut App, frame: Vec<String>| {
+            app.world_mut()
+                .resource_mut::<robots::RobotRequests>()
+                .frame = Some(frame);
+            app.update();
+            let framing = app.world().resource::<Framing>();
+            assert!(framing.fitted);
+            framing.center.x
+        };
+        assert!((centre(&mut app, vec!["far".into()]) - 10.0).abs() < 1e-4);
+        assert!((centre(&mut app, vec![]) - 5.0).abs() < 1e-4, "every robot");
+    }
 
     /// What the view gizmo's request asks the controller to face, looking
     /// from `from`.

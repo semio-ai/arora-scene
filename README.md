@@ -84,7 +84,9 @@ which backend a page would get.
 - **Show one `<Scene>` at a time.** A second one mounted takes the canvas, and
   from then on the first neither drives the scene nor receives its events.
 - **`options` are read once**, when the page's scene first starts. A later
-  `<Scene>`'s options are ignored.
+  `<Scene>`'s options are ignored. The theme, environment and active area can
+  change at any time: `scene.setTheme`, `scene.setEnvironment` and
+  `scene.setActiveArea` (the camera eases into a new active area).
 - **Every robot is an instance the host names**: its own string, never
   rewritten — an Arora path, a slot name. Every call about a robot and every
   event from it carries that id. `scene.load(instance, glb, { key, pose })`
@@ -113,7 +115,8 @@ which backend a page would get.
 - **Where a robot stands is the host's**: a `pose` on its load, or
   `scene.setPose(instance, pose)` later; the origin otherwise. The camera
   frames every robot present when the scene first has robots to show, and
-  then moves only when the user moves it.
+  then moves only when the user moves it or the host asks:
+  `scene.frame(instances)` fits the robots named, or every robot for none.
 - **`scene.setSelection(instance, elementIds)` outlines elements**, in place of
   whatever that instance outlined; none clears it.
 - **The scene idles.** It draws a frame only when something changed, an empty

@@ -92,6 +92,9 @@ pub struct RobotRequests {
     pub unloads: Vec<String>,
     /// Where loaded robots now stand, by instance.
     pub poses: Vec<(String, Pose)>,
+    /// Frame these instances, or every robot for none: the camera moves to
+    /// fit them, as it fits the robots present at the start.
+    pub frame: Option<Vec<String>>,
 }
 
 /// How one load ended.

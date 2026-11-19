@@ -67,6 +67,10 @@ enum Request {
     Unload(String),
     Pose(String, Pose),
     Select(String, Vec<String>),
+    Frame(Vec<String>),
+    Theme(Theme),
+    Environment(Environment),
+    Area(Option<Rect>),
 }
 
 /// How a load is asked for, as JSON from the page. Every field is optional.
@@ -140,6 +144,59 @@ pub fn set_selection(instance: String, elements: Vec<String>) {
     wake();
 }
 
+/// Moves the camera to fit the robots in `instances`, or every robot for
+/// none, as it fits the robots present when the scene first has robots.
+#[wasm_bindgen]
+pub fn frame(instances: Vec<String>) {
+    REQUESTS.lock().unwrap().push(Request::Frame(instances));
+    wake();
+}
+
+/// Sets the theme: `"dark"` or `"light"`.
+#[wasm_bindgen]
+pub fn set_theme(theme: &str) -> Result<(), JsValue> {
+    let theme = match theme {
+        "dark" => Theme::Dark,
+        "light" => Theme::Light,
+        other => return Err(error(format!("unknown theme {other:?}"))),
+    };
+    REQUESTS.lock().unwrap().push(Request::Theme(theme));
+    wake();
+    Ok(())
+}
+
+/// Sets the environment: `"plain"`, the ground colour all the way up, or
+/// `"sky"`, which under the dark theme shows the aurora.
+#[wasm_bindgen]
+pub fn set_environment(environment: &str) -> Result<(), JsValue> {
+    let environment = match environment {
+        "plain" => Environment::Plain,
+        "sky" => Environment::Sky,
+        other => return Err(error(format!("unknown environment {other:?}"))),
+    };
+    REQUESTS
+        .lock()
+        .unwrap()
+        .push(Request::Environment(environment));
+    wake();
+    Ok(())
+}
+
+/// Sets the part of the canvas left visible beside the host's panels,
+/// `[x, y, width, height]` in CSS pixels, which the camera frames the robots
+/// in, easing there; none gives the whole canvas back.
+#[wasm_bindgen]
+pub fn set_active_area(area: Vec<f32>) -> Result<(), JsValue> {
+    let area = match area.as_slice() {
+        [] => None,
+        [x, y, w, h] => Some(Rect::new(*x, *y, x + w, y + h)),
+        _ => return Err(error("an active area is [x, y, width, height]")),
+    };
+    REQUESTS.lock().unwrap().push(Request::Area(area));
+    wake();
+    Ok(())
+}
+
 /// Lets go of the bytes a load no longer needs once it has ended.
 fn release_bytes(outcome: &Outcome) {
     let robots = ROBOTS.lock().unwrap();
@@ -156,9 +213,26 @@ fn asset_id(path: &str) -> String {
 }
 
 /// Hands what the page asked since the last frame to the scene, in order.
-fn take_requests(mut requests: ResMut<RobotRequests>, mut selections: ResMut<Selections>) {
+fn take_requests(
+    mut requests: ResMut<RobotRequests>,
+    mut selections: ResMut<Selections>,
+    mut stage: ResMut<arora_scene::stage::Stage>,
+    cameras: Query<Entity, With<arora_scene::OrbitCamera>>,
+    mut commands: Commands,
+) {
     for request in std::mem::take(&mut *REQUESTS.lock().unwrap()) {
         match request {
+            Request::Frame(instances) => requests.frame = Some(instances),
+            Request::Theme(theme) => stage.theme = theme,
+            Request::Environment(environment) => stage.environment = environment,
+            Request::Area(area) => {
+                for camera in &cameras {
+                    match area {
+                        Some(area) => commands.entity(camera).insert(ActiveArea(area)),
+                        None => commands.entity(camera).remove::<ActiveArea>(),
+                    };
+                }
+            }
             Request::Load(load) => requests.loads.push(load),
             Request::Unload(instance) => requests.unloads.push(instance),
             Request::Pose(instance, pose) => requests.poses.push((instance, pose)),
@@ -335,25 +409,14 @@ pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
         app.add_plugins(RedrawOnChangePlugin);
     }
     if let Some([x, y, w, h]) = opts.active_area {
-        app.insert_resource(Area(Rect::new(x, y, x + w, y + h)))
-            .add_systems(Update, place_area);
+        REQUESTS
+            .lock()
+            .unwrap()
+            .push(Request::Area(Some(Rect::new(x, y, x + w, y + h))));
     }
     mark("app-built");
     app.run();
     Ok(())
-}
-
-#[derive(Resource)]
-struct Area(Rect);
-
-fn place_area(
-    area: Res<Area>,
-    cameras: Query<Entity, (With<arora_scene::OrbitCamera>, Without<ActiveArea>)>,
-    mut commands: Commands,
-) {
-    for camera in &cameras {
-        commands.entity(camera).insert(ActiveArea(area.0));
-    }
 }
 
 thread_local! {

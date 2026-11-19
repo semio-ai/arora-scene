@@ -16,6 +16,10 @@ interface Module {
   unload: (instance: string) => void;
   set_pose: (instance: string, pose: string) => void;
   set_selection: (instance: string, elements: string[]) => void;
+  frame: (instances: string[]) => void;
+  set_theme: (theme: string) => void;
+  set_environment: (environment: string) => void;
+  set_active_area: (area: Float32Array) => void;
   set_value: (
     instance: string,
     target: string,
@@ -130,6 +134,21 @@ export interface SceneHandle {
    * the robot does not declare, or before it has spawned.
    */
   elementPose(instance: string, element: string): Pose | undefined;
+  /**
+   * Moves the camera to fit the robots in `instances`, or every robot when
+   * none are named. The camera fits the robots present when the scene first
+   * has robots by itself; robots loaded after that are framed only when
+   * asked.
+   */
+  frame(instances?: string[]): void;
+  setTheme(theme: NonNullable<SceneOptions["theme"]>): void;
+  setEnvironment(environment: NonNullable<SceneOptions["environment"]>): void;
+  /**
+   * The part of the canvas left visible beside the host's panels,
+   * `[x, y, width, height]` in CSS pixels, which the camera frames the robots
+   * in, easing there; `undefined` gives the whole canvas back.
+   */
+  setActiveArea(area: SceneOptions["activeArea"]): void;
   /** Sets where the scene's events go, replacing any earlier handler. */
   onEvent(handler: (event: SceneEvent) => void): void;
 }
@@ -327,6 +346,18 @@ async function start(
     },
     setSelection(id, elements) {
       wasm.set_selection(id, elements);
+    },
+    frame(ids = []) {
+      wasm.frame(ids);
+    },
+    setTheme(theme) {
+      wasm.set_theme(theme);
+    },
+    setEnvironment(environment) {
+      wasm.set_environment(environment);
+    },
+    setActiveArea(area) {
+      wasm.set_active_area(Float32Array.from(area ?? []));
     },
     unload(id) {
       const held = instances.get(id);
