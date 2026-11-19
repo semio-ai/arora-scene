@@ -121,7 +121,8 @@ which backend a page would get.
   value writes act after a frame's robot calls, whatever order they were made
   in.
 - **Where a robot stands is the host's**: a `pose` on its load, or
-  `scene.setPose(instance, pose)` later; the origin otherwise. The camera
+  `scene.setPose(instance, pose)` later; the origin otherwise. A pose places
+  a robot and keeps its scale. The camera
   frames every robot present when the scene first has robots to show, and
   then moves only when the user moves it or the host asks:
   `scene.frame(instances)` fits the robots named, or every robot for none.

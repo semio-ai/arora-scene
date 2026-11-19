@@ -193,8 +193,8 @@ pub struct RobotRequestSystems;
 struct Held {
     /// The robot showing, and where it stands.
     showing: Option<(Entity, Transform)>,
-    /// The robot loading into it, and what it is.
-    incoming: Option<(Entity, RobotAsset)>,
+    /// The robot loading into it, what it is, and its scale.
+    incoming: Option<(Entity, RobotAsset, Vec3)>,
 }
 
 /// Takes the host's requests, in the order it asked them.
@@ -225,7 +225,7 @@ pub(crate) fn take_requests(
     for (root, asset, transform, incoming) in &roots {
         let at = held.entry(asset.instance.clone()).or_default();
         if incoming {
-            at.incoming = Some((root, asset.clone()));
+            at.incoming = Some((root, asset.clone(), transform.scale));
         } else {
             at.showing = Some((root, *transform));
         }
@@ -254,7 +254,7 @@ pub(crate) fn take_requests(
                 let Some(was) = held.remove(&instance) else {
                     continue;
                 };
-                if let Some((root, asset)) = was.incoming {
+                if let Some((root, asset, _)) = was.incoming {
                     outcomes.0.push(failed(&asset, UNLOADED));
                     commands.entity(root).despawn();
                 }
@@ -270,15 +270,19 @@ pub(crate) fn take_requests(
                 let at = held.entry(asset.instance.clone()).or_default();
                 // A load still under way into this instance is replaced; the
                 // robot showing in it stays until this one has loaded.
-                if let Some((root, earlier)) = at.incoming.take() {
+                if let Some((root, earlier, _)) = at.incoming.take() {
                     outcomes.0.push(failed(&earlier, REPLACED));
                     commands.entity(root).despawn();
                 }
-                let transform = load
-                    .pose
-                    .map(|pose| pose.to_scene())
-                    .or(at.showing.map(|(_, transform)| transform))
-                    .unwrap_or_default();
+                // A pose places it; the scale stays the one it replaces.
+                let kept = at.showing.map(|(_, transform)| transform);
+                let transform = match load.pose {
+                    Some(pose) => Transform {
+                        scale: kept.map_or(Vec3::ONE, |kept| kept.scale),
+                        ..pose.to_scene()
+                    },
+                    None => kept.unwrap_or_default(),
+                };
                 let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(asset.glb.clone()));
                 log::info!("loading {} into {}", asset.glb, asset.instance);
                 let root = commands
@@ -290,7 +294,7 @@ pub(crate) fn take_requests(
                         Visibility::Hidden,
                     ))
                     .id();
-                at.incoming = Some((root, asset));
+                at.incoming = Some((root, asset, transform.scale));
             }
             RobotRequest::Select(instance, elements) => {
                 if elements.is_empty() {
@@ -303,13 +307,20 @@ pub(crate) fn take_requests(
                 let Some(at) = held.get_mut(&instance) else {
                     continue;
                 };
+                // A pose places a robot; its scale is kept.
                 let to = pose.to_scene();
                 if let Some((root, transform)) = &mut at.showing {
-                    *transform = to;
-                    commands.entity(*root).insert(to);
+                    *transform = Transform {
+                        scale: transform.scale,
+                        ..to
+                    };
+                    commands.entity(*root).insert(*transform);
                 }
-                if let Some((root, _)) = &at.incoming {
-                    commands.entity(*root).insert(to);
+                if let Some((root, _, scale)) = &at.incoming {
+                    commands.entity(*root).insert(Transform {
+                        scale: *scale,
+                        ..to
+                    });
                 }
             }
         }
@@ -788,6 +799,31 @@ mod tests {
         );
         app.update();
         assert!(app.world().resource::<Selections>().0.contains_key("a"));
+    }
+
+    /// A pose moves a robot and keeps its scale, as does a load that
+    /// replaces it.
+    #[test]
+    fn a_pose_keeps_the_robots_scale() {
+        let mut app = app(take_requests);
+        let (showing, _) = root(&mut app, asset("a", "a1.glb"), false);
+        app.world_mut()
+            .entity_mut(showing)
+            .insert(Transform::from_scale(Vec3::splat(2.0)));
+        ask(
+            &mut app,
+            [
+                RobotRequest::Pose("a".into(), at(1.0)),
+                load("a", "a2.glb", Some(at(3.0))),
+            ],
+        );
+        app.update();
+        let moved = app.world().get::<Transform>(showing).unwrap();
+        assert_eq!(moved.scale, Vec3::splat(2.0));
+        assert_eq!(moved.translation, at(1.0).to_scene().translation);
+        let (_, _, incoming) = loading(&mut app).remove(0);
+        assert_eq!(incoming.scale, Vec3::splat(2.0));
+        assert_eq!(incoming.translation, at(3.0).to_scene().translation);
     }
 
     /// A pose asked for with a load, before it has loaded, places it.

@@ -138,6 +138,30 @@ pub enum Control {
     },
 }
 
+/// Where `entity` stands in the world as the transforms say now. Its
+/// `GlobalTransform` lags a transform written earlier in the frame — a robot
+/// a host moved this frame — until propagation in `PostUpdate`, so the chain
+/// is composed here, falling back to the propagated transform of an ancestor
+/// with none of its own.
+fn current_global(
+    mut entity: Entity,
+    transforms: &Query<&mut Transform>,
+    parents: &Query<&ChildOf>,
+    globals: &Query<&GlobalTransform>,
+) -> Option<bevy::math::Affine3A> {
+    let mut affine = bevy::math::Affine3A::IDENTITY;
+    loop {
+        let Ok(transform) = transforms.get(entity) else {
+            return globals.get(entity).ok().map(|g| g.affine() * affine);
+        };
+        affine = transform.compute_affine() * affine;
+        match parents.get(entity) {
+            Ok(parent) => entity = parent.parent(),
+            Err(_) => return Some(affine),
+        }
+    }
+}
+
 /// A CSS hex colour, or `None`, said in the log, for one that is not.
 fn colour(hex: &str) -> Option<Color> {
     match Srgba::hex(hex) {
@@ -682,9 +706,7 @@ fn carry_out(
                 // A goal added in this pass is spawned at the end of it, so it
                 // has no transform yet; the pose waits for the second pass, as
                 // one set before the add would.
-                let Some((target, mut transform)) =
-                    target.and_then(|t| transforms.get_mut(t).ok().map(|tr| (t, tr)))
-                else {
+                let Some(target) = target.filter(|t| transforms.contains(*t)) else {
                     if target.is_none() && controls.0.contains_key(&key) {
                         log::warn!("{key:?} is a joint control; write its value instead");
                     } else if worth_waiting(&key, &controls) {
@@ -698,14 +720,17 @@ fn carry_out(
                 again = true;
                 let world = pose.to_scene();
                 // The pose is in the world; the target's transform is in its
-                // parent's frame.
+                // parent's frame, as it stands now.
                 let local = match parents
                     .get(target)
                     .ok()
-                    .and_then(|p| globals.get(p.parent()).ok())
+                    .and_then(|p| current_global(p.parent(), &transforms, &parents, &globals))
                 {
-                    Some(parent) => parent.affine().inverse() * world.compute_affine(),
+                    Some(parent) => parent.inverse() * world.compute_affine(),
                     None => world.compute_affine(),
+                };
+                let Ok(mut transform) = transforms.get_mut(target) else {
+                    continue;
                 };
                 let (_, rotation, translation) = local.to_scale_rotation_translation();
                 transform.translation = translation;
@@ -1265,6 +1290,38 @@ mod tests {
         send(&mut app, ControlCommand::Remove { key: "goal".into() });
         assert!(app.world().get_entity(gizmo).is_err());
         assert!(app.world().get_entity(goal).is_err());
+    }
+
+    /// A parent moved this frame is read where it now stands, not where it
+    /// was last propagated.
+    #[test]
+    fn a_parent_moved_this_frame_is_read_where_it_now_stands() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let grand = world
+            .spawn((
+                Transform::from_xyz(10.0, 0.0, 0.0),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+        let parent = world
+            .spawn((
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                GlobalTransform::IDENTITY,
+                ChildOf(grand),
+            ))
+            .id();
+        let at = world
+            .run_system_once(
+                move |transforms: Query<&mut Transform>,
+                      parents: Query<&ChildOf>,
+                      globals: Query<&GlobalTransform>| {
+                    current_global(parent, &transforms, &parents, &globals)
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(Vec3::from(at.translation).abs_diff_eq(Vec3::new(10.0, 1.0, 0.0), 1e-6));
     }
 
     /// A transform control on the fixture's robot as a whole.

@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{CachedPipelineState, PipelineCache};
 use bevy::render::renderer::RenderQueue;
 use bevy::render::sync_world::MainEntity;
-use bevy::render::view::{ExtractedView, RenderVisibleEntities, RetainedViewEntity};
+use bevy::render::view::{ExtractedView, RenderVisibleEntities, RetainedViewEntity, ViewTarget};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use bevy::shader::ShaderCacheError;
 
@@ -145,7 +145,7 @@ fn extract_drawing(
 /// one held back too long, whether by its meshes, a view that draws nothing,
 /// or a GPU that has not reported.
 fn watch_drawing(
-    views: Query<(&ExtractedView, &RenderVisibleEntities)>,
+    views: Query<(&ExtractedView, &RenderVisibleEntities, Has<ViewTarget>)>,
     mut watched: ResMut<Watched>,
     specialized: Res<SpecializedMaterialPipelineCache>,
     pending: Res<PendingMeshMaterialQueues>,
@@ -167,9 +167,11 @@ fn watch_drawing(
     let Some(id) = watched.view else {
         return;
     };
-    let Some((_, visible)) = views
+    // A view with no target this frame — its surface was not acquired, as
+    // during a resize — drew nothing, whatever its meshes say.
+    let Some((_, visible, true)) = views
         .iter()
-        .find(|(view, _)| view.retained_view_entity == id)
+        .find(|(view, _, _)| view.retained_view_entity == id)
     else {
         return;
     };
