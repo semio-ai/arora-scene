@@ -25,7 +25,7 @@ use arora_scene::controls::{
     ControlCommand, ControlCommands, ControlEvent, ControlEvents, ControlPress, ControlPresses,
 };
 use arora_scene::redraw::RedrawOnChangePlugin;
-use arora_scene::robots::{Outcome, RobotLoad, RobotRequests};
+use arora_scene::robots::{Outcome, RobotLoad, RobotRequest, RobotRequests};
 use arora_scene::stage::{Environment, Theme};
 use arora_scene::values::{ApplyValues, ValueWrite, ValueWrites};
 use arora_scene::{SceneOptions, ScenePlugin};
@@ -63,9 +63,7 @@ static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(
 static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
 
 enum Request {
-    Load(RobotLoad),
-    Unload(String),
-    Pose(String, Pose),
+    Robot(RobotRequest),
     Select(String, Vec<String>),
     Frame(Vec<String>),
     Theme(Theme),
@@ -108,7 +106,10 @@ pub fn load(instance: String, glb: Vec<u8>, options: String) -> Result<(), JsVal
         .map_err(|e| error(format!("{e:#}")))?;
     load.pose = options.pose;
     dir.insert_asset(Path::new(&path), glb);
-    REQUESTS.lock().unwrap().push(Request::Load(load));
+    REQUESTS
+        .lock()
+        .unwrap()
+        .push(Request::Robot(RobotRequest::Load(load)));
     wake();
     Ok(())
 }
@@ -117,7 +118,10 @@ pub fn load(instance: String, glb: Vec<u8>, options: String) -> Result<(), JsVal
 /// and anything still loading into it.
 #[wasm_bindgen]
 pub fn unload(instance: String) {
-    REQUESTS.lock().unwrap().push(Request::Unload(instance));
+    REQUESTS
+        .lock()
+        .unwrap()
+        .push(Request::Robot(RobotRequest::Unload(instance)));
     wake();
 }
 
@@ -127,7 +131,10 @@ pub fn unload(instance: String) {
 #[wasm_bindgen]
 pub fn set_pose(instance: String, pose: String) -> Result<(), JsValue> {
     let pose: Pose = serde_json::from_str(&pose).map_err(error)?;
-    REQUESTS.lock().unwrap().push(Request::Pose(instance, pose));
+    REQUESTS
+        .lock()
+        .unwrap()
+        .push(Request::Robot(RobotRequest::Pose(instance, pose)));
     wake();
     Ok(())
 }
@@ -233,9 +240,7 @@ fn take_requests(
                     };
                 }
             }
-            Request::Load(load) => requests.loads.push(load),
-            Request::Unload(instance) => requests.unloads.push(instance),
-            Request::Pose(instance, pose) => requests.poses.push((instance, pose)),
+            Request::Robot(request) => requests.robots.push(request),
             Request::Select(instance, elements) => {
                 if elements.is_empty() {
                     selections.0.remove(&instance);

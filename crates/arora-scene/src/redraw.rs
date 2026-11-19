@@ -15,9 +15,10 @@
 //! - **anything appeared or was restyled**: a mesh added, a mesh or material
 //!   or image asset added or changed, a visibility toggled (by value, as
 //!   transforms are), a selection or stage choice changed;
-//! - **work is still owed**: the camera has not been framed yet, a robot has
-//!   not spawned, or a pipeline is still compiling — each of which only
-//!   finishes on a later frame;
+//! - **work is still owed**: the camera has not been framed yet or a framing
+//!   asked for is still to be measured, a robot has not spawned or not yet
+//!   been reported drawn, or a pipeline is still compiling — each of which
+//!   only finishes on a later frame;
 //! - **something animates by itself**: the aurora's light changes every frame
 //!   in its shader, so while a curtain is in view the scene ticks at
 //!   [`Redraw::aurora_hz`] rather than at the display's rate.
@@ -93,6 +94,10 @@ fn note_pipelines(cache: Res<PipelineCache>, pending: Res<PipelinesPending>) {
 #[derive(bevy::ecs::system::SystemParam)]
 struct Owed<'w, 's> {
     framing: Res<'w, Framing>,
+    census: Res<'w, crate::Census>,
+    /// Robots not yet reported drawn: the report reaches the main world only
+    /// on a frame after the GPU finishes, so one is owed until it has.
+    drawing: Query<'w, 's, (), With<crate::ready::Drawing>>,
     /// Every robot, loading or showing: an empty scene has nothing to frame,
     /// so its unframed camera owes nothing.
     robots: Query<'w, 's, (), With<crate::robots::RobotAsset>>,
@@ -162,7 +167,8 @@ impl Owed<'_, '_> {
             .any(|(area, shown)| area.is_changed() || shown.is_none_or(|shown| shown.0 != area.0));
         assets
             || easing
-            || (!self.framing.fitted && !self.robots.is_empty())
+            || ((!self.framing.fitted || !self.census.taken) && !self.robots.is_empty())
+            || !self.drawing.is_empty()
             || self.pending.0.load(Ordering::Relaxed)
             || !self.glides.is_empty()
             || moved

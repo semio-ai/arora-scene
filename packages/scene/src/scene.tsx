@@ -106,7 +106,7 @@ export function Scene({
         );
     }
     for (const id of [...asked.current.keys()]) {
-      if (id in wanted) continue;
+      if (Object.hasOwn(wanted, id)) continue;
       asked.current.delete(id);
       scene.unload(id);
     }

@@ -12,8 +12,13 @@
 //! A host asks through [`RobotRequests`] and hears back through
 //! [`RobotOutcomes`], one outcome per load, in the order they settled.
 //!
+//! **Requests act in the order a host asked them.** A load, an unload and a
+//! pose asked for between two frames act on what the ones before them left:
+//! a load then an unload of one instance leaves it empty, two loads leave the
+//! later one loading, and a pose after an unload finds nothing to move.
+//!
 //! **Where a robot stands is the host's.** A load may carry a pose, and
-//! [`RobotRequests::poses`] moves a robot already loaded; without either it
+//! [`RobotRequest::Pose`] moves a robot loaded or loading; without either it
 //! stands at the origin. Poses are in the driver's frame — Z up, metres — as
 //! the controls' are ([`Pose`]).
 //!
@@ -84,14 +89,22 @@ impl RobotLoad {
     }
 }
 
+/// One thing a host asks of an instance's robot.
+#[derive(Clone)]
+pub enum RobotRequest {
+    /// Load a robot into its instance.
+    Load(RobotLoad),
+    /// Take an instance away, with anything loading into it.
+    Unload(String),
+    /// Stand an instance's robot, and anything loading into it, at a pose.
+    Pose(String, Pose),
+}
+
 /// What a host asks of the scene's robots, taken at the start of each frame.
 #[derive(Resource, Default)]
 pub struct RobotRequests {
-    pub loads: Vec<RobotLoad>,
-    /// Instances to take away, with anything loading into them.
-    pub unloads: Vec<String>,
-    /// Where loaded robots now stand, by instance.
-    pub poses: Vec<(String, Pose)>,
+    /// In the order the host asked them.
+    pub robots: Vec<RobotRequest>,
     /// Frame these instances, or every robot for none: the camera moves to
     /// fit them, as it fits the robots present at the start.
     pub frame: Option<Vec<String>>,
@@ -159,8 +172,22 @@ fn named(meta: &AssetMeta) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Takes the host's requests: unloads first, then loads, then poses, so a
-/// frame that unloads and loads one id starts it afresh.
+/// What one instance holds while a frame's requests are taken.
+#[derive(Default)]
+struct Held {
+    /// The robot showing, and where it stands.
+    showing: Option<(Entity, Transform)>,
+    /// The robot loading into it, and what it is.
+    incoming: Option<(Entity, RobotAsset)>,
+}
+
+/// Takes the host's requests, in the order it asked them.
+///
+/// Each acts on what the ones before it left, which the queries cannot say:
+/// a request acts through commands, which land only once every request has
+/// been taken. So the instances are followed here, request by request — a
+/// robot spawned by one load is there for the next to replace, and one
+/// despawned by an unload is gone for the pose after it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn take_requests(
     mut requests: ResMut<RobotRequests>,
@@ -172,65 +199,79 @@ pub(crate) fn take_requests(
     joint_gizmos: Query<(Entity, &JointGizmo)>,
     mut outcomes: ResMut<RobotOutcomes>,
 ) {
-    let requests = &mut *requests;
-    let mut gone = std::collections::HashSet::new();
-    for instance in std::mem::take(&mut requests.unloads) {
-        for (root, asset, _, incoming) in &roots {
-            if asset.instance != instance {
-                continue;
-            }
-            if incoming {
-                outcomes.0.push(failed(asset, UNLOADED));
-            } else {
-                gone.insert(root);
-                gone.extend(children.iter_descendants(root));
-            }
-            commands.entity(root).despawn();
+    if requests.robots.is_empty() {
+        return;
+    }
+    let mut held: std::collections::HashMap<String, Held> = std::collections::HashMap::new();
+    for (root, asset, transform, incoming) in &roots {
+        let at = held.entry(asset.instance.clone()).or_default();
+        if incoming {
+            at.incoming = Some((root, asset.clone()));
+        } else {
+            at.showing = Some((root, *transform));
         }
-        log::info!("unloaded {instance}");
+    }
+    let mut gone = std::collections::HashSet::new();
+    for request in std::mem::take(&mut requests.robots) {
+        match request {
+            RobotRequest::Unload(instance) => {
+                let Some(was) = held.remove(&instance) else {
+                    continue;
+                };
+                if let Some((root, asset)) = was.incoming {
+                    outcomes.0.push(failed(&asset, UNLOADED));
+                    commands.entity(root).despawn();
+                }
+                if let Some((root, _)) = was.showing {
+                    gone.insert(root);
+                    gone.extend(children.iter_descendants(root));
+                    commands.entity(root).despawn();
+                }
+                log::info!("unloaded {instance}");
+            }
+            RobotRequest::Load(load) => {
+                let asset = load.asset;
+                let at = held.entry(asset.instance.clone()).or_default();
+                // A load still under way into this instance is replaced; the
+                // robot showing in it stays until this one has loaded.
+                if let Some((root, earlier)) = at.incoming.take() {
+                    outcomes.0.push(failed(&earlier, REPLACED));
+                    commands.entity(root).despawn();
+                }
+                let transform = load
+                    .pose
+                    .map(|pose| pose.to_scene())
+                    .or(at.showing.map(|(_, transform)| transform))
+                    .unwrap_or_default();
+                let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(asset.glb.clone()));
+                log::info!("loading {} into {}", asset.glb, asset.instance);
+                let root = commands
+                    .spawn((
+                        WorldAssetRoot(scene),
+                        transform,
+                        asset.clone(),
+                        Incoming,
+                        Visibility::Hidden,
+                    ))
+                    .id();
+                at.incoming = Some((root, asset));
+            }
+            RobotRequest::Pose(instance, pose) => {
+                let Some(at) = held.get_mut(&instance) else {
+                    continue;
+                };
+                let to = pose.to_scene();
+                if let Some((root, transform)) = &mut at.showing {
+                    *transform = to;
+                    commands.entity(*root).insert(to);
+                }
+                if let Some((root, _)) = &at.incoming {
+                    commands.entity(*root).insert(to);
+                }
+            }
+        }
     }
     despawn_gizmos_on(&gone, &transform_gizmos, &joint_gizmos, &mut commands);
-
-    for load in std::mem::take(&mut requests.loads) {
-        let asset = load.asset;
-        // A load still under way into this instance is replaced; the robot
-        // showing in it stays until this one has loaded.
-        let mut kept = None;
-        for (root, held, transform, incoming) in &roots {
-            if held.instance != asset.instance {
-                continue;
-            }
-            if incoming {
-                outcomes.0.push(failed(held, REPLACED));
-                commands.entity(root).despawn();
-            } else if !gone.contains(&root) {
-                kept = Some(*transform);
-            }
-        }
-        let transform = load
-            .pose
-            .map(|pose| pose.to_scene())
-            .or(kept)
-            .unwrap_or_default();
-        let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(asset.glb.clone()));
-        log::info!("loading {} into {}", asset.glb, asset.instance);
-        commands.spawn((
-            WorldAssetRoot(scene),
-            transform,
-            asset,
-            Incoming,
-            Visibility::Hidden,
-        ));
-    }
-
-    for (instance, pose) in std::mem::take(&mut requests.poses) {
-        let at = pose.to_scene();
-        for (root, asset, _, _) in &roots {
-            if asset.instance == instance {
-                commands.entity(root).insert(at);
-            }
-        }
-    }
 }
 
 /// Finishes each load once its robot has loaded whole and spawned, taking
@@ -448,13 +489,13 @@ mod tests {
         let placed = Transform::from_xyz(1.0, 0.0, 2.0);
         app.world_mut().entity_mut(showing).insert(placed);
         let (earlier, _) = root(&mut app, asset("a", "a2.glb"), true);
-        app.world_mut()
-            .resource_mut::<RobotRequests>()
-            .loads
-            .push(RobotLoad {
+        ask(
+            &mut app,
+            [RobotRequest::Load(RobotLoad {
                 asset: asset("a", "a3.glb"),
                 pose: None,
-            });
+            })],
+        );
         app.update();
 
         assert!(app.world().get_entity(earlier).is_err());
@@ -485,11 +526,13 @@ mod tests {
             position: [1.0, 2.0, 3.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
         };
-        {
-            let mut requests = app.world_mut().resource_mut::<RobotRequests>();
-            requests.unloads.push("a".into());
-            requests.poses.push(("b".into(), pose));
-        }
+        ask(
+            &mut app,
+            [
+                RobotRequest::Unload("a".into()),
+                RobotRequest::Pose("b".into(), pose),
+            ],
+        );
         app.update();
 
         for gone in [a, a_loading, on_a] {
@@ -497,5 +540,146 @@ mod tests {
         }
         assert_eq!(outcomes(&mut app), vec![("a".into(), Err(UNLOADED.into()))]);
         assert_eq!(app.world().get::<Transform>(b), Some(&pose.to_scene()));
+    }
+
+    fn ask(app: &mut App, requests: impl IntoIterator<Item = RobotRequest>) {
+        app.world_mut()
+            .resource_mut::<RobotRequests>()
+            .robots
+            .extend(requests);
+    }
+
+    fn load(instance: &str, glb: &str, pose: Option<Pose>) -> RobotRequest {
+        RobotRequest::Load(RobotLoad {
+            asset: asset(instance, glb),
+            pose,
+        })
+    }
+
+    fn at(x: f32) -> Pose {
+        Pose {
+            position: [x, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    /// The robots loading, as `(instance, glb, transform)`.
+    fn loading(app: &mut App) -> Vec<(String, String, Transform)> {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<(&RobotAsset, &Transform), With<Incoming>>();
+        query
+            .iter(app.world())
+            .map(|(asset, at)| (asset.instance.clone(), asset.glb.clone(), *at))
+            .collect()
+    }
+
+    /// Two loads into one instance between frames leave the later one
+    /// loading, and report the earlier replaced before the later settles.
+    #[test]
+    fn of_two_loads_asked_together_the_later_is_kept() {
+        let mut app = app(take_requests);
+        ask(
+            &mut app,
+            [load("a", "a1.glb", None), load("a", "a2.glb", None)],
+        );
+        app.update();
+
+        let kept: Vec<_> = loading(&mut app)
+            .into_iter()
+            .map(|(_, glb, _)| glb)
+            .collect();
+        assert_eq!(kept, vec!["a2.glb".to_string()]);
+        assert_eq!(outcomes(&mut app), vec![("a".into(), Err(REPLACED.into()))]);
+    }
+
+    /// A load then an unload of one instance between frames leaves it
+    /// empty, the load reported unloaded.
+    #[test]
+    fn a_load_then_an_unload_leaves_the_instance_empty() {
+        let mut app = app(take_requests);
+        ask(
+            &mut app,
+            [load("a", "a1.glb", None), RobotRequest::Unload("a".into())],
+        );
+        app.update();
+
+        assert!(loading(&mut app).is_empty());
+        assert_eq!(outcomes(&mut app), vec![("a".into(), Err(UNLOADED.into()))]);
+    }
+
+    /// An unload then a load of one instance between frames starts it
+    /// afresh: the load stands at the origin, not where the robot taken away
+    /// stood.
+    #[test]
+    fn an_unload_then_a_load_starts_the_instance_afresh() {
+        let mut app = app(take_requests);
+        let (showing, _) = root(&mut app, asset("a", "a1.glb"), false);
+        app.world_mut()
+            .entity_mut(showing)
+            .insert(Transform::from_xyz(4.0, 0.0, 0.0));
+        ask(
+            &mut app,
+            [RobotRequest::Unload("a".into()), load("a", "a2.glb", None)],
+        );
+        app.update();
+
+        assert!(app.world().get_entity(showing).is_err());
+        assert_eq!(
+            loading(&mut app),
+            vec![("a".into(), "a2.glb".into(), Transform::default())]
+        );
+    }
+
+    /// A pose then an unload of one instance between frames moves nothing:
+    /// the robot is gone before the pose would land.
+    #[test]
+    fn a_pose_then_an_unload_moves_nothing() {
+        let mut app = app(take_requests);
+        let (showing, _) = root(&mut app, asset("a", "a1.glb"), false);
+        ask(
+            &mut app,
+            [
+                RobotRequest::Pose("a".into(), at(1.0)),
+                RobotRequest::Unload("a".into()),
+            ],
+        );
+        app.update();
+        assert!(app.world().get_entity(showing).is_err());
+    }
+
+    /// An unload then a pose of one instance between frames moves nothing,
+    /// and asks nothing of the robot taken away.
+    #[test]
+    fn a_pose_after_an_unload_finds_nothing_to_move() {
+        let mut app = app(take_requests);
+        let (showing, _) = root(&mut app, asset("a", "a1.glb"), false);
+        ask(
+            &mut app,
+            [
+                RobotRequest::Unload("a".into()),
+                RobotRequest::Pose("a".into(), at(1.0)),
+            ],
+        );
+        app.update();
+        assert!(app.world().get_entity(showing).is_err());
+    }
+
+    /// A pose asked for with a load, before it has loaded, places it.
+    #[test]
+    fn a_pose_reaches_a_robot_still_loading() {
+        let mut app = app(take_requests);
+        ask(
+            &mut app,
+            [
+                load("a", "a1.glb", Some(at(1.0))),
+                RobotRequest::Pose("a".into(), at(2.0)),
+            ],
+        );
+        app.update();
+        assert_eq!(
+            loading(&mut app),
+            vec![("a".into(), "a1.glb".into(), at(2.0).to_scene())]
+        );
     }
 }

@@ -153,12 +153,17 @@ export interface SceneHandle {
   onEvent(handler: (event: SceneEvent) => void): void;
 }
 
-/** A load waiting for its outcome. */
+/**
+ * A load waiting for its outcome. One whose instance was unloaded is already
+ * settled, and stays only to take its own outcome when that arrives.
+ */
 interface Pending {
   key?: string;
   resolve: () => void;
   reject: (error: Error) => void;
 }
+
+const settledAlready = () => {};
 
 /** What the package knows of one instance. */
 interface Instance {
@@ -360,15 +365,20 @@ async function start(
       wasm.set_active_area(Float32Array.from(area ?? []));
     },
     unload(id) {
-      const held = instances.get(id);
-      instances.delete(id);
       robots.delete(id);
       wasm.unload(id);
-      // Anything still loading into it is answered by the scene; the module
-      // sends `loadFailed` for each, which finds no instance here, so settle
-      // them now.
-      for (const waiting of held?.pending ?? [])
+      const held = instances.get(id);
+      if (!held) return;
+      held.robot = undefined;
+      held.loading = undefined;
+      // Anything still loading into it is settled now; the scene answers each
+      // with a `loadFailed` later. Each stays queued, settled, to take that
+      // answer, so a load asked for after this one settles on its own.
+      for (const waiting of held.pending) {
         waiting.reject(new Error("its instance was unloaded"));
+        waiting.resolve = settledAlready;
+        waiting.reject = settledAlready;
+      }
     },
     load(id, glb, { key, pose } = {}) {
       const held = instance(id);

@@ -18,7 +18,8 @@
 //! never draws and the renderer logs it, so its mesh counts as settled.
 //! Anything else — a camera that draws no frame, a GPU that never reports the
 //! frame done — is given up on after [`GIVE_UP_FRAMES`] frames, and the
-//! robot is reported ready as it draws.
+//! robot is reported ready as it draws. The scene keeps drawing while a robot
+//! is unreported (see `redraw`), so those frames come.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -33,8 +34,7 @@ use bevy::render::view::{ExtractedView, RenderVisibleEntities, RetainedViewEntit
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use bevy::shader::ShaderCacheError;
 
-use arora_visuals::instance::EntityInstance;
-
+use crate::robots::RobotAsset;
 use crate::OrbitCamera;
 
 /// Frames after which a robot still not drawn is reported ready as it draws:
@@ -68,6 +68,8 @@ struct Watch {
     frames: u32,
     /// Whether the frame drawing it whole was submitted.
     submitted: bool,
+    /// Whether it was reported without waiting any longer.
+    given_up: bool,
 }
 
 /// The drawing robots, by root, and the scene camera's view.
@@ -97,11 +99,9 @@ impl Plugin for ReadyPlugin {
     }
 }
 
-/// Follow each indexed robot still drawing, with its meshes, and the scene's
-/// camera.
-#[allow(clippy::type_complexity)]
+/// Follow each robot still drawing, with its meshes, and the scene's camera.
 fn extract_drawing(
-    robots: Extract<Query<Entity, (With<Drawing>, With<EntityInstance>)>>,
+    robots: Extract<Query<Entity, With<Drawing>>>,
     children: Extract<Query<&Children>>,
     meshes: Extract<Query<(), With<Mesh3d>>>,
     cameras: Extract<Query<Entity, With<OrbitCamera>>>,
@@ -128,7 +128,8 @@ fn extract_drawing(
 
 /// For each drawing robot whose every mesh in the camera's view was drawn
 /// this frame, have the GPU report when it has finished the frame; give up on
-/// one held back too long.
+/// one held back too long, whether by its meshes, a view that draws nothing,
+/// or a GPU that has not reported.
 fn watch_drawing(
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     mut watched: ResMut<Watched>,
@@ -138,6 +139,13 @@ fn watch_drawing(
     queue: Res<RenderQueue>,
     sender: Res<ReportSender>,
 ) {
+    for (root, watch) in &mut watched.robots {
+        if watch.frames >= GIVE_UP_FRAMES && !watch.given_up {
+            watch.given_up = true;
+            watch.submitted = true;
+            let _ = sender.0.send(*root);
+        }
+    }
     let Some(id) = watched.view else {
         return;
     };
@@ -179,9 +187,6 @@ fn watch_drawing(
                 // The app may be gone by the time the GPU finishes.
                 let _ = sender.send(root);
             });
-        } else if watch.frames >= GIVE_UP_FRAMES {
-            watch.submitted = true;
-            let _ = sender.0.send(*root);
         }
     }
 }
@@ -200,22 +205,27 @@ fn settled(state: &CachedPipelineState) -> bool {
     }
 }
 
-/// Reports each robot the render world says is drawn, once.
+/// Reports each robot the render world says is drawn, once: a robot given up
+/// on can be reported again when its frame does finish.
 fn ready_drawn_robots(
     reports: Res<Reports>,
-    robots: Query<&EntityInstance, With<Drawing>>,
+    robots: Query<&RobotAsset, With<Drawing>>,
     mut ready: ResMut<RobotsReady>,
     mut commands: Commands,
 ) {
     let Ok(reports) = reports.0.lock() else {
         return;
     };
+    let mut told = HashSet::new();
     for root in reports.try_iter() {
-        let Ok(instance) = robots.get(root) else {
+        let Ok(robot) = robots.get(root) else {
             continue;
         };
+        if !told.insert(root) {
+            continue;
+        }
         commands.entity(root).remove::<Drawing>();
-        ready.0.push(instance.id.clone());
-        log::info!("{}: drawn", instance.id);
+        ready.0.push(robot.instance.clone());
+        log::info!("{}: drawn", robot.instance);
     }
 }

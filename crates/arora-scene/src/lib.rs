@@ -209,20 +209,7 @@ impl Plugin for ScenePlugin {
         .init_resource::<OrbitHeld>()
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
-        .init_resource::<robots::RobotRequests>()
-        .init_resource::<FrameOnly>()
-        .init_resource::<robots::RobotOutcomes>()
-        .add_message::<robots::RobotLoaded>()
-        .add_systems(
-            PreUpdate,
-            (
-                frame_on_request,
-                robots::take_requests,
-                robots::finish_loads,
-                frame_initial_robots,
-            )
-                .chain(),
-        )
+        .add_plugins(robot_requests)
         // Before the control commands, so a robot indexed this frame is there
         // for both passes: one indexed between them would leave a change sent
         // with an add a pass short, and the control showing a frame without
@@ -248,6 +235,30 @@ impl Plugin for ScenePlugin {
                 .chain(),
         );
     }
+}
+
+/// Takes a host's robot requests and the framings it asks for.
+fn robot_requests(app: &mut App) {
+    app.init_resource::<robots::RobotRequests>()
+        .init_resource::<FrameOnly>()
+        .init_resource::<robots::RobotOutcomes>()
+        .add_message::<robots::RobotLoaded>()
+        .add_systems(
+            PreUpdate,
+            (
+                robots::take_requests,
+                robots::finish_loads,
+                frame_initial_robots,
+            )
+                .chain(),
+        )
+        // Once this frame's transforms have propagated, so a robot posed in
+        // the frame it is framed is measured where it now stands; the census
+        // reads it next frame.
+        .add_systems(
+            PostUpdate,
+            frame_on_request.after(bevy::transform::TransformSystems::Propagate),
+        );
 }
 
 /// Whether this run ends in a report: only then are frame times and the
@@ -753,8 +764,8 @@ pub fn load_from_file(
     load.pose = pose;
     app.world_mut()
         .resource_mut::<robots::RobotRequests>()
-        .loads
-        .push(load);
+        .robots
+        .push(robots::RobotRequest::Load(load));
 }
 
 /// Builds the screen the robot declares and hands back the texture it shows.
@@ -952,8 +963,10 @@ fn frame_initial_robots(
 #[derive(Resource, Default)]
 pub struct FrameOnly(pub Vec<String>);
 
-/// Frames what a host asked for, at once: the robots it names are already
-/// showing, so there is nothing to wait for to settle.
+/// Frames what a host asked for on the next frame: the robots it names are
+/// already showing, so there is nothing to wait for to settle, but a robot
+/// posed in the same frame is measured by its propagated transform, which
+/// the census reads only after this frame's propagation.
 fn frame_on_request(
     mut requests: ResMut<robots::RobotRequests>,
     frames: Res<Frames>,
@@ -1732,6 +1745,63 @@ mod tests {
         };
         assert!((centre(&mut app, vec!["far".into()]) - 10.0).abs() < 1e-4);
         assert!((centre(&mut app, vec![]) - 5.0).abs() < 1e-4, "every robot");
+    }
+
+    /// A robot posed and framed in one frame is framed where the pose put
+    /// it, not where it stood before.
+    #[test]
+    fn a_robot_posed_and_framed_together_is_framed_where_it_now_stands() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            bevy::transform::TransformPlugin,
+        ))
+        .init_asset::<Mesh>()
+        .init_resource::<Frames>()
+        .init_resource::<Census>()
+        .init_resource::<Framing>()
+        .add_plugins(robot_requests)
+        .add_systems(Update, take_census);
+        let root = app
+            .world_mut()
+            .spawn((
+                robots::RobotAsset {
+                    instance: "a".into(),
+                    key: None,
+                    glb: String::new(),
+                    meta: Default::default(),
+                    joints: Vec::new(),
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Mesh3d(Handle::default()),
+            Transform::default(),
+            Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)),
+            ChildOf(root),
+        ));
+        app.update();
+
+        let pose = controls::Pose {
+            position: [10.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        };
+        {
+            let mut requests = app.world_mut().resource_mut::<robots::RobotRequests>();
+            requests
+                .robots
+                .push(robots::RobotRequest::Pose("a".into(), pose));
+            requests.frame = Some(vec!["a".into()]);
+        }
+        app.update();
+        app.update();
+
+        let framing = app.world().resource::<Framing>();
+        assert!(framing.fitted);
+        let moved = pose.to_scene().translation;
+        assert!((framing.center - moved).length() < 1e-4, "{:?}", framing.center);
     }
 
     /// What the view gizmo's request asks the controller to face, looking
