@@ -244,12 +244,25 @@ pub(crate) fn take_requests(
                 {
                     writes.0.retain(|w| w.instance.as_ref() != Some(&instance));
                 }
-                let on_it = |command: &ControlCommand| {
-                    matches!(command, ControlCommand::Add { control, .. }
-                        if control.instance() == Some(instance.as_str()))
-                };
-                if controls.0.iter().any(on_it) {
-                    controls.0.retain(|command| !on_it(command));
+                // A control added on it goes, and with it every command
+                // waiting behind the add under the same key, which would
+                // otherwise wait for a control that never comes.
+                let dropped: std::collections::HashSet<String> = controls
+                    .0
+                    .iter()
+                    .filter_map(|command| match command {
+                        ControlCommand::Add { key, control }
+                            if control.instance() == Some(instance.as_str()) =>
+                        {
+                            Some(key.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !dropped.is_empty() {
+                    controls
+                        .0
+                        .retain(|command| !dropped.contains(command.key()));
                 }
                 let Some(was) = held.remove(&instance) else {
                     continue;
@@ -758,10 +771,14 @@ mod tests {
             .resource_mut::<ValueWrites>()
             .0
             .extend([write("a"), write("b")]);
-        app.world_mut()
-            .resource_mut::<ControlCommands>()
-            .0
-            .extend([add("a"), add("b")]);
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            add("a"),
+            ControlCommand::Show {
+                key: "on-a".into(),
+                visible: false,
+            },
+            add("b"),
+        ]);
         ask(&mut app, [RobotRequest::Unload("a".into())]);
         app.update();
 
