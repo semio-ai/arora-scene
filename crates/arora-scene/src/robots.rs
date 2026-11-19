@@ -244,26 +244,21 @@ pub(crate) fn take_requests(
                 {
                     writes.0.retain(|w| w.instance.as_ref() != Some(&instance));
                 }
-                // A control added on it goes, and with it every command
+                // A control added on it goes, and with it the commands
                 // waiting behind the add under the same key, which would
-                // otherwise wait for a control that never comes.
-                let dropped: std::collections::HashSet<String> = controls
-                    .0
-                    .iter()
-                    .filter_map(|command| match command {
-                        ControlCommand::Add { key, control }
-                            if control.instance() == Some(instance.as_str()) =>
-                        {
-                            Some(key.clone())
+                // otherwise wait for a control that never comes — up to a
+                // later add under that key, which is another control's.
+                let mut dropping = std::collections::HashSet::new();
+                controls.0.retain(|command| {
+                    if let ControlCommand::Add { key, control } = command {
+                        if control.instance() == Some(instance.as_str()) {
+                            dropping.insert(key.clone());
+                        } else {
+                            dropping.remove(key);
                         }
-                        _ => None,
-                    })
-                    .collect();
-                if !dropped.is_empty() {
-                    controls
-                        .0
-                        .retain(|command| !dropped.contains(command.key()));
-                }
+                    }
+                    !dropping.contains(command.key())
+                });
                 let Some(was) = held.remove(&instance) else {
                     continue;
                 };
@@ -778,6 +773,15 @@ mod tests {
                 visible: false,
             },
             add("b"),
+            // The same key, asked for on another instance after.
+            ControlCommand::Add {
+                key: "on-a".into(),
+                control: crate::controls::Control::Joint {
+                    instance: "b".into(),
+                    joint: "joint".into(),
+                    color: None,
+                },
+            },
         ]);
         ask(&mut app, [RobotRequest::Unload("a".into())]);
         app.update();
@@ -797,7 +801,7 @@ mod tests {
             .iter()
             .map(|c| c.key().to_string())
             .collect();
-        assert_eq!(keys, vec!["on-b".to_string()]);
+        assert_eq!(keys, vec!["on-b".to_string(), "on-a".to_string()]);
     }
 
     /// A selection asked for after an unload of its instance is kept: it is

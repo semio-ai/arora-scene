@@ -524,6 +524,10 @@ fn carry_out(
         controls.0.contains_key(key) || adding.contains(key) || loading
     };
     let mut waiting = Vec::new();
+    // Keys whose add waits for its robot. A later add under the same key
+    // waits behind it, so adds land in the order they were asked: the one
+    // asked for last is the control left.
+    let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Whether to draw another frame: for a command that changed something, or
     // one waiting on a gizmo spawned at the end of this pass.
     let mut again = false;
@@ -536,6 +540,10 @@ fn carry_out(
         );
         match command {
             ControlCommand::Add { key, control } => {
+                if held.contains(&key) {
+                    waiting.push(ControlCommand::Add { key, control });
+                    continue;
+                }
                 // A control on a robot waits for it while it is loading; one
                 // on a robot nothing is loading is dropped.
                 let on = control
@@ -549,6 +557,7 @@ fn carry_out(
                         continue;
                     }
                     _ => {
+                        held.insert(key.clone());
                         waiting.push(ControlCommand::Add { key, control });
                         continue;
                     }
@@ -1110,6 +1119,35 @@ mod tests {
             app.world().resource::<ControlCommands>().0.is_empty(),
             "nothing waits for a robot nothing is loading",
         );
+    }
+
+    /// Of two adds under one key, the one asked for last is the control
+    /// left, even when the first waits for its robot to load.
+    #[test]
+    fn a_later_add_under_a_key_outlasts_one_waiting_for_its_robot() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        for instance in [ROBOT, "robot-1"] {
+            app.world_mut()
+                .resource_mut::<ControlCommands>()
+                .0
+                .push(ControlCommand::Add {
+                    key: "k".into(),
+                    control: Control::Joint {
+                        instance: instance.into(),
+                        joint: TILT.into(),
+                        color: None,
+                    },
+                });
+        }
+        app.update();
+        robot(&mut app, body);
+        app.update();
+        app.update();
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let on: Vec<Entity> = gizmos.iter(app.world()).map(|gizmo| gizmo.target).collect();
+        assert_eq!(on, vec![other]);
     }
 
     fn send(app: &mut App, command: ControlCommand) {
