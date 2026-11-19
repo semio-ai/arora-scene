@@ -86,7 +86,8 @@ which backend a page would get.
 - **`options` are read once**, when the page's scene first starts. A later
   `<Scene>`'s options are ignored. The theme, environment and active area can
   change at any time: `scene.setTheme`, `scene.setEnvironment` and
-  `scene.setActiveArea` (the camera eases into a new active area).
+  `scene.setActiveArea` (the camera eases from one active area to the next;
+  the first area, and the whole canvas given back, are taken at once).
 - **Every robot is an instance the host names**: its own string, never
   rewritten — an Arora path, a slot name. Every call about a robot and every
   event from it carries that id. `scene.load(instance, glb, { key, pose })`

@@ -148,7 +148,8 @@ export interface SceneHandle {
   /**
    * The part of the canvas left visible beside the host's panels,
    * `[x, y, width, height]` in CSS pixels, which the camera frames the robots
-   * in, easing there; `undefined` gives the whole canvas back.
+   * in, easing there from an area set before; the first is taken at once,
+   * and `undefined` gives the whole canvas back at once.
    */
   setActiveArea(area: SceneOptions["activeArea"]): void;
   /** Sets where the scene's events go, replacing any earlier handler. */

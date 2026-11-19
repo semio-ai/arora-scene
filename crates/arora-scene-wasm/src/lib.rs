@@ -191,7 +191,8 @@ pub fn set_environment(environment: &str) -> Result<(), JsValue> {
 
 /// Sets the part of the canvas left visible beside the host's panels,
 /// `[x, y, width, height]` in CSS pixels, which the camera frames the robots
-/// in, easing there; none gives the whole canvas back.
+/// in, easing there from an area set before; the first is taken at once,
+/// and none gives the whole canvas back at once.
 #[wasm_bindgen]
 pub fn set_active_area(area: Vec<f32>) -> Result<(), JsValue> {
     let area = match area.as_slice() {
