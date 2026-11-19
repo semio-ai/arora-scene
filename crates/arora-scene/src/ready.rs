@@ -18,7 +18,7 @@
 //! never draws and the renderer logs it, so its mesh counts as settled.
 //! Anything else — a camera that draws no frame, a GPU that never reports the
 //! frame done — is given up on after [`GIVE_UP_FRAMES`] frames, and the
-//! robot is reported ready as it draws. The scene keeps drawing while a robot
+//! robot is reported ready as it draws, saying it was not seen drawn. The scene keeps drawing while a robot
 //! is unreported (see `redraw`), so those frames come.
 
 use std::collections::{HashMap, HashSet};
@@ -47,17 +47,26 @@ const GIVE_UP_FRAMES: u32 = 600;
 #[derive(Component)]
 pub struct Drawing;
 
-/// The instances drawn since a host last took them, in the order they were.
-#[derive(Resource, Default)]
-pub struct RobotsReady(pub Vec<String>);
+/// A robot drawn as it will be, or given up on.
+#[derive(Clone, Debug)]
+pub struct Ready {
+    pub instance: String,
+    /// Whether it was seen drawn; false when it was given up on.
+    pub drawn: bool,
+}
 
-/// The render world's reports of drawn roots, read by the main world.
+/// The robots ready since a host last took them, in the order they were.
+#[derive(Resource, Default)]
+pub struct RobotsReady(pub Vec<Ready>);
+
+/// The render world's reports of ready roots, and whether each was seen
+/// drawn, read by the main world.
 #[derive(Resource)]
-struct Reports(Mutex<Receiver<Entity>>);
+struct Reports(Mutex<Receiver<(Entity, bool)>>);
 
 /// The render world's end of [`Reports`].
 #[derive(Resource)]
-struct ReportSender(Sender<Entity>);
+struct ReportSender(Sender<(Entity, bool)>);
 
 /// One drawing robot, as the render world follows it.
 #[derive(Default)]
@@ -152,7 +161,7 @@ fn watch_drawing(
             );
             watch.given_up = true;
             watch.submitted = true;
-            let _ = sender.0.send(*root);
+            let _ = sender.0.send((*root, false));
         }
     }
     let Some(id) = watched.view else {
@@ -194,7 +203,7 @@ fn watch_drawing(
             let root = *root;
             queue.on_submitted_work_done(move || {
                 // The app may be gone by the time the GPU finishes.
-                let _ = sender.send(root);
+                let _ = sender.send((root, true));
             });
         }
     }
@@ -226,7 +235,7 @@ fn ready_drawn_robots(
         return;
     };
     let mut told = HashSet::new();
-    for root in reports.try_iter() {
+    for (root, drawn) in reports.try_iter() {
         let Ok(robot) = robots.get(root) else {
             continue;
         };
@@ -234,7 +243,12 @@ fn ready_drawn_robots(
             continue;
         }
         commands.entity(root).remove::<Drawing>();
-        ready.0.push(robot.instance.clone());
-        log::info!("{}: drawn", robot.instance);
+        ready.0.push(Ready {
+            instance: robot.instance.clone(),
+            drawn,
+        });
+        if drawn {
+            log::info!("{}: drawn", robot.instance);
+        }
     }
 }

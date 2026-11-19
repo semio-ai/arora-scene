@@ -387,8 +387,13 @@ pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
     })
     .add_systems(Startup, keep_waker)
     .add_systems(Update, take_pushed.before(ApplyValues))
-    // Before Update, where the scene carries control commands out.
-    .add_systems(PreUpdate, take_controls)
+    // Before Update, where the scene carries control commands out, and after
+    // the robot requests, so an unload drops only commands that were waiting
+    // from earlier frames.
+    .add_systems(
+        PreUpdate,
+        take_controls.after(arora_scene::robots::RobotRequestSystems),
+    )
     // Before the scene takes its robot requests in PreUpdate, so a robot
     // asked for between frames starts loading on the next one.
     .add_systems(First, take_requests)
@@ -563,10 +568,11 @@ enum SceneEvent<'a> {
         joints: Vec<JointInfo<'a>>,
         elements: Vec<ElementInfo<'a>>,
     },
-    /// A robot showing in its instance has been drawn whole: every mesh of
-    /// it in the camera's view with its pipeline compiled, and the frame
-    /// done.
-    Ready { instance: &'a str },
+    /// A robot showing in its instance has been drawn as it will be: every
+    /// mesh of it in the camera's view with its pipeline compiled (or failed
+    /// for good, which the renderer logs), and the frame done; or, `drawn`
+    /// false, the scene gave up waiting to see that.
+    Ready { instance: &'a str, drawn: bool },
     /// A load that did not finish, and why: the GLB failed, a later load into
     /// the same instance replaced it, or the instance was unloaded. Whatever
     /// the instance showed before still shows.
@@ -772,9 +778,10 @@ fn emit_events(
             },
         });
     }
-    for instance in std::mem::take(&mut drawn.0) {
+    for ready in std::mem::take(&mut drawn.0) {
         send(&SceneEvent::Ready {
-            instance: &instance,
+            instance: &ready.instance,
+            drawn: ready.drawn,
         });
     }
     for event in std::mem::take(&mut controls.0) {

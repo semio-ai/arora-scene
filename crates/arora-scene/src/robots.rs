@@ -27,7 +27,8 @@
 //! instance's id, since a swap is usually a newer version of the same robot,
 //! whose element ids carry over; goals are nobody's and stay. An unload takes
 //! the selection away too: an id loaded later is a new instance, and must not
-//! light up what an old one had selected.
+//! light up what an old one had selected. For the same reason it drops the
+//! value writes and control adds still waiting for the instance.
 
 use bevy::asset::RecursiveDependencyLoadState;
 use bevy::prelude::*;
@@ -37,8 +38,9 @@ use arora_visuals::meta::AssetMeta;
 use arora_visuals::select::Selections;
 use arora_visuals::transform_gizmo::TransformGizmo;
 
-use crate::controls::Pose;
+use crate::controls::{ControlCommand, ControlCommands, Pose};
 use crate::robot::{self, Joint};
+use crate::values::ValueWrites;
 
 /// On a robot's root: the instance it is, and the asset it shows.
 #[derive(Component, Clone)]
@@ -180,6 +182,12 @@ fn named(meta: &AssetMeta) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Where robot requests are taken. A host that queues work for an instance
+/// — value writes, control commands — queues it after this, so an unload
+/// drops only work that was waiting from earlier frames.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RobotRequestSystems;
+
 /// What one instance holds while a frame's requests are taken.
 #[derive(Default)]
 struct Held {
@@ -207,6 +215,8 @@ pub(crate) fn take_requests(
     joint_gizmos: Query<(Entity, &JointGizmo)>,
     mut outcomes: ResMut<RobotOutcomes>,
     mut selections: ResMut<Selections>,
+    mut writes: ResMut<ValueWrites>,
+    mut controls: ResMut<ControlCommands>,
 ) {
     if requests.robots.is_empty() {
         return;
@@ -226,6 +236,20 @@ pub(crate) fn take_requests(
             RobotRequest::Unload(instance) => {
                 if selections.0.contains_key(&instance) {
                     selections.0.remove(&instance);
+                }
+                if writes
+                    .0
+                    .iter()
+                    .any(|w| w.instance.as_ref() == Some(&instance))
+                {
+                    writes.0.retain(|w| w.instance.as_ref() != Some(&instance));
+                }
+                let on_it = |command: &ControlCommand| {
+                    matches!(command, ControlCommand::Add { control, .. }
+                        if control.instance() == Some(instance.as_str()))
+                };
+                if controls.0.iter().any(on_it) {
+                    controls.0.retain(|command| !on_it(command));
                 }
                 let Some(was) = held.remove(&instance) else {
                     continue;
@@ -415,6 +439,8 @@ mod tests {
             .init_resource::<RobotRequests>()
             .init_resource::<RobotOutcomes>()
             .init_resource::<Selections>()
+            .init_resource::<ValueWrites>()
+            .init_resource::<ControlCommands>()
             .add_message::<RobotLoaded>()
             .add_systems(Update, systems);
         app
@@ -695,6 +721,55 @@ mod tests {
         );
         app.update();
         assert!(app.world().get_entity(showing).is_err());
+    }
+
+    /// An unload drops the writes and control adds still waiting for its
+    /// instance, and no other instance's.
+    #[test]
+    fn an_unload_drops_the_work_waiting_for_its_instance() {
+        let mut app = app(take_requests);
+        let write = |instance: &str| crate::values::ValueWrite {
+            instance: Some(instance.into()),
+            target: "joint".into(),
+            feature: None,
+            value: arora_visuals::value::Decoded::Scalar(1.0),
+            stamp: None,
+        };
+        let add = |instance: &str| ControlCommand::Add {
+            key: format!("on-{instance}"),
+            control: crate::controls::Control::Joint {
+                instance: instance.into(),
+                joint: "joint".into(),
+                color: None,
+            },
+        };
+        app.world_mut()
+            .resource_mut::<ValueWrites>()
+            .0
+            .extend([write("a"), write("b")]);
+        app.world_mut()
+            .resource_mut::<ControlCommands>()
+            .0
+            .extend([add("a"), add("b")]);
+        ask(&mut app, [RobotRequest::Unload("a".into())]);
+        app.update();
+
+        let writes: Vec<_> = app
+            .world()
+            .resource::<ValueWrites>()
+            .0
+            .iter()
+            .map(|w| w.instance.clone())
+            .collect();
+        assert_eq!(writes, vec![Some("b".to_string())]);
+        let keys: Vec<_> = app
+            .world()
+            .resource::<ControlCommands>()
+            .0
+            .iter()
+            .map(|c| c.key().to_string())
+            .collect();
+        assert_eq!(keys, vec!["on-b".to_string()]);
     }
 
     /// A selection asked for after an unload of its instance is kept: it is

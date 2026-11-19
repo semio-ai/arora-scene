@@ -217,7 +217,7 @@ pub enum ControlCommand {
 
 impl Control {
     /// The instance the control is on, if it is on one.
-    fn instance(&self) -> Option<&str> {
+    pub(crate) fn instance(&self) -> Option<&str> {
         match self {
             Control::Joint { instance, .. } => Some(instance),
             Control::Transform { target, .. } => target.instance(),
@@ -226,7 +226,7 @@ impl Control {
 }
 
 impl ControlCommand {
-    fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         match self {
             Self::Add { key, .. }
             | Self::Remove { key }

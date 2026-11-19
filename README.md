@@ -113,10 +113,13 @@ which backend a page would get.
   one already showing included. `scene.robots` maps each instance to the
   robot showing in it, and `scene.loading` names the instances with a load
   under way.
-- **Calls act in the order they were made**, within a frame too: a load then
-  an unload of one instance leaves it empty, and a selection set after an
-  unload and a load is the new robot's. Unloading an instance takes its
-  selection with it.
+- **Robot calls act in the order they were made**, within a frame too:
+  `load`, `unload`, `setPose` and `setSelection`. A load then an unload of one
+  instance leaves it empty, and a selection set after an unload and a load is
+  the new robot's. Unloading an instance takes its selection with it, and the
+  value writes and control adds still waiting for it. Control commands and
+  value writes act after a frame's robot calls, whatever order they were made
+  in.
 - **Where a robot stands is the host's**: a `pose` on its load, or
   `scene.setPose(instance, pose)` later; the origin otherwise. The camera
   frames every robot present when the scene first has robots to show, and
@@ -247,11 +250,13 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   by name can find its id. `scene.robots` keeps what each event said: a
   robot's event can come before a page has set its handler. `load`'s promise
   resolves from it.
-- **`ready`**: a robot showing in its `instance` has been drawn whole: every
-  mesh of it in the camera's view with its pipeline compiled, and the GPU done
-  with that frame. It follows `loaded`, which says the robot is showing, not
-  that it has drawn: a browser can take a while compiling its pipelines. A
-  robot with nothing in view is ready at once.
+- **`ready`**: a robot showing in its `instance` has been drawn as it will
+  be: every mesh of it in the camera's view with its pipeline compiled (or
+  failed for good, which the renderer logs), and the GPU done with that
+  frame. It follows `loaded`, which says the robot is showing, not that it
+  has drawn: a browser can take a while compiling its pipelines. A robot with
+  nothing in view is ready at once. `drawn` is false when the scene gave up
+  waiting to see it drawn, after 600 frames.
 - **`loadFailed`**: a load into an `instance` that did not finish, with its
   `key` and the `error`: the GLB could not be loaded, a later load into the
   same instance replaced it, or the instance was unloaded. `load`'s promise
