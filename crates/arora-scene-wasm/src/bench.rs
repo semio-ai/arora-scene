@@ -37,7 +37,8 @@ use crate::now;
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Options {
-    /// How many copies of the robot to draw.
+    /// How many robots the page loads: the measurement starts once that many
+    /// have spawned.
     pub copies: u32,
     /// Hold the camera still instead of turning it about the robot.
     pub still: bool,

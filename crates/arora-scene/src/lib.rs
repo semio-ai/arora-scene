@@ -309,6 +309,11 @@ pub struct Census {
     triangles: usize,
     materials: usize,
     taken: bool,
+    /// Whether a host asked for this count's framing. The robots it names
+    /// were showing when it asked, so finding nothing to fit — they went, or
+    /// have no meshes — ends it, where the first framing waits for meshes
+    /// still arriving.
+    asked: bool,
     /// The most meshes any single frame passed to the renderer, as Bevy's own
     /// frustum culling judged it. This is what says the frame times were paid
     /// for a visible robot: a camera pointed at nothing culls everything and
@@ -958,6 +963,7 @@ fn frame_initial_robots(
         return;
     }
     census.taken = false;
+    census.asked = false;
     census.since = frames.elapsed;
     only.0.clear();
 }
@@ -990,6 +996,7 @@ fn frame_on_request(
         return;
     }
     census.taken = false;
+    census.asked = true;
     census.since = frames.elapsed - CENSUS_SETTLE;
     only.0 = instances;
 }
@@ -1464,15 +1471,8 @@ fn take_census(
     only: Res<FrameOnly>,
     parents: Query<&ChildOf>,
     robots: Query<&robots::RobotAsset>,
-    showing: Query<&robots::RobotAsset, Without<robots::Incoming>>,
 ) {
     if census.taken || frames.elapsed - census.since < CENSUS_SETTLE {
-        return;
-    }
-    // A framing whose robots all went before it was measured has nothing
-    // left to fit, and waiting for them would wait for good.
-    if !only.0.is_empty() && !showing.iter().any(|robot| only.0.contains(&robot.instance)) {
-        census.taken = true;
         return;
     }
     // Whether a mesh belongs to a robot the framing fits: any, unless the
@@ -1525,6 +1525,9 @@ fn take_census(
         }
     }
     if count == 0 || !min.is_finite() || !max.is_finite() {
+        if census.asked {
+            census.taken = true;
+        }
         return;
     }
     // Field by field, so the running visibility peak is not reset.
@@ -1786,6 +1789,7 @@ mod tests {
         {
             let mut census = app.world_mut().resource_mut::<Census>();
             census.taken = false;
+            census.asked = true;
             census.since = -CENSUS_SETTLE;
         }
         app.update();
