@@ -1414,6 +1414,12 @@ mod tests {
             },
         );
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
+        // Read before another update: a frame request outlives only two.
+        assert_eq!(
+            frames_asked(&mut app),
+            0,
+            "a dropped change asks for no frame"
+        );
         app.update();
         app.update();
         assert_eq!(frames_asked(&mut app), 0, "the scene can idle");
