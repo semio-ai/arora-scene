@@ -975,7 +975,9 @@ fn frame_initial_robots(
     framing: Res<Framing>,
     mut only: ResMut<FrameOnly>,
 ) {
-    if loaded.read().count() == 0 || framing.fitted {
+    // A framing the host asked for and not yet measured is the host's: a
+    // robot arriving meanwhile does not widen it to every robot.
+    if loaded.read().count() == 0 || framing.fitted || (census.asked && !census.taken) {
         return;
     }
     census.taken = false;
@@ -1912,6 +1914,28 @@ mod tests {
         let framing = app.world().resource::<Framing>();
         assert!(framing.fitted);
         assert!(framing.center.x.abs() < 1e-4, "{:?}", framing.center);
+    }
+
+    /// A framing the host asked for and not yet measured is kept when a
+    /// robot arrives meanwhile, rather than widened to every robot.
+    #[test]
+    fn an_asked_framing_outlasts_a_robot_arriving_before_it_is_measured() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Frames>()
+            .init_resource::<Census>()
+            .init_resource::<Framing>()
+            .init_resource::<FrameOnly>()
+            .add_message::<robots::RobotLoaded>()
+            .add_systems(Update, frame_initial_robots);
+        app.world_mut().resource_mut::<FrameOnly>().0 = vec!["a".into()];
+        app.world_mut().resource_mut::<Census>().asked = true;
+        app.world_mut().write_message(robots::RobotLoaded {
+            instance: "b".into(),
+        });
+        app.update();
+        assert_eq!(app.world().resource::<FrameOnly>().0, vec!["a".to_string()]);
+        assert!(app.world().resource::<Census>().asked);
     }
 
     /// What the view gizmo's request asks the controller to face, looking

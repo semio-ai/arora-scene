@@ -158,7 +158,9 @@ function Running({ robot: first }: { robot: Robot }) {
     let id: string;
     do id = `robot-${++added.current + 1}`;
     while (Object.hasOwn(robots, id));
-    const along = Object.keys(robots).length;
+    // Spaced by the same count that names it, so a robot added after one was
+    // removed does not stand where another already does.
+    const along = added.current;
     setRobots((r) => ({
       ...r,
       [id]: { ...first, pose: { position: [along, 0, 0] } },

@@ -426,12 +426,20 @@ const MOST_PASSES: usize = 8;
 /// control's first frame, however many adds a batch chains under a key.
 fn run_passes(world: &mut World) {
     for pass in 0..MOST_PASSES {
+        let before = world.resource::<ControlCommands>().0.len();
         if let Err(error) = world.run_system_cached(carry_out) {
             log::warn!("the control pass did not run: {error}");
             return;
         }
         let controls = world.resource::<Controls>();
-        let spawning = world.resource::<ControlCommands>().0.iter().any(|command| {
+        let queue = &world.resource::<ControlCommands>().0;
+        // Another pass helps only when this one took work off the queue: a
+        // sequence waiting on a robot still loading is left for a later
+        // frame, not run through every pass of this one.
+        if queue.len() >= before {
+            return;
+        }
+        let spawning = queue.iter().any(|command| {
             !matches!(command, ControlCommand::Add { .. }) && controls.0.contains_key(command.key())
         });
         if !spawning {
@@ -559,10 +567,24 @@ fn carry_out(
     // add is the control left, and a change acts on the control the add
     // makes, not the one it replaces.
     let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Keys whose add was refused this pass: the changes sent after it were
+    // for the control it would have made, and must not reach the control it
+    // would have replaced. Up to the next add or remove under the key.
+    let mut refused: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Whether to draw another frame: for a command that changed something, or
     // one waiting on a gizmo spawned at the end of this pass.
     let mut again = false;
     for command in asked {
+        match &command {
+            ControlCommand::Add { key, .. } | ControlCommand::Remove { key } => {
+                refused.remove(key);
+            }
+            change if refused.contains(change.key()) => {
+                log::debug!("{:?} was for a control not added; dropped", change.key());
+                continue;
+            }
+            _ => {}
+        }
         // A remove is not held: it cancels the waiting add and what waits
         // behind it, and takes away the control the add would have replaced.
         if held.contains(command.key()) && !matches!(command, ControlCommand::Remove { .. }) {
@@ -599,6 +621,7 @@ fn carry_out(
                     (None, Some(_)) => None,
                     (Some((name, None)), _) if !coming(name) => {
                         log::warn!("no robot {name:?}; no control added for {key:?}");
+                        refused.insert(key);
                         continue;
                     }
                     _ => {
@@ -1359,6 +1382,39 @@ mod tests {
             .map(|gizmo| (gizmo.target, gizmo.opacity, gizmo.interactive))
             .collect();
         assert_eq!(on, vec![(other, 0.25, false)]);
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// Changes sent after an add that is refused were for the control it
+    /// would have made: they are dropped, not applied to the control it
+    /// would have replaced.
+    #[test]
+    fn changes_after_a_refused_add_do_not_reach_the_control_it_would_replace() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let joint_on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        send(&mut app, joint_on(ROBOT));
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            joint_on("ghost"),
+            ControlCommand::Show {
+                key: "k".into(),
+                visible: false,
+            },
+        ]);
+        app.update();
+        let gizmo = only::<JointGizmo>(&mut app).expect("the old control stays");
+        assert_ne!(
+            app.world().get::<Visibility>(gizmo),
+            Some(&Visibility::Hidden),
+            "the show was for the refused add's control"
+        );
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
     }
 
