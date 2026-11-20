@@ -717,15 +717,16 @@ fn reading_text(reading: &arora_visuals::overlay::Reading) -> String {
     }
 }
 
-/// Asks for the robot GLB at `robot_glb`, under `assets`, to be loaded into the
-/// instance `instance`, standing at `pose`, with `select` outlined. The native
-/// host's way in; a browser host hands over bytes instead.
+/// Asks for the robot GLB at `robot_glb`, under `assets`, to be loaded into
+/// each of `instances`, each standing at its pose, with `select` outlined on
+/// every one. The native host's way in; a browser host hands over bytes
+/// instead. The GLB is read and what it declares parsed once, however many
+/// instances show it.
 pub fn load_from_file(
     app: &mut App,
     assets: &std::path::Path,
     robot_glb: &str,
-    instance: &str,
-    pose: Option<controls::Pose>,
+    instances: &[(String, Option<controls::Pose>)],
     select: Vec<arora_visuals::select::Selection>,
 ) {
     let bytes = match std::fs::read(assets.join(robot_glb)) {
@@ -735,14 +736,13 @@ pub fn load_from_file(
             return;
         }
     };
-    let mut load =
-        match robots::RobotLoad::read(instance.to_string(), None, robot_glb.to_string(), &bytes) {
-            Ok(load) => load,
-            Err(error) => {
-                log::error!("could not read what {robot_glb} declares: {error:#}");
-                return;
-            }
-        };
+    let load = match robots::RobotLoad::read(String::new(), None, robot_glb.to_string(), &bytes) {
+        Ok(load) => load,
+        Err(error) => {
+            log::error!("could not read what {robot_glb} declares: {error:#}");
+            return;
+        }
+    };
     log::info!(
         "{} declares {} elements and {} animatables",
         robot_glb,
@@ -764,16 +764,32 @@ pub fn load_from_file(
                 select.len()
             );
         }
-        app.world_mut()
-            .resource_mut::<arora_visuals::select::Selections>()
-            .0
-            .insert(instance.to_string(), select);
     }
-    load.pose = pose;
-    app.world_mut()
-        .resource_mut::<robots::RobotRequests>()
-        .robots
-        .push(robots::RobotRequest::Load(load));
+    let mut requests = app.world_mut().resource_mut::<robots::RobotRequests>();
+    queue_loads(&mut requests, &load, instances, &select);
+}
+
+/// Queues `load` into each of `instances` at its pose, each followed by its
+/// selection: behind its load, as a host's own call would be, so an unload of
+/// the instance asked for earlier does not take the selection away.
+fn queue_loads(
+    requests: &mut robots::RobotRequests,
+    load: &robots::RobotLoad,
+    instances: &[(String, Option<controls::Pose>)],
+    select: &[arora_visuals::select::Selection],
+) {
+    for (instance, pose) in instances {
+        let mut copy = load.clone();
+        copy.asset.instance = instance.clone();
+        copy.pose = *pose;
+        requests.robots.push(robots::RobotRequest::Load(copy));
+        if !select.is_empty() {
+            requests.robots.push(robots::RobotRequest::Select(
+                instance.clone(),
+                select.to_vec(),
+            ));
+        }
+    }
 }
 
 /// Builds the screen the robot declares and hands back the texture it shows.
@@ -1475,16 +1491,14 @@ fn take_census(
     if census.taken || frames.elapsed - census.since < CENSUS_SETTLE {
         return;
     }
-    // Whether a mesh belongs to a robot the framing fits: any, unless the
-    // host named which.
+    // Whether a mesh belongs to a robot the framing fits: any robot, unless
+    // the host named which. A mesh under no robot — the marker, anything a
+    // host adds — is never fitted, or the camera would frame it too.
     let framed = |mesh: Entity| {
-        if only.0.is_empty() {
-            return true;
-        }
         let mut at = mesh;
         loop {
             if let Ok(robot) = robots.get(at) {
-                return only.0.contains(&robot.instance);
+                return only.0.is_empty() || only.0.contains(&robot.instance);
             }
             match parents.get(at) {
                 Ok(parent) => at = parent.parent(),
@@ -1856,6 +1870,48 @@ mod tests {
             "{:?}",
             framing.center
         );
+    }
+
+    /// A framing fits robots only: a mesh under no robot, such as the marker,
+    /// is left out whether or not the host named robots.
+    #[test]
+    fn a_framing_leaves_out_meshes_under_no_robot() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<robots::RobotRequests>()
+            .init_resource::<Frames>()
+            .init_resource::<Census>()
+            .init_resource::<Framing>()
+            .init_resource::<FrameOnly>()
+            .add_systems(Update, take_census);
+        let root = app
+            .world_mut()
+            .spawn(robots::RobotAsset {
+                instance: "a".into(),
+                key: None,
+                glb: String::new(),
+                meta: Default::default(),
+                joints: Vec::new(),
+            })
+            .id();
+        let cube = |x: f32| {
+            (
+                Mesh3d(Handle::default()),
+                GlobalTransform::from_xyz(x, 0.0, 0.0),
+                Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)),
+            )
+        };
+        app.world_mut().spawn((cube(0.0), ChildOf(root)));
+        app.world_mut().spawn(cube(10.0));
+        {
+            let mut census = app.world_mut().resource_mut::<Census>();
+            census.since = -CENSUS_SETTLE;
+        }
+        app.update();
+        let framing = app.world().resource::<Framing>();
+        assert!(framing.fitted);
+        assert!(framing.center.x.abs() < 1e-4, "{:?}", framing.center);
     }
 
     /// What the view gizmo's request asks the controller to face, looking

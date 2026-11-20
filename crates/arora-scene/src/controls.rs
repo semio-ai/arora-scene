@@ -547,6 +547,18 @@ fn carry_out(
         );
         match command {
             ControlCommand::Add { key, control } => {
+                // A change already waiting for the gizmo of the control placed
+                // under this key acts on that control: this add waits behind
+                // it rather than replacing the control first.
+                let behind_a_change = controls.0.contains_key(&key)
+                    && waiting.iter().any(|waiting: &ControlCommand| {
+                        waiting.key() == key && !matches!(waiting, ControlCommand::Add { .. })
+                    });
+                if behind_a_change {
+                    held.insert(key.clone());
+                    waiting.push(ControlCommand::Add { key, control });
+                    continue;
+                }
                 // A control on a robot waits for it while it is loading; one
                 // on a robot nothing is loading is dropped.
                 let on = control
@@ -696,24 +708,28 @@ fn carry_out(
                 waiting.retain(|waiting| waiting.key() != key);
                 held.remove(&key);
             }
-            ControlCommand::Show { key, visible } => match controls.0.get_mut(&key) {
-                Some(placed) => {
-                    let mut gizmo = commands.entity(placed.gizmo);
-                    if visible {
-                        gizmo
-                            .remove::<HiddenByDriver>()
-                            .insert(Visibility::Inherited);
-                    } else {
-                        gizmo.insert((HiddenByDriver, Visibility::Hidden));
-                        // Hidden from now, for a change later in the batch;
-                        // the fade reads whether it shows afresh each frame.
-                        placed.shown = false;
+            ControlCommand::Show { key, visible } => {
+                let worth = worth_waiting(&key, &controls);
+                match controls.0.get_mut(&key) {
+                    Some(placed) => {
+                        let mut gizmo = commands.entity(placed.gizmo);
+                        if visible {
+                            gizmo
+                                .remove::<HiddenByDriver>()
+                                .insert(Visibility::Inherited);
+                        } else {
+                            gizmo.insert((HiddenByDriver, Visibility::Hidden));
+                            // Hidden from now, for a change later in the batch;
+                            // the fade reads whether it shows afresh each frame.
+                            placed.shown = false;
+                        }
                     }
+                    // Shown or hidden before it was added: the add is waiting
+                    // too, so this waits behind it.
+                    None if worth => waiting.push(ControlCommand::Show { key, visible }),
+                    None => log::debug!("no control {key:?} to show or hide"),
                 }
-                // Shown or hidden before it was added: the add is waiting
-                // too, so this waits behind it.
-                None => waiting.push(ControlCommand::Show { key, visible }),
-            },
+            }
             ControlCommand::SetPose { key, pose, scale } => {
                 let target = controls.0.get(&key).and_then(|p| p.target);
                 // A goal added in this pass is spawned at the end of it, so it
@@ -1234,6 +1250,56 @@ mod tests {
         );
     }
 
+    /// A change waiting for the gizmo of the control its add made acts on
+    /// that control, and a later add under the key replaces it afterwards
+    /// with nothing carried over.
+    #[test]
+    fn a_change_for_a_control_still_spawning_is_not_carried_to_its_replacement() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            on(ROBOT),
+            configure("k", None, Some(false)),
+            on("robot-1"),
+        ]);
+        app.update();
+        robot(&mut app, body);
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let on: Vec<(Entity, bool)> = gizmos
+            .iter(app.world())
+            .map(|gizmo| (gizmo.target, gizmo.interactive))
+            .collect();
+        assert_eq!(on, vec![(other, true)]);
+    }
+
+    /// A show for a key nothing has added or will add is dropped, rather than
+    /// waiting, and asking for frames, for good.
+    #[test]
+    fn a_show_for_a_key_nothing_will_add_is_dropped() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        send(
+            &mut app,
+            ControlCommand::Show {
+                key: "nobody".into(),
+                visible: false,
+            },
+        );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
     fn send(app: &mut App, command: ControlCommand) {
         app.world_mut()
             .resource_mut::<ControlCommands>()
@@ -1349,12 +1415,13 @@ mod tests {
                 visible: false,
             },
         );
-        // Neither shown on a dead entity nor applied: it waits, as for a
-        // control not yet added, until the driver adds the key again.
-        assert_eq!(
-            app.world().resource::<ControlCommands>().0.len(),
-            1,
-            "the show waits for an add"
+        // Neither shown on a dead entity nor kept: with nothing adding the key
+        // and nothing loading, it is dropped rather than asking for frames
+        // for good. A show sent before the key is added again waits for that
+        // add, as for any control not yet added.
+        assert!(
+            app.world().resource::<ControlCommands>().0.is_empty(),
+            "a show for a key nothing will add is dropped"
         );
     }
 

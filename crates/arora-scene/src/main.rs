@@ -381,21 +381,17 @@ fn main() {
     // square-ish grid spaced by roughly a robot's width. The exact spacing
     // does not matter: the camera frames every robot present at the start.
     let stride = (cli.copies as f32).sqrt().ceil().max(1.0) as u32;
-    for copy in 0..cli.copies.max(1) {
-        let (x, y) = ((copy % stride) as f32, (copy / stride) as f32);
-        let pose = arora_scene::controls::Pose {
-            position: [(x - (stride - 1) as f32 * 0.5) * 0.8, -y * 0.8, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-        };
-        arora_scene::load_from_file(
-            &mut app,
-            &assets,
-            &glb,
-            &format!("robot-{copy}"),
-            Some(pose),
-            cli.select.clone(),
-        );
-    }
+    let copies: Vec<_> = (0..cli.copies.max(1))
+        .map(|copy| {
+            let (x, y) = ((copy % stride) as f32, (copy / stride) as f32);
+            let pose = arora_scene::controls::Pose {
+                position: [(x - (stride - 1) as f32 * 0.5) * 0.8, -y * 0.8, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            };
+            (format!("robot-{copy}"), Some(pose))
+        })
+        .collect();
+    arora_scene::load_from_file(&mut app, &assets, &glb, &copies, cli.select.clone());
     if cli.screen {
         arora_scene::mount_screen(&mut app, &assets, &glb);
     }

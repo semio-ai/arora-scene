@@ -847,6 +847,33 @@ mod tests {
         assert_eq!(incoming.translation, at(3.0).to_scene().translation);
     }
 
+    /// A selection asked for with a load from a file follows the requests
+    /// before it: an unload of the instance asked for earlier does not take
+    /// it away.
+    #[test]
+    fn a_selection_loaded_with_a_robot_outlasts_an_earlier_unload() {
+        let mut app = app(take_requests);
+        ask(&mut app, [RobotRequest::Unload("a".into())]);
+        {
+            let mut requests = app.world_mut().resource_mut::<RobotRequests>();
+            crate::queue_loads(
+                &mut requests,
+                &RobotLoad {
+                    asset: asset("", "a.glb"),
+                    pose: None,
+                },
+                &[("a".to_string(), None), ("b".to_string(), None)],
+                &[arora_visuals::select::Selection::of("x")],
+            );
+        }
+        app.update();
+        let selections = app.world().resource::<Selections>();
+        assert!(selections.0.contains_key("a") && selections.0.contains_key("b"));
+        let mut loading: Vec<String> = loading(&mut app).into_iter().map(|(i, ..)| i).collect();
+        loading.sort();
+        assert_eq!(loading, vec!["a".to_string(), "b".to_string()]);
+    }
+
     /// A pose asked for with a load, before it has loaded, places it.
     #[test]
     fn a_pose_reaches_a_robot_still_loading() {
