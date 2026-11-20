@@ -164,6 +164,10 @@ fn watch_drawing(
             let _ = sender.0.send((*root, false));
         }
     }
+    // Nothing waiting on a frame drawn: no visible mesh needs looking at.
+    if watched.robots.values().all(|watch| watch.submitted) {
+        return;
+    }
     let Some(id) = watched.view else {
         return;
     };

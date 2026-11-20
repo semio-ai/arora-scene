@@ -71,11 +71,29 @@ pub struct ApplyValues;
 #[derive(Default)]
 pub struct OwnMaterials(bevy::platform::collections::HashSet<Entity>);
 
+/// The materials an instance's animatables drive, copied for that instance.
+///
+/// Copies of one GLB share its material assets, so a material write through
+/// an animatable would otherwise change every copy. Each instance gets one
+/// copy of each material its animatables write, the first time, shared by
+/// the elements of that instance that shared it: within a robot, an
+/// animatable landing on several elements still changes them together.
+#[derive(Default)]
+pub struct InstanceMaterials {
+    /// (instance root, the material it shared) → its own copy.
+    copies: bevy::platform::collections::HashMap<
+        (Entity, AssetId<StandardMaterial>),
+        Handle<StandardMaterial>,
+    >,
+    /// Every copy made, so a mesh already on one is left on it.
+    made: bevy::platform::collections::HashSet<AssetId<StandardMaterial>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
     mut applied: ResMut<AppliedValues>,
-    instances: Query<(&EntityInstance, Option<&JointRig>)>,
+    instances: Query<(Entity, &EntityInstance, Option<&JointRig>)>,
     robots: Query<&crate::robots::RobotAsset>,
     mut transforms: Query<&mut Transform>,
     mut weights: Query<&mut MorphWeights>,
@@ -84,6 +102,7 @@ pub fn apply_values(
     mut joint_gizmos: Query<&mut JointGizmo>,
     children: Query<&Children>,
     mut own: Local<OwnMaterials>,
+    mut shared: Local<InstanceMaterials>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     applied.count = 0;
@@ -96,7 +115,7 @@ pub fn apply_values(
     // the robot arrives in, rather than dropping it. A write for every
     // instance waits while there are none. A write for an instance nothing is
     // loading is dropped, as nothing will ever take it.
-    let indexed = |id: &str| instances.iter().any(|(instance, _)| instance.id == id);
+    let indexed = |id: &str| instances.iter().any(|(_, instance, _)| instance.id == id);
     let coming = |id: &str| robots.iter().any(|robot| robot.instance == id);
     let mut later = Vec::new();
     let mut now = Vec::new();
@@ -113,7 +132,7 @@ pub fn apply_values(
     let mut count = 0;
     for write in now {
         let before = count;
-        for (instance, rig) in &instances {
+        for (root, instance, rig) in &instances {
             if write.instance.as_ref().is_some_and(|id| *id != instance.id) {
                 continue;
             }
@@ -142,7 +161,33 @@ pub fn apply_values(
             let landing: Vec<SceneBinding> = match bindings.by_id.get(&write.target) {
                 // An animatable lands on every element it drives, sharing a
                 // material where they share one: that is what it declares.
-                Some(found) => found.clone(),
+                // Shared with this robot's elements only, not every copy of
+                // its GLB.
+                Some(found) => {
+                    for binding in found.iter().filter(|b| is_material(&b.feature)) {
+                        let Ok(mut handle) = material_handles.get_mut(binding.entity) else {
+                            continue;
+                        };
+                        if shared.made.contains(&handle.0.id()) {
+                            continue;
+                        }
+                        let key = (root, handle.0.id());
+                        let copy = match shared.copies.get(&key) {
+                            Some(copy) => copy.clone(),
+                            None => {
+                                let Some(material) = materials.get(&handle.0).cloned() else {
+                                    continue;
+                                };
+                                let copy = materials.add(material);
+                                shared.made.insert(copy.id());
+                                shared.copies.insert(key, copy.clone());
+                                copy
+                            }
+                        };
+                        handle.0 = copy;
+                    }
+                    found.clone()
+                }
                 None => match bindings.elements.get(&write.target) {
                     Some(element) => {
                         let Some(feature) = &write.feature else {
@@ -421,6 +466,91 @@ mod tests {
             .rotation
             .to_axis_angle()
             .1
+    }
+
+    /// A material write through an animatable changes its own robot's
+    /// material, not the one its GLB shares with another copy, and the
+    /// elements of one robot that share it still change together.
+    #[test]
+    fn a_material_write_changes_its_own_copy_of_a_glb_only() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_message::<RequestRedraw>()
+            .add_plugins(ValuesPlugin);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::BLACK,
+                ..default()
+            });
+        let mut robot = |instance: &str| {
+            let world = app.world_mut();
+            let meshes: Vec<Entity> = (0..2)
+                .map(|_| world.spawn(MeshMaterial3d(material.clone())).id())
+                .collect();
+            let mut bindings = SceneBindings::default();
+            bindings.by_id.insert(
+                "colour".into(),
+                meshes
+                    .iter()
+                    .map(|&entity| SceneBinding {
+                        entity,
+                        feature: FeatureKind::Color,
+                        axis: None,
+                        morph_index: None,
+                    })
+                    .collect(),
+            );
+            bindings.indexed = true;
+            world.spawn((
+                asset(instance),
+                EntityInstance {
+                    id: instance.into(),
+                    asset_path: String::new(),
+                    meta: Default::default(),
+                    bindings,
+                    camera: Entity::PLACEHOLDER,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ));
+            meshes
+        };
+        let a = robot("a");
+        let b = robot("b");
+        app.world_mut()
+            .resource_mut::<ValueWrites>()
+            .0
+            .push(ValueWrite {
+                instance: Some("a".into()),
+                target: "colour".into(),
+                feature: None,
+                value: Decoded::Triple([1.0, 0.0, 0.0]),
+                stamp: None,
+            });
+        app.update();
+
+        let colour = |mesh: Entity| {
+            let world = app.world();
+            let handle = &world
+                .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+                .unwrap()
+                .0;
+            let material = world
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .unwrap();
+            (handle.id(), material.base_color.to_linear().red)
+        };
+        let (a0, red_a0) = colour(a[0]);
+        let (a1, red_a1) = colour(a[1]);
+        let (b0, red_b0) = colour(b[0]);
+        assert_eq!(a0, a1, "a robot's elements still share their copy");
+        assert_ne!(a0, b0, "each robot has its own");
+        assert!((red_a0 - 1.0).abs() < 1e-5 && (red_a1 - 1.0).abs() < 1e-5);
+        assert!((red_b0 - 1.0).abs() > 1e-3, "b was not written");
     }
 
     /// A write lands on the robot it names and no other; one for a robot
