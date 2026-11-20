@@ -344,6 +344,13 @@ pub struct ControlPresses(pub Vec<ControlPress>);
 #[derive(Resource, Default)]
 pub struct Controls(HashMap<String, Placed>);
 
+impl Controls {
+    /// Whether a control is placed under `key`.
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
 struct Placed {
     gizmo: Entity,
     /// What a transform control moves; `None` for a joint control.

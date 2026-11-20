@@ -245,6 +245,7 @@ fn robot_requests(app: &mut App) {
         .init_resource::<arora_visuals::select::Selections>()
         .init_resource::<values::ValueWrites>()
         .init_resource::<controls::ControlCommands>()
+        .init_resource::<controls::Controls>()
         .add_message::<robots::RobotLoaded>()
         .add_systems(
             PreUpdate,

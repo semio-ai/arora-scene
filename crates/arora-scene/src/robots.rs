@@ -217,6 +217,7 @@ pub(crate) fn take_requests(
     mut selections: ResMut<Selections>,
     mut writes: ResMut<ValueWrites>,
     mut controls: ResMut<ControlCommands>,
+    placed: Res<crate::controls::Controls>,
 ) {
     if requests.robots.is_empty() {
         return;
@@ -244,21 +245,7 @@ pub(crate) fn take_requests(
                 {
                     writes.0.retain(|w| w.instance.as_ref() != Some(&instance));
                 }
-                // A control added on it goes, and with it the commands
-                // waiting behind the add under the same key, which would
-                // otherwise wait for a control that never comes — up to a
-                // later add under that key, which is another control's.
-                let mut dropping = std::collections::HashSet::new();
-                controls.0.retain(|command| {
-                    if let ControlCommand::Add { key, control } = command {
-                        if control.instance() == Some(instance.as_str()) {
-                            dropping.insert(key.clone());
-                        } else {
-                            dropping.remove(key);
-                        }
-                    }
-                    !dropping.contains(command.key())
-                });
+                drop_commands_for(&mut controls.0, &instance, &placed);
                 let Some(was) = held.remove(&instance) else {
                     continue;
                 };
@@ -411,6 +398,60 @@ fn failed(asset: &RobotAsset, error: &str) -> Outcome {
     }
 }
 
+/// Drops the commands that were for controls on `instance`, which is going:
+/// each control add on it, the changes it owns, and nothing else.
+///
+/// A change under a key belongs to the add it waits for when no control is
+/// placed under the key and no add came before it; otherwise it belongs to
+/// the control already there, and stays. So: the changes before a forgotten
+/// add with nothing to act on go with it, and so do those after it, up to
+/// the next add under the key, which is another control's. A remove is never
+/// dropped: it is the host taking the key away, and it ends what the
+/// forgotten add owned.
+fn drop_commands_for(
+    queue: &mut Vec<ControlCommand>,
+    instance: &str,
+    placed: &crate::controls::Controls,
+) {
+    let mut keep = vec![true; queue.len()];
+    // Per key: the changes waiting for its next add, and whether what
+    // follows belongs to a forgotten add.
+    let mut loose: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+    let mut owned: std::collections::HashSet<&str> = Default::default();
+    let mut added: std::collections::HashSet<&str> = Default::default();
+    for (at, command) in queue.iter().enumerate() {
+        let key = command.key();
+        match command {
+            ControlCommand::Add { control, .. } => {
+                let forgotten = control.instance() == Some(instance);
+                let waiting = loose.remove(key).unwrap_or_default();
+                if forgotten {
+                    keep[at] = false;
+                    for index in waiting {
+                        keep[index] = false;
+                    }
+                    owned.insert(key);
+                } else {
+                    owned.remove(key);
+                }
+                added.insert(key);
+            }
+            ControlCommand::Remove { .. } => {
+                owned.remove(key);
+                loose.remove(key);
+                added.remove(key);
+            }
+            _ if owned.contains(key) => keep[at] = false,
+            _ if !added.contains(key) && !placed.contains(key) => {
+                loose.entry(key).or_default().push(at)
+            }
+            _ => {}
+        }
+    }
+    let mut keep = keep.into_iter();
+    queue.retain(|_| keep.next().unwrap_or(true));
+}
+
 /// Despawns every gizmo whose target is among `gone`: the controls on a robot
 /// taken away go with it.
 fn despawn_gizmos_on(
@@ -460,6 +501,7 @@ mod tests {
             .init_resource::<Selections>()
             .init_resource::<ValueWrites>()
             .init_resource::<ControlCommands>()
+            .init_resource::<crate::controls::Controls>()
             .add_message::<RobotLoaded>()
             .add_systems(Update, systems);
         app
@@ -802,6 +844,58 @@ mod tests {
             .map(|c| c.key().to_string())
             .collect();
         assert_eq!(keys, vec!["on-b".to_string(), "on-a".to_string()]);
+    }
+
+    /// An unload drops the changes sent before a control add on it, as well
+    /// as those after, and keeps a remove behind the add.
+    #[test]
+    fn an_unload_drops_the_changes_before_its_add_and_keeps_a_remove() {
+        let mut app = app(take_requests);
+        let add = |key: &str, instance: &str| ControlCommand::Add {
+            key: key.into(),
+            control: crate::controls::Control::Joint {
+                instance: instance.into(),
+                joint: "joint".into(),
+                color: None,
+            },
+        };
+        let show = |key: &str| ControlCommand::Show {
+            key: key.into(),
+            visible: false,
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            show("k"),
+            add("k", "a"),
+            show("k"),
+            ControlCommand::Remove { key: "k".into() },
+            show("m"),
+            add("m", "b"),
+        ]);
+        ask(&mut app, [RobotRequest::Unload("a".into())]);
+        app.update();
+
+        let left: Vec<(String, &str)> = app
+            .world()
+            .resource::<ControlCommands>()
+            .0
+            .iter()
+            .map(|command| {
+                let kind = match command {
+                    ControlCommand::Add { .. } => "add",
+                    ControlCommand::Remove { .. } => "remove",
+                    _ => "change",
+                };
+                (command.key().to_string(), kind)
+            })
+            .collect();
+        assert_eq!(
+            left,
+            vec![
+                ("k".to_string(), "remove"),
+                ("m".to_string(), "change"),
+                ("m".to_string(), "add"),
+            ]
+        );
     }
 
     /// A selection asked for after an unload of its instance is kept: it is
