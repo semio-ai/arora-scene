@@ -307,7 +307,11 @@ function Running({ robot: first }: { robot: Robot }) {
         </button>
         <h4>Robots</h4>
         <div style={{ display: "grid", gap: 8 }}>
-          <select value={current} onChange={(e) => setCurrent(e.target.value)}>
+          <select
+            aria-label="Robot to change"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+          >
             {Object.keys(robots).map((id) => (
               <option key={id} value={id}>
                 {id}
