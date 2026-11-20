@@ -107,6 +107,22 @@ pub fn apply_values(
 ) {
     applied.count = 0;
     applied.stamps.clear();
+    // A robot unloaded or swapped out takes its copies with it: holding their
+    // handles would keep the materials, and what they reference, alive for
+    // the life of the page.
+    if !shared.copies.is_empty() {
+        let InstanceMaterials { copies, made } = &mut *shared;
+        copies.retain(|(root, _), copy| {
+            let live = instances.contains(*root);
+            if !live {
+                made.remove(&copy.id());
+            }
+            live
+        });
+    }
+    if !own.0.is_empty() {
+        own.0.retain(|mesh| material_handles.contains(*mesh));
+    }
     if writes.0.is_empty() {
         return;
     }
@@ -551,6 +567,76 @@ mod tests {
         assert_ne!(a0, b0, "each robot has its own");
         assert!((red_a0 - 1.0).abs() < 1e-5 && (red_a1 - 1.0).abs() < 1e-5);
         assert!((red_b0 - 1.0).abs() > 1e-3, "b was not written");
+    }
+
+    /// A robot that goes takes the material copies made for it, so they do
+    /// not outlive its meshes.
+    #[test]
+    fn a_robot_that_goes_takes_its_material_copies() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_message::<RequestRedraw>()
+            .add_plugins(ValuesPlugin);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let world = app.world_mut();
+        let mesh = world.spawn(MeshMaterial3d(material.clone())).id();
+        let mut bindings = SceneBindings::default();
+        bindings.by_id.insert(
+            "colour".into(),
+            vec![SceneBinding {
+                entity: mesh,
+                feature: FeatureKind::Color,
+                axis: None,
+                morph_index: None,
+            }],
+        );
+        bindings.indexed = true;
+        let root = world
+            .spawn((
+                asset("a"),
+                EntityInstance {
+                    id: "a".into(),
+                    asset_path: String::new(),
+                    meta: Default::default(),
+                    bindings,
+                    camera: Entity::PLACEHOLDER,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ))
+            .id();
+        world.resource_mut::<ValueWrites>().0.push(ValueWrite {
+            instance: Some("a".into()),
+            target: "colour".into(),
+            feature: None,
+            value: Decoded::Triple([1.0, 0.0, 0.0]),
+            stamp: None,
+        });
+        app.update();
+        let copy = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+            .unwrap()
+            .0
+            .id();
+        assert_ne!(copy, material.id(), "the write made a copy");
+
+        app.world_mut().despawn(mesh);
+        app.world_mut().despawn(root);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(copy)
+                .is_none(),
+            "the copy went with its robot"
+        );
     }
 
     /// A write lands on the robot it names and no other; one for a robot
