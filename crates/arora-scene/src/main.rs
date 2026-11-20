@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use arora_scene::stage::{Environment, Lighting, Theme};
 use arora_scene::toggles::{FrameStyle, Frames};
-use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
+use arora_scene::{SceneOptions, ScenePlugin};
 use arora_visuals::select::{Highlight, Selection};
 use arora_visuals::transform_gizmo::{GizmoSpace, TransformModes};
 use bevy::prelude::*;
@@ -343,10 +343,6 @@ fn main() {
         } else {
             GizmoSpace::World
         },
-    })
-    .insert_resource(RobotSpec {
-        glb: glb.clone(),
-        copies: cli.copies,
     });
     if let Some(colours) = cli.aurora_colours {
         app.insert_resource(arora_scene::aurora::Aurora {
@@ -381,7 +377,21 @@ fn main() {
         return;
     }
 
-    arora_scene::mount_instances(&mut app, &assets, &glb, cli.select.clone());
+    // Each copy is an instance of its own, `robot-0` upward, standing on a
+    // square-ish grid spaced by roughly a robot's width. The exact spacing
+    // does not matter: the camera frames every robot present at the start.
+    let stride = (cli.copies as f32).sqrt().ceil().max(1.0) as u32;
+    let copies: Vec<_> = (0..cli.copies.max(1))
+        .map(|copy| {
+            let (x, y) = ((copy % stride) as f32, (copy / stride) as f32);
+            let pose = arora_scene::controls::Pose {
+                position: [(x - (stride - 1) as f32 * 0.5) * 0.8, -y * 0.8, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            };
+            (format!("robot-{copy}"), Some(pose))
+        })
+        .collect();
+    arora_scene::load_from_file(&mut app, &assets, &glb, &copies, cli.select.clone());
     if cli.screen {
         arora_scene::mount_screen(&mut app, &assets, &glb);
     }

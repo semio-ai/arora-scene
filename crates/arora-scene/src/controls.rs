@@ -33,7 +33,8 @@ use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use serde::{Deserialize, Serialize};
 
-use crate::joints::{JointRig, RobotJoints};
+use crate::joints::JointRig;
+use crate::robots::RobotAsset;
 use crate::OrbitCamera;
 
 /// A pose as a driver sees it: Z up, in metres, with the rotation as a
@@ -80,12 +81,23 @@ impl Pose {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Target {
-    /// The robot as a whole.
-    Robot,
-    /// One element, by the id `RobotData` gives it.
-    Element { id: String },
-    /// A goal standing at `pose`, with nothing drawn but the control.
+    /// A robot as a whole: its root, by the host's id for its instance.
+    Robot { instance: String },
+    /// One element of a robot, by the id `RobotData` gives it.
+    Element { instance: String, id: String },
+    /// A goal standing at `pose`, in the world, with nothing drawn but the
+    /// control.
     Goal { pose: Pose },
+}
+
+impl Target {
+    /// The instance the target is on, if it is on one.
+    fn instance(&self) -> Option<&str> {
+        match self {
+            Target::Robot { instance } | Target::Element { instance, .. } => Some(instance),
+            Target::Goal { .. } => None,
+        }
+    }
 }
 
 /// What a transform control's handles can do.
@@ -101,8 +113,12 @@ pub enum Mode {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Control {
-    /// A ring or bar on the joint whose value animatable is the control's key.
+    /// A ring or bar on a robot's joint.
     Joint {
+        /// The host's id for the robot's instance.
+        instance: String,
+        /// The joint, by the animatable that drives its value.
+        joint: String,
         /// A CSS hex colour; the joint's own when absent.
         #[serde(default)]
         color: Option<String>,
@@ -120,6 +136,30 @@ pub enum Control {
         #[serde(default)]
         colors: Option<[String; 3]>,
     },
+}
+
+/// Where `entity` stands in the world as the transforms say now. Its
+/// `GlobalTransform` lags a transform written earlier in the frame — a robot
+/// a host moved this frame — until propagation in `PostUpdate`, so the chain
+/// is composed here, falling back to the propagated transform of an ancestor
+/// with none of its own.
+fn current_global(
+    mut entity: Entity,
+    transforms: &Query<&mut Transform>,
+    parents: &Query<&ChildOf>,
+    globals: &Query<&GlobalTransform>,
+) -> Option<bevy::math::Affine3A> {
+    let mut affine = bevy::math::Affine3A::IDENTITY;
+    loop {
+        let Ok(transform) = transforms.get(entity) else {
+            return globals.get(entity).ok().map(|g| g.affine() * affine);
+        };
+        affine = transform.compute_affine() * affine;
+        match parents.get(entity) {
+            Ok(parent) => entity = parent.parent(),
+            Err(_) => return Some(affine),
+        }
+    }
 }
 
 /// A CSS hex colour, or `None`, said in the log, for one that is not.
@@ -199,8 +239,18 @@ pub enum ControlCommand {
     },
 }
 
+impl Control {
+    /// The instance the control is on, if it is on one.
+    pub(crate) fn instance(&self) -> Option<&str> {
+        match self {
+            Control::Joint { instance, .. } => Some(instance),
+            Control::Transform { target, .. } => target.instance(),
+        }
+    }
+}
+
 impl ControlCommand {
-    fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         match self {
             Self::Add { key, .. }
             | Self::Remove { key }
@@ -294,6 +344,13 @@ pub struct ControlPresses(pub Vec<ControlPress>);
 #[derive(Resource, Default)]
 pub struct Controls(HashMap<String, Placed>);
 
+impl Controls {
+    /// Whether a control is placed under `key`.
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
 struct Placed {
     gizmo: Entity,
     /// What a transform control moves; `None` for a joint control.
@@ -340,11 +397,11 @@ impl Plugin for ControlsPlugin {
             .init_resource::<ControlEvents>()
             .init_resource::<ControlPresses>()
             .init_resource::<Controls>()
-            // Twice, the gizmos an add spawns being there for the second:
-            // a change sent with its control's add then takes hold the
-            // frame the control first shows, rather than one frame later,
-            // live and at full strength in between. Both before the
-            // gizmos' own drag handling, so a left press in the frame a
+            // In passes, the gizmos one pass's adds spawn being there for
+            // the next ([`run_passes`]): a change sent with its control's add
+            // then takes hold the frame the control first shows, rather than
+            // one frame later, live and at full strength in between. Before
+            // the gizmos' own drag handling, so a left press in the frame a
             // control is made inert does not take it. A press with another
             // button is reported in `PreUpdate`, before either pass, so one
             // in that frame can still reach the host: a press and a change
@@ -352,8 +409,7 @@ impl Plugin for ControlsPlugin {
             .add_systems(
                 Update,
                 (
-                    carry_out.in_set(ControlSystems::Commands),
-                    carry_out.in_set(ControlSystems::Commands),
+                    run_passes.in_set(ControlSystems::Commands),
                     fade.in_set(ControlSystems::Fade),
                 )
                     .chain()
@@ -362,6 +418,68 @@ impl Plugin for ControlsPlugin {
             .add_observer(report_transform_drag)
             .add_observer(report_joint_drag)
             .add_observer(report_press);
+    }
+}
+
+/// Refuses an add under `key`: the changes sent before it with no control
+/// placed under the key were waiting for it and go with it, and the changes
+/// after it, up to the next add or remove under the key, are dropped as they
+/// come ([`carry_out`]'s `refused`). A control already placed under the key
+/// keeps the changes sent for it.
+fn refuse(
+    key: String,
+    controls: &Controls,
+    waiting: &mut Vec<ControlCommand>,
+    refused: &mut std::collections::HashSet<String>,
+) {
+    if !controls.0.contains_key(&key) {
+        waiting.retain(|waiting| {
+            waiting.key() != key
+                || matches!(
+                    waiting,
+                    ControlCommand::Add { .. } | ControlCommand::Remove { .. }
+                )
+        });
+    }
+    refused.insert(key);
+}
+
+/// The most passes a frame runs. Each control replaced under one key in one
+/// batch takes a pass; a batch chaining more than this shows the control the
+/// last pass placed for a frame before its changes land, in order, in the
+/// next.
+const MOST_PASSES: usize = 8;
+
+/// Carries the host's commands out in passes, each applying the gizmos the
+/// last one spawned, while a change still waits for the gizmo of a control
+/// placed under its key: so every change sent with its add holds from the
+/// control's first frame, however many adds a batch chains under a key.
+fn run_passes(world: &mut World) {
+    for pass in 0..MOST_PASSES {
+        let before = world.resource::<ControlCommands>().0.len();
+        if let Err(error) = world.run_system_cached(carry_out) {
+            log::warn!("the control pass did not run: {error}");
+            return;
+        }
+        let controls = world.resource::<Controls>();
+        let queue = &world.resource::<ControlCommands>().0;
+        // Another pass helps only when this one took work off the queue: a
+        // sequence waiting on a robot still loading is left for a later
+        // frame, not run through every pass of this one.
+        if queue.len() >= before {
+            return;
+        }
+        let spawning = queue.iter().any(|command| {
+            !matches!(command, ControlCommand::Add { .. }) && controls.0.contains_key(command.key())
+        });
+        if !spawning {
+            return;
+        }
+        if pass + 1 == MOST_PASSES {
+            log::warn!(
+                "control commands still waiting after {MOST_PASSES} passes; the rest land next frame"
+            );
+        }
     }
 }
 
@@ -427,8 +545,9 @@ fn carry_out(
     mut controls: ResMut<Controls>,
     mut commands: Commands,
     cameras: Query<Entity, With<OrbitCamera>>,
-    instances: Query<(Entity, &EntityInstance, Option<&JointRig>)>,
-    joints: Option<Res<RobotJoints>>,
+    instances: Query<(Entity, &EntityInstance, Option<&JointRig>, &RobotAsset)>,
+    robots: Query<&RobotAsset>,
+    incoming: Query<(), With<crate::robots::Incoming>>,
     parents: Query<&ChildOf>,
     globals: Query<&GlobalTransform>,
     mut transforms: Query<&mut Transform>,
@@ -444,7 +563,15 @@ fn carry_out(
         return;
     }
     let camera = cameras.iter().next();
-    let robot = instances.iter().next();
+    // The robot showing in an instance, once it is indexed.
+    let robot = |name: &str| {
+        instances
+            .iter()
+            .find(|(_, instance, ..)| instance.id == name)
+    };
+    // Whether a robot is showing or loading in an instance: what a control on
+    // it waits for.
+    let coming = |name: &str| robots.iter().any(|robot| robot.instance == name);
     let asked = std::mem::take(&mut pending.0);
     // Keys an add is coming for, in this batch or waiting from an earlier one.
     let adding: std::collections::HashSet<String> = asked
@@ -455,18 +582,45 @@ fn carry_out(
         })
         .collect();
     // Whether a change for `key` should wait: for its control's gizmo, which
-    // an add spawns at the end of its pass, or for an add still to come.
-    // Anything else is for a key nothing will add, such as one whose control
-    // went with a swapped robot, and waiting would hold it, and the frames it
-    // asks for, for good.
+    // an add spawns at the end of its pass, or for an add still to come, in
+    // this batch or behind a robot still loading, as a change sent before
+    // its add is. Anything else is for a key nothing will add, such as one
+    // whose control went with a swapped robot, and waiting would hold it, and
+    // the frames it asks for, for good.
+    let loading = !incoming.is_empty();
     let worth_waiting = |key: &str, controls: &Controls| {
-        controls.0.contains_key(key) || robot.is_none() || adding.contains(key)
+        controls.0.contains_key(key) || adding.contains(key) || loading
     };
     let mut waiting = Vec::new();
+    // Keys whose add waits for its robot. Every later command under the same
+    // key waits behind it, so they land in the order they were asked: a later
+    // add is the control left, and a change acts on the control the add
+    // makes, not the one it replaces.
+    let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Keys whose add was refused this pass: the changes sent after it were
+    // for the control it would have made, and must not reach the control it
+    // would have replaced. Up to the next add or remove under the key.
+    let mut refused: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Whether to draw another frame: for a command that changed something, or
     // one waiting on a gizmo spawned at the end of this pass.
     let mut again = false;
     for command in asked {
+        match &command {
+            ControlCommand::Add { key, .. } | ControlCommand::Remove { key } => {
+                refused.remove(key);
+            }
+            change if refused.contains(change.key()) => {
+                log::debug!("{:?} was for a control not added; dropped", change.key());
+                continue;
+            }
+            _ => {}
+        }
+        // A remove is not held: it cancels the waiting add and what waits
+        // behind it, and takes away the control the add would have replaced.
+        if held.contains(command.key()) && !matches!(command, ControlCommand::Remove { .. }) {
+            waiting.push(command);
+            continue;
+        }
         again |= !matches!(
             command,
             ControlCommand::Configure { .. }
@@ -475,25 +629,63 @@ fn carry_out(
         );
         match command {
             ControlCommand::Add { key, control } => {
-                let (Some(camera), Some((root, instance, rig))) = (camera, robot) else {
+                // A change already waiting for the gizmo of the control placed
+                // under this key acts on that control: this add waits behind
+                // it rather than replacing the control first.
+                let behind_a_change = controls.0.contains_key(&key)
+                    && waiting.iter().any(|waiting: &ControlCommand| {
+                        waiting.key() == key && !matches!(waiting, ControlCommand::Add { .. })
+                    });
+                if behind_a_change {
+                    held.insert(key.clone());
                     waiting.push(ControlCommand::Add { key, control });
                     continue;
-                };
-                if let Some(old) = controls.0.remove(&key) {
-                    despawn(&mut commands, old);
                 }
+                // A control on a robot waits for it while it is loading; one
+                // on a robot nothing is loading is dropped.
+                let on = control
+                    .instance()
+                    .map(|name| (name.to_string(), robot(name)));
+                let robot = match (&on, camera) {
+                    (Some((_, Some(robot))), Some(_)) => Some(*robot),
+                    (None, Some(_)) => None,
+                    (Some((name, None)), _) if !coming(name) => {
+                        log::warn!("no robot {name:?}; no control added for {key:?}");
+                        refuse(key, &controls, &mut waiting, &mut refused);
+                        continue;
+                    }
+                    _ => {
+                        held.insert(key.clone());
+                        waiting.push(ControlCommand::Add { key, control });
+                        continue;
+                    }
+                };
+                let Some(camera) = camera else {
+                    continue;
+                };
+                // The control under this key goes only once its replacement
+                // is placed: an add refused below leaves it as it was.
                 let placed = match control {
-                    Control::Joint { color } => {
-                        let joint = joints
-                            .as_ref()
-                            .and_then(|j| j.0.iter().find(|j| j.animatable.as_ref() == Some(&key)));
-                        let binding = rig
-                            .and_then(|rig| rig.0.get(&key))
-                            .and_then(|b| b.iter().find(|b| b.mimic.is_none()).or(b.first()));
-                        let (Some(joint), Some(binding)) = (joint, binding) else {
-                            log::warn!("no joint is driven by {key:?}; no control added");
+                    Control::Joint { joint, color, .. } => {
+                        let Some((_, _, rig, asset)) = robot else {
                             continue;
                         };
+                        let declared = asset
+                            .joints
+                            .iter()
+                            .find(|j| j.animatable.as_ref() == Some(&joint));
+                        let binding = rig
+                            .and_then(|rig| rig.0.get(&joint))
+                            .and_then(|b| b.iter().find(|b| b.mimic.is_none()).or(b.first()));
+                        let (Some(declared), Some(binding)) = (declared, binding) else {
+                            log::warn!(
+                                "no joint of {} is driven by {joint:?}; no control added for {key:?}",
+                                asset.instance
+                            );
+                            refuse(key, &controls, &mut waiting, &mut refused);
+                            continue;
+                        };
+                        let joint = declared;
                         let current = transforms
                             .get(binding.body)
                             .map(|t| binding.value_of(t))
@@ -529,16 +721,23 @@ fn carry_out(
                         local,
                         colors,
                     } => {
-                        let (target, goal) = match target {
-                            Target::Robot => (root, None),
-                            Target::Element { id } => match instance.bindings.elements.get(&id) {
-                                Some(element) => (element.node, None),
-                                None => {
-                                    log::warn!("no element {id:?}; no control added for {key:?}");
-                                    continue;
+                        let (target, goal) = match (target, robot) {
+                            (Target::Robot { .. }, Some((root, ..))) => (root, None),
+                            (Target::Element { id, .. }, Some((_, instance, ..))) => {
+                                match instance.bindings.elements.get(&id) {
+                                    Some(element) => (element.node, None),
+                                    None => {
+                                        log::warn!(
+                                            "no element {id:?} on {}; no control added for {key:?}",
+                                            instance.id
+                                        );
+                                        refuse(key, &controls, &mut waiting, &mut refused);
+                                        continue;
+                                    }
                                 }
-                            },
-                            Target::Goal { pose } => {
+                            }
+                            (Target::Robot { .. } | Target::Element { .. }, None) => continue,
+                            (Target::Goal { pose }, _) => {
                                 let goal = commands
                                     .spawn((pose.to_scene(), Visibility::default()))
                                     .id();
@@ -581,7 +780,9 @@ fn carry_out(
                         }
                     }
                 };
-                controls.0.insert(key, placed);
+                if let Some(old) = controls.0.insert(key, placed) {
+                    despawn(&mut commands, old);
+                }
             }
             ControlCommand::Remove { key } => {
                 if let Some(old) = controls.0.remove(&key) {
@@ -591,33 +792,36 @@ fn carry_out(
                 // waiting goes too, or an add made before the robot arrived
                 // would bring back a control the driver has since removed.
                 waiting.retain(|waiting| waiting.key() != key);
+                held.remove(&key);
             }
-            ControlCommand::Show { key, visible } => match controls.0.get_mut(&key) {
-                Some(placed) => {
-                    let mut gizmo = commands.entity(placed.gizmo);
-                    if visible {
-                        gizmo
-                            .remove::<HiddenByDriver>()
-                            .insert(Visibility::Inherited);
-                    } else {
-                        gizmo.insert((HiddenByDriver, Visibility::Hidden));
-                        // Hidden from now, for a change later in the batch;
-                        // the fade reads whether it shows afresh each frame.
-                        placed.shown = false;
+            ControlCommand::Show { key, visible } => {
+                let worth = worth_waiting(&key, &controls);
+                match controls.0.get_mut(&key) {
+                    Some(placed) => {
+                        let mut gizmo = commands.entity(placed.gizmo);
+                        if visible {
+                            gizmo
+                                .remove::<HiddenByDriver>()
+                                .insert(Visibility::Inherited);
+                        } else {
+                            gizmo.insert((HiddenByDriver, Visibility::Hidden));
+                            // Hidden from now, for a change later in the batch;
+                            // the fade reads whether it shows afresh each frame.
+                            placed.shown = false;
+                        }
                     }
+                    // Shown or hidden before it was added: the add is waiting
+                    // too, so this waits behind it.
+                    None if worth => waiting.push(ControlCommand::Show { key, visible }),
+                    None => log::debug!("no control {key:?} to show or hide"),
                 }
-                // Shown or hidden before it was added: the add is waiting
-                // too, so this waits behind it.
-                None => waiting.push(ControlCommand::Show { key, visible }),
-            },
+            }
             ControlCommand::SetPose { key, pose, scale } => {
                 let target = controls.0.get(&key).and_then(|p| p.target);
                 // A goal added in this pass is spawned at the end of it, so it
                 // has no transform yet; the pose waits for the second pass, as
                 // one set before the add would.
-                let Some((target, mut transform)) =
-                    target.and_then(|t| transforms.get_mut(t).ok().map(|tr| (t, tr)))
-                else {
+                let Some(target) = target.filter(|t| transforms.contains(*t)) else {
                     if target.is_none() && controls.0.contains_key(&key) {
                         log::warn!("{key:?} is a joint control; write its value instead");
                     } else if worth_waiting(&key, &controls) {
@@ -631,14 +835,17 @@ fn carry_out(
                 again = true;
                 let world = pose.to_scene();
                 // The pose is in the world; the target's transform is in its
-                // parent's frame.
+                // parent's frame, as it stands now.
                 let local = match parents
                     .get(target)
                     .ok()
-                    .and_then(|p| globals.get(p.parent()).ok())
+                    .and_then(|p| current_global(p.parent(), &transforms, &parents, &globals))
                 {
-                    Some(parent) => parent.affine().inverse() * world.compute_affine(),
+                    Some(parent) => parent.inverse() * world.compute_affine(),
                     None => world.compute_affine(),
+                };
+                let Ok(mut transform) = transforms.get_mut(target) else {
+                    continue;
                 };
                 let (_, rotation, translation) = local.to_scale_rotation_translation();
                 transform.translation = translation;
@@ -889,15 +1096,29 @@ mod tests {
         }
     }
 
-    /// A scene with a camera and a body the tilt joint moves, but no robot
-    /// instance yet: `robot` adds one.
+    /// The instance the fixture's robot loads into.
+    const ROBOT: &str = "robot-0";
+
+    /// What the fixture's robot declares: the tilt joint.
+    fn asset() -> RobotAsset {
+        RobotAsset {
+            instance: ROBOT.into(),
+            key: None,
+            glb: String::new(),
+            meta: Default::default(),
+            joints: vec![tilt()],
+        }
+    }
+
+    /// A scene with a camera and a body the tilt joint moves, and a robot
+    /// loading into `robot-0` but not yet indexed: `robot` indexes it.
     fn scene() -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_message::<RequestRedraw>()
-            .add_plugins(ControlsPlugin)
-            .insert_resource(RobotJoints(vec![tilt()]));
+            .add_plugins(ControlsPlugin);
         app.world_mut().spawn(OrbitCamera);
+        app.world_mut().spawn((asset(), crate::robots::Incoming));
         let body = app.world_mut().spawn(Transform::default()).id();
         (app, body)
     }
@@ -916,10 +1137,50 @@ mod tests {
             TILT.into(),
             vec![JointBinding::new(&tilt(), body, Transform::default()).unwrap()],
         );
+        // The robot loading into `robot-0` has loaded: it is no longer
+        // incoming, and is indexed.
+        let loading = world
+            .query_filtered::<Entity, With<crate::robots::Incoming>>()
+            .single(world)
+            .unwrap();
+        world
+            .entity_mut(loading)
+            .remove::<crate::robots::Incoming>()
+            .insert((
+                rig,
+                EntityInstance {
+                    id: ROBOT.into(),
+                    asset_path: String::new(),
+                    meta: Default::default(),
+                    bindings: SceneBindings::default(),
+                    camera,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ));
+    }
+
+    /// A second robot, `robot-1`, showing and indexed, with a tilt joint of its
+    /// own moving `body`.
+    fn second_robot(app: &mut App, body: Entity) {
+        let world = app.world_mut();
+        let camera = world
+            .query_filtered::<Entity, With<OrbitCamera>>()
+            .single(world)
+            .unwrap();
+        let mut rig = JointRig::default();
+        rig.0.insert(
+            TILT.into(),
+            vec![JointBinding::new(&tilt(), body, Transform::default()).unwrap()],
+        );
         world.spawn((
             rig,
+            RobotAsset {
+                instance: "robot-1".into(),
+                ..asset()
+            },
             EntityInstance {
-                id: "robot-0".into(),
+                id: "robot-1".into(),
                 asset_path: String::new(),
                 meta: Default::default(),
                 bindings: SceneBindings::default(),
@@ -928,6 +1189,326 @@ mod tests {
                 ready: true,
             },
         ));
+    }
+
+    /// Each joint control lands on the joint of the robot it names, though
+    /// both robots' joints are driven by one animatable id; one on a robot
+    /// nothing is loading is refused rather than kept waiting.
+    #[test]
+    fn a_joint_control_lands_on_the_robot_it_names() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let joint_on = |instance: &str| Control::Joint {
+            instance: instance.into(),
+            joint: TILT.into(),
+            color: None,
+        };
+        for (key, instance) in [("first", ROBOT), ("second", "robot-1"), ("nobody", "ghost")] {
+            send(
+                &mut app,
+                ControlCommand::Add {
+                    key: key.into(),
+                    control: joint_on(instance),
+                },
+            );
+        }
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let mut on: Vec<(String, Entity)> = gizmos
+            .iter(app.world())
+            .map(|gizmo| (gizmo.key.clone(), gizmo.target))
+            .collect();
+        on.sort();
+        assert_eq!(on, vec![("first".into(), body), ("second".into(), other)]);
+        assert!(
+            app.world().resource::<ControlCommands>().0.is_empty(),
+            "nothing waits for a robot nothing is loading",
+        );
+    }
+
+    /// Of two adds under one key, the one asked for last is the control
+    /// left, even when the first waits for its robot to load; and a change
+    /// sent behind an add that waits acts on the control it makes.
+    #[test]
+    fn a_later_add_under_a_key_outlasts_one_waiting_for_its_robot() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        for instance in [ROBOT, "robot-1"] {
+            app.world_mut()
+                .resource_mut::<ControlCommands>()
+                .0
+                .push(ControlCommand::Add {
+                    key: "k".into(),
+                    control: Control::Joint {
+                        instance: instance.into(),
+                        joint: TILT.into(),
+                        color: None,
+                    },
+                });
+        }
+        app.update();
+        robot(&mut app, body);
+        app.update();
+        app.update();
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let on: Vec<Entity> = gizmos.iter(app.world()).map(|gizmo| gizmo.target).collect();
+        assert_eq!(on, vec![other]);
+    }
+
+    /// A change sent behind an add waiting for its robot acts on the
+    /// control that add makes, not the one under that key it replaces.
+    #[test]
+    fn a_change_behind_a_waiting_add_reaches_the_control_it_makes() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        send(&mut app, on("robot-1"));
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            on(ROBOT),
+            ControlCommand::Show {
+                key: "k".into(),
+                visible: false,
+            },
+        ]);
+        app.update();
+        let mut hidden = app
+            .world_mut()
+            .query_filtered::<&JointGizmo, With<HiddenByDriver>>();
+        assert_eq!(
+            hidden.iter(app.world()).count(),
+            0,
+            "the old control is left alone"
+        );
+
+        robot(&mut app, body);
+        app.update();
+        app.update();
+        let mut gizmos = app
+            .world_mut()
+            .query::<(&JointGizmo, Has<HiddenByDriver>)>();
+        let on: Vec<(Entity, bool)> = gizmos
+            .iter(app.world())
+            .map(|(gizmo, hidden)| (gizmo.target, hidden))
+            .collect();
+        assert_eq!(on, vec![(body, true)]);
+    }
+
+    /// A remove sent behind an add waiting for its robot takes the control
+    /// away at once, the one the add would have replaced included, and the
+    /// add with it.
+    #[test]
+    fn a_remove_behind_a_waiting_add_cancels_both() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        send(&mut app, on("robot-1"));
+        app.world_mut()
+            .resource_mut::<ControlCommands>()
+            .0
+            .extend([on(ROBOT), ControlCommand::Remove { key: "k".into() }]);
+        app.update();
+        assert!(only::<JointGizmo>(&mut app).is_none(), "removed at once");
+
+        robot(&mut app, body);
+        app.update();
+        app.update();
+        assert!(
+            only::<JointGizmo>(&mut app).is_none(),
+            "and not brought back"
+        );
+    }
+
+    /// A change waiting for the gizmo of the control its add made acts on
+    /// that control, and a later add under the key replaces it afterwards
+    /// with nothing carried over.
+    #[test]
+    fn a_change_for_a_control_still_spawning_is_not_carried_to_its_replacement() {
+        let (mut app, body) = scene();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            on(ROBOT),
+            configure("k", None, Some(false)),
+            on("robot-1"),
+        ]);
+        app.update();
+        robot(&mut app, body);
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let on: Vec<(Entity, bool)> = gizmos
+            .iter(app.world())
+            .map(|gizmo| (gizmo.target, gizmo.interactive))
+            .collect();
+        assert_eq!(on, vec![(other, true)]);
+    }
+
+    /// A show for a key nothing has added or will add is dropped, rather than
+    /// waiting, and asking for frames, for good.
+    #[test]
+    fn a_show_for_a_key_nothing_will_add_is_dropped() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        send(
+            &mut app,
+            ControlCommand::Show {
+                key: "nobody".into(),
+                visible: false,
+            },
+        );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// Every change sent with its add holds from the control's first frame,
+    /// however many adds the batch chains under one key.
+    #[test]
+    fn a_change_holds_from_the_first_frame_through_chained_replacements() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            on(ROBOT),
+            configure("k", Some(0.5), None),
+            on("robot-1"),
+            configure("k", Some(0.25), Some(false)),
+        ]);
+        app.update();
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let on: Vec<(Entity, f32, bool)> = gizmos
+            .iter(app.world())
+            .map(|gizmo| (gizmo.target, gizmo.opacity, gizmo.interactive))
+            .collect();
+        assert_eq!(on, vec![(other, 0.25, false)]);
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// Changes sent after an add that is refused were for the control it
+    /// would have made: they are dropped, not applied to the control it
+    /// would have replaced.
+    #[test]
+    fn changes_after_a_refused_add_do_not_reach_the_control_it_would_replace() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let joint_on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        send(&mut app, joint_on(ROBOT));
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            joint_on("ghost"),
+            ControlCommand::Show {
+                key: "k".into(),
+                visible: false,
+            },
+        ]);
+        app.update();
+        let gizmo = only::<JointGizmo>(&mut app).expect("the old control stays");
+        assert_ne!(
+            app.world().get::<Visibility>(gizmo),
+            Some(&Visibility::Hidden),
+            "the show was for the refused add's control"
+        );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// Changes sent before an add that is refused were waiting for it: they
+    /// go with it, rather than landing on a later add under the key.
+    #[test]
+    fn changes_waiting_for_a_refused_add_do_not_reach_a_later_one() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let joint_on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            ControlCommand::Show {
+                key: "k".into(),
+                visible: false,
+            },
+            joint_on("ghost"),
+        ]);
+        app.update();
+        send(&mut app, joint_on(ROBOT));
+        let gizmo = only::<JointGizmo>(&mut app).expect("the later add is placed");
+        assert_ne!(
+            app.world().get::<Visibility>(gizmo),
+            Some(&Visibility::Hidden),
+            "the show was for the refused add"
+        );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// An add refused for a joint the robot does not have leaves the control
+    /// under its key as it was, with the changes sent for it, and takes the
+    /// changes sent for itself.
+    #[test]
+    fn an_add_refused_for_an_unknown_joint_leaves_the_control_it_would_replace() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let joint = |name: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: ROBOT.into(),
+                joint: name.into(),
+                color: None,
+            },
+        };
+        send(&mut app, joint(TILT));
+        let before = only::<JointGizmo>(&mut app).expect("placed");
+        app.world_mut()
+            .resource_mut::<ControlCommands>()
+            .0
+            .extend([joint("no-such-joint"), configure("k", None, Some(false))]);
+        app.update();
+        let after = only::<JointGizmo>(&mut app).expect("the old control stays");
+        assert_eq!(after, before);
+        assert!(app.world().get::<JointGizmo>(after).unwrap().interactive);
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
     }
 
     fn send(app: &mut App, command: ControlCommand) {
@@ -960,7 +1541,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).expect("a joint control");
@@ -992,7 +1577,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         send(
@@ -1020,7 +1609,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).unwrap();
@@ -1033,12 +1626,13 @@ mod tests {
                 visible: false,
             },
         );
-        // Neither shown on a dead entity nor applied: it waits, as for a
-        // control not yet added, until the driver adds the key again.
-        assert_eq!(
-            app.world().resource::<ControlCommands>().0.len(),
-            1,
-            "the show waits for an add"
+        // Neither shown on a dead entity nor kept: with nothing adding the key
+        // and nothing loading, it is dropped rather than asking for frames
+        // for good. A show sent before the key is added again waits for that
+        // add, as for any control not yet added.
+        assert!(
+            app.world().resource::<ControlCommands>().0.is_empty(),
+            "a show for a key nothing will add is dropped"
         );
     }
 
@@ -1098,6 +1692,50 @@ mod tests {
         assert!(app.world().get_entity(goal).is_err());
     }
 
+    /// A parent moved this frame is read where it now stands, not where it
+    /// was last propagated.
+    #[test]
+    fn a_parent_moved_this_frame_is_read_where_it_now_stands() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let grand = world
+            .spawn((
+                Transform::from_xyz(10.0, 0.0, 0.0),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+        let parent = world
+            .spawn((
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                GlobalTransform::IDENTITY,
+                ChildOf(grand),
+            ))
+            .id();
+        let at = world
+            .run_system_once(
+                move |transforms: Query<&mut Transform>,
+                      parents: Query<&ChildOf>,
+                      globals: Query<&GlobalTransform>| {
+                    current_global(parent, &transforms, &parents, &globals)
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(Vec3::from(at.translation).abs_diff_eq(Vec3::new(10.0, 1.0, 0.0), 1e-6));
+    }
+
+    /// A transform control on the fixture's robot as a whole.
+    fn on_robot() -> Control {
+        Control::Transform {
+            target: Target::Robot {
+                instance: ROBOT.into(),
+            },
+            modes: None,
+            local: false,
+            colors: None,
+        }
+    }
+
     fn goal_at(position: [f32; 3]) -> Control {
         Control::Transform {
             target: Target::Goal {
@@ -1147,7 +1785,11 @@ mod tests {
         app.world_mut().resource_mut::<ControlCommands>().0.extend([
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
             ControlCommand::Show {
                 key: TILT.into(),
@@ -1170,7 +1812,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let gizmo = only::<JointGizmo>(&mut app).unwrap();
@@ -1257,6 +1903,8 @@ mod tests {
             ControlCommand::Add {
                 key: TILT.into(),
                 control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
                     color: Some(hex("#ff0000")),
                 },
             },
@@ -1316,7 +1964,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         send(
@@ -1440,7 +2092,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         app.update();
@@ -1576,7 +2232,11 @@ mod tests {
             });
             asked.0.push(ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             });
             for key in ["goal", TILT] {
                 asked.0.push(configure(key, Some(0.25), Some(false)));
@@ -1695,7 +2355,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let joint = only::<JointGizmo>(&mut app).unwrap();
@@ -1723,7 +2387,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let joint = only::<JointGizmo>(&mut app).unwrap();
@@ -1749,10 +2417,10 @@ mod tests {
         {
             let mut asked = app.world_mut().resource_mut::<ControlCommands>();
             asked.0.push(ControlCommand::Add {
-                key: "goal".into(),
-                control: goal_at([0.0, 0.0, 1.0]),
+                key: "whole".into(),
+                control: on_robot(),
             });
-            asked.0.push(configure("goal", Some(0.25), Some(false)));
+            asked.0.push(configure("whole", Some(0.25), Some(false)));
         }
         app.update();
         assert!(only::<TransformGizmo>(&mut app).is_none(), "no robot yet");
@@ -1858,7 +2526,11 @@ mod tests {
             &mut app,
             ControlCommand::Add {
                 key: TILT.into(),
-                control: Control::Joint { color: None },
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                },
             },
         );
         let joint = only::<JointGizmo>(&mut app).unwrap();
@@ -1928,9 +2600,13 @@ mod tests {
         let read =
             |json: serde_json::Value| -> ControlCommand { serde_json::from_value(json).unwrap() };
         assert!(matches!(
-            read(serde_json::json!({ "op": "add", "key": "k", "control": { "kind": "joint" } })),
+            read(serde_json::json!({
+                "op": "add",
+                "key": "k",
+                "control": { "kind": "joint", "instance": "arm", "joint": "tilt" },
+            })),
             ControlCommand::Add {
-                control: Control::Joint { color: None },
+                control: Control::Joint { color: None, .. },
                 ..
             }
         ));

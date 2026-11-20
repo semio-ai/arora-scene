@@ -1,21 +1,31 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
-import { showScene, unmountScene, type SceneHandle } from "./load";
-import type { Backend, SceneEvent, SceneOptions } from "./types";
+import { mountScene, unmountScene, type SceneHandle } from "./load";
+import type { Backend, Pose, SceneEvent, SceneOptions } from "./types";
 
-export interface SceneProps {
+/** A robot `<Scene>` shows in one instance. */
+export interface SceneRobot {
   /** The robot's GLB. */
   glb: Uint8Array;
   /**
    * Names the model in `glb`: Studio's asset id, a content hash, any string
-   * kept stable for the same model. A different key swaps the robot in the
-   * running scene once it has loaded; the old robot's joint and element
-   * controls go with it. A new `glb` under the same key changes nothing, so
-   * change the two together: a key changed ahead of its bytes swaps in the
-   * old bytes under it. A robot that cannot be loaded reaches `onError`, the
-   * old robot kept.
+   * kept stable for the same model. A different key swaps the robot in its
+   * instance once it has loaded; the old robot's joint and element controls
+   * go with it. A new `glb` under the same key changes nothing, so change the
+   * two together.
    */
-  robotKey: string;
+  key: string;
+  /** Where it stands when it loads, Z up, in metres; the origin if absent. */
+  pose?: Pose;
+}
+
+export interface SceneProps {
+  /**
+   * The robots to show, by the host's own id for each instance. An id added
+   * loads its robot; an id gone unloads it. A robot that cannot be loaded
+   * reaches `onError`, whatever its instance showed before kept.
+   */
+  robots?: Record<string, SceneRobot>;
   /** How the scene starts. Read once, when the page's scene starts. */
   options?: SceneOptions;
   /** Force a backend instead of choosing by what the browser supports. */
@@ -37,8 +47,7 @@ export interface SceneProps {
  * `<Scene>` at a time; a second takes the scene from the first.
  */
 export function Scene({
-  glb,
-  robotKey,
+  robots,
   options,
   backend,
   onReady,
@@ -51,16 +60,13 @@ export function Scene({
   const [scene, setScene] = useState<SceneHandle>();
 
   // Read at mount: a running scene does not restart for new props.
-  const first = useRef({ glb, robotKey, options, backend, onReady, onError });
+  const first = useRef({ options, backend, onReady, onError });
   useEffect(() => {
     const el = container.current;
     if (!el) return;
-    const { glb, robotKey, options, backend, onReady, onError } = first.current;
+    const { options, backend, onReady, onError } = first.current;
     let shown = true;
-    // Shown with the robot it already has: a different `robotKey` is swapped
-    // in below, where a robot that fails to load reaches `onError` and the
-    // scene, still showing the old robot, stays drivable.
-    showScene(el, glb, robotKey, { ...options, backend }).then(
+    mountScene(el, { ...options, backend }).then(
       (handle) => {
         if (!shown) return;
         setScene(handle);
@@ -81,24 +87,37 @@ export function Scene({
     container.current !== null &&
     handle.canvas.parentElement === container.current;
 
-  // Each key this `<Scene>` is given is asked for once, the first included:
-  // `loadRobot` itself leaves alone a key that is showing or loading, so the
-  // first ask joins the robot the scene started with, and a `<Scene>` mounted
-  // over a running scene swaps its own robot in. A key other than the one
-  // last asked for swaps its robot in, including the robot showing when
-  // another is still loading, which it then replaces. A robot that cannot be
-  // read or loaded reaches `onError`, the old one kept; the same key is not
-  // tried again.
-  const asked = useRef<string>(undefined);
+  // Each instance's key is asked for once: `load` itself leaves alone a key
+  // that is showing or loading in its instance. An instance this `<Scene>`
+  // asked for that is no longer in `robots` is unloaded, and so, given
+  // `robots`, is one showing or loading that it does not name: the scene
+  // outlives a `<Scene>`, so a later one finds the robots an earlier one
+  // left. A robot that cannot
+  // be read or loaded reaches `onError`, the instance's old robot kept; the
+  // same key is not tried again.
+  const asked = useRef(new Map<string, string>());
   useEffect(() => {
-    if (!scene || robotKey === asked.current || !owns(scene)) return;
-    asked.current = robotKey;
-    scene
-      .loadRobot(glb, robotKey)
-      .catch((error: unknown) =>
-        onError ? onError(error) : console.error(error),
-      );
-  }, [scene, glb, robotKey, onError]);
+    if (!scene || !owns(scene)) return;
+    const wanted = robots ?? {};
+    for (const [id, robot] of Object.entries(wanted)) {
+      if (asked.current.get(id) === robot.key) continue;
+      asked.current.set(id, robot.key);
+      scene
+        .load(id, robot.glb, { key: robot.key, pose: robot.pose })
+        .catch((error: unknown) =>
+          onError ? onError(error) : console.error(error),
+        );
+    }
+    const stale = new Set(asked.current.keys());
+    if (robots)
+      for (const id of [...scene.robots.keys(), ...scene.loading])
+        stale.add(id);
+    for (const id of stale) {
+      if (Object.hasOwn(wanted, id)) continue;
+      asked.current.delete(id);
+      scene.unload(id);
+    }
+  }, [scene, robots, onError]);
 
   // Events go to the `<Scene>` showing the scene, and only while it does: a
   // parked scene, or one another `<Scene>` has taken, must not call into this

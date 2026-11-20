@@ -15,9 +15,10 @@
 //! - **anything appeared or was restyled**: a mesh added, a mesh or material
 //!   or image asset added or changed, a visibility toggled (by value, as
 //!   transforms are), a selection or stage choice changed;
-//! - **work is still owed**: the camera has not been framed yet, a robot has
-//!   not spawned, or a pipeline is still compiling — each of which only
-//!   finishes on a later frame;
+//! - **work is still owed**: the robots have not been measured for the first
+//!   framing or one asked for, a robot has not spawned or not yet
+//!   been reported drawn, or a pipeline is still compiling — each of which
+//!   only finishes on a later frame;
 //! - **something animates by itself**: the aurora's light changes every frame
 //!   in its shader, so while a curtain is in view the scene ticks at
 //!   [`Redraw::aurora_hz`] rather than at the display's rate.
@@ -38,7 +39,7 @@ use bevy::winit::{UpdateMode, WinitSettings};
 
 use crate::aurora::AuroraCurtain;
 use crate::stage::{Palette, Stage};
-use crate::{Framing, Glide};
+use crate::Glide;
 
 /// How the scene redraws when it is not changing.
 #[derive(Resource, Clone, Copy, Debug)]
@@ -83,15 +84,32 @@ impl Plugin for RedrawOnChangePlugin {
 }
 
 fn note_pipelines(cache: Res<PipelineCache>, pending: Res<PipelinesPending>) {
-    pending
-        .0
-        .store(cache.waiting_pipelines().next().is_some(), Ordering::Relaxed);
+    pending.0.store(
+        cache.waiting_pipelines().next().is_some(),
+        Ordering::Relaxed,
+    );
 }
 
 /// What says another frame is owed.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Owed<'w, 's> {
-    framing: Res<'w, Framing>,
+    census: Res<'w, crate::Census>,
+    /// Robots not yet reported drawn: the report reaches the main world only
+    /// on a frame after the GPU finishes, so one is owed until it has.
+    drawing: Query<'w, 's, (), With<crate::ready::Drawing>>,
+    /// Every robot, loading or showing: an empty scene has nothing to frame,
+    /// so its unframed camera owes nothing.
+    robots: Query<'w, 's, (), With<crate::robots::RobotAsset>>,
+    /// Active areas, with where each stands as it eases: one still on its way,
+    /// or newly set, moves the view.
+    areas: Query<
+        'w,
+        's,
+        (
+            Ref<'static, arora_visuals::active_area::ActiveArea>,
+            Option<&'static arora_visuals::active_area::ActiveAreaShown>,
+        ),
+    >,
     pending: Res<'w, PipelinesPending>,
     glides: Query<'w, 's, (), With<Glide>>,
     moved: Query<'w, 's, (Entity, &'static GlobalTransform), Changed<GlobalTransform>>,
@@ -139,11 +157,20 @@ impl Owed<'_, '_> {
         let moved = self.moved_any();
         let shown = self.shown_any();
         // Every reader is drained, so a change is seen once.
-        let assets = self.meshes.read().count() + self.materials.read().count()
-            + self.images.read().count()
-            > 0;
+        let assets =
+            self.meshes.read().count() + self.materials.read().count() + self.images.read().count()
+                > 0;
+        let easing = self
+            .areas
+            .iter()
+            .any(|(area, shown)| area.is_changed() || shown.is_none_or(|shown| shown.0 != area.0));
         assets
-            || !self.framing.fitted
+            || easing
+            // Owed until the census is taken: a census that found nothing
+            // to fit leaves the camera unfitted, and waiting on it would
+            // never end.
+            || (!self.census.taken && !self.robots.is_empty())
+            || !self.drawing.is_empty()
             || self.pending.0.load(Ordering::Relaxed)
             || !self.glides.is_empty()
             || moved

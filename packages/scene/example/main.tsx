@@ -14,6 +14,7 @@ import {
   type OverlayFrame,
   type SceneEvent,
   type SceneHandle,
+  type SceneRobot,
 } from "../src";
 
 /** A robot's bytes and the key that names the model. */
@@ -29,9 +30,9 @@ function backendParam(): Backend | undefined {
 }
 
 /**
- * A page for driving the scene by hand: load a robot, write values to it, and
- * watch what it reports. Open it with `?glb=<url>` to load a robot from a
- * URL, or choose a file.
+ * A page for driving the scene by hand: load robots, write values to them,
+ * and watch what they report. Open it with `?glb=<url>` to load a robot from
+ * a URL, or choose a file.
  */
 function Example() {
   const [robot, setRobot] = useState<Robot>();
@@ -76,10 +77,21 @@ function Example() {
   return <Running robot={robot} />;
 }
 
+/** A joint control the page added: which joint of which robot it drives. */
+interface JointControl {
+  instance: string;
+  joint: string;
+}
+
 function Running({ robot: first }: { robot: Robot }) {
-  // A robot under a different key here swaps it in the running scene.
-  const [robot, setRobot] = useState(first);
-  const [joints, setJoints] = useState<Joint[]>([]);
+  // The robots shown, by the page's own id for each instance. A robot under a
+  // different key in an instance swaps it; an id gone unloads it.
+  const [robots, setRobots] = useState<Record<string, SceneRobot>>({
+    "robot-1": first,
+  });
+  // The instance the forms below act on.
+  const [current, setCurrent] = useState("robot-1");
+  const [joints, setJoints] = useState<Record<string, Joint[]>>({});
   const [pose, setPose] = useState<string>();
   const [scene, setScene] = useState<SceneHandle>();
   const [overlay, setOverlay] = useState<OverlayFrame>();
@@ -88,39 +100,42 @@ function Running({ robot: first }: { robot: Robot }) {
   const [shown, setShown] = useState(true);
 
   // This page plays the driver: a drag moves nothing until the driver writes
-  // it back, which it does here unless told not to.
+  // it back, which it does here unless told not to. A joint control's drag
+  // names its key, so the driver keeps which joint each key drives.
   const sceneRef = useRef<SceneHandle>(undefined);
   const writeBack = useRef(true);
+  const jointControls = useRef(new Map<string, JointControl>());
   const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
 
   const onEvent = useCallback((event: SceneEvent) => {
     if (event.type === "overlay") return setOverlay(event);
     if (event.type === "pick")
       return note(`pick ${event.instance} ${event.element ?? "(no element)"}`);
-    if (event.type === "robot") {
-      if (event.joints) setJoints(event.joints);
-      return note(
-        event.error
-          ? `robot ${event.key} refused: ${event.error}`
-          : `robot ${event.key} showing`,
-      );
+    if (event.type === "loaded") {
+      setJoints((j) => ({ ...j, [event.instance]: event.joints }));
+      return note(`${event.instance} shows ${event.key ?? "a robot"}`);
     }
+    if (event.type === "ready") return note(`${event.instance} drawn`);
+    if (event.type === "loadFailed")
+      return note(`${event.instance} refused ${event.key}: ${event.error}`);
     if (event.type === "controlPress")
       return note(
-        `${event.button} press on ${event.key.slice(0, 8)} ${JSON.stringify(
+        `${event.button} press on ${event.key} ${JSON.stringify(
           event.handle,
         )} at ${event.position.map((v) => Math.round(v)).join(",")}`,
       );
     const scene = sceneRef.current;
     if (event.phase !== "move")
       note(
-        `${event.phase} ${event.key.slice(0, 8)} ${
+        `${event.phase} ${event.key} ${
           event.value?.toFixed(3) ??
           event.pose?.position.map((v) => v.toFixed(2)).join(" ")
         }`,
       );
     if (!scene || !writeBack.current) return;
-    if (event.value !== undefined) scene.setValue(event.key, event.value);
+    const joint = jointControls.current.get(event.key);
+    if (event.value !== undefined && joint)
+      scene.setValue(joint.instance, joint.joint, event.value);
     if (event.pose)
       scene.control({
         op: "setPose",
@@ -135,6 +150,36 @@ function Running({ robot: first }: { robot: Robot }) {
     setScene(handle);
   };
 
+  // Another robot like the first, a metre along from the last one, under an
+  // id not in use: counting the robots would name one still there once an
+  // earlier one is removed.
+  const added = useRef(0);
+  const addRobot = () => {
+    let id: string;
+    do id = `robot-${++added.current + 1}`;
+    while (Object.hasOwn(robots, id));
+    // Spaced by the same count that names it, so a robot added after one was
+    // removed does not stand where another already does.
+    const along = added.current;
+    setRobots((r) => ({
+      ...r,
+      [id]: { ...first, pose: { position: [along, 0, 0] } },
+    }));
+    setCurrent(id);
+  };
+
+  // Changes the robot in the current instance, if there is one.
+  const change = (to: (robot: SceneRobot) => SceneRobot) =>
+    setRobots((r) => {
+      const robot = r[current];
+      return robot ? { ...r, [current]: to(robot) } : r;
+    });
+
+  const removeRobot = () => {
+    setRobots(({ [current]: _, ...rest }) => rest);
+    setCurrent(Object.keys(robots).find((id) => id !== current) ?? "");
+  };
+
   const write = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const form = new FormData(e.currentTarget);
@@ -147,7 +192,12 @@ function Running({ robot: first }: { robot: Robot }) {
     if (!scene || value === undefined) return;
     try {
       const feature = String(form.get("feature"));
-      scene.setValue(String(form.get("target")), value, feature || undefined);
+      scene.setValue(
+        current,
+        String(form.get("target")),
+        value,
+        feature || undefined,
+      );
     } catch (err) {
       note(`error ${String(err)}`);
     }
@@ -157,11 +207,28 @@ function Running({ robot: first }: { robot: Robot }) {
     e.preventDefault();
     const submitter = (e.nativeEvent as SubmitEvent).submitter as
       HTMLButtonElement | undefined;
-    const key = String(new FormData(e.currentTarget).get("key"));
+    const form = new FormData(e.currentTarget);
+    const key = String(form.get("key"));
     if (!scene || !key) return;
     switch (submitter?.value) {
-      case "joint":
-        return scene.control({ op: "add", key, control: { kind: "joint" } });
+      case "joint": {
+        const joint = String(form.get("joint"));
+        jointControls.current.set(key, { instance: current, joint });
+        return scene.control({
+          op: "add",
+          key,
+          control: { kind: "joint", instance: current, joint },
+        });
+      }
+      case "robot":
+        return scene.control({
+          op: "add",
+          key,
+          control: {
+            kind: "transform",
+            target: { kind: "robot", instance: current },
+          },
+        });
       case "goal":
         return scene.control({
           op: "add",
@@ -172,6 +239,7 @@ function Running({ robot: first }: { robot: Robot }) {
           },
         });
       case "remove":
+        jointControls.current.delete(key);
         return scene.control({ op: "remove", key });
       case "highlight":
       case "unhighlight":
@@ -213,14 +281,13 @@ function Running({ robot: first }: { robot: Robot }) {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "1fr 280px",
+        gridTemplateColumns: "1fr 300px",
         height: "100%",
       }}
     >
       {shown ? (
         <Scene
-          glb={robot.glb}
-          robotKey={robot.key}
+          robots={robots}
           backend={backendParam()}
           options={{ environment: "sky" }}
           onReady={ready}
@@ -238,6 +305,67 @@ function Running({ robot: first }: { robot: Robot }) {
         <button type="button" onClick={() => setShown((s) => !s)}>
           {shown ? "Unmount the scene" : "Mount the scene"}
         </button>
+        <h4>Robots</h4>
+        <div style={{ display: "grid", gap: 8 }}>
+          <select
+            aria-label="Robot to change"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+          >
+            {Object.keys(robots).map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" disabled={!scene} onClick={addRobot}>
+              Add another
+            </button>
+            <button
+              type="button"
+              disabled={!scene || !current}
+              onClick={removeRobot}
+            >
+              Remove this one
+            </button>
+            <button
+              type="button"
+              disabled={!scene || !current}
+              onClick={() =>
+                change((robot) => ({ ...robot, key: `${robot.key}+` }))
+              }
+            >
+              Swap it, under a new key
+            </button>
+          </div>
+          <input
+            type="file"
+            accept=".glb,model/gltf-binary"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const glb = new Uint8Array(await file.arrayBuffer());
+              const key = `${file.name} ${file.size} ${file.lastModified}`;
+              change((robot) => ({ ...robot, glb, key }));
+            }}
+          />
+          <button
+            type="button"
+            disabled={!scene || !current}
+            onClick={() =>
+              scene?.setSelection(
+                current,
+                (scene.robots.get(current)?.elements ?? [])
+                  .slice(0, 1)
+                  .map((e) => e.id),
+              )
+            }
+          >
+            Select its first element
+          </button>
+        </div>
+        <h4>Values</h4>
         <form onSubmit={write} style={{ display: "grid", gap: 8 }}>
           <input
             name="target"
@@ -250,64 +378,24 @@ function Running({ robot: first }: { robot: Robot }) {
             Write value
           </button>
         </form>
-        <h4>Robot</h4>
-        <div style={{ display: "grid", gap: 8 }}>
-          <input
-            type="file"
-            accept=".glb,model/gltf-binary"
-            onChange={async (e) => {
-              const file = e.target.files?.[0];
-              if (file)
-                setRobot({
-                  glb: new Uint8Array(await file.arrayBuffer()),
-                  key: `${file.name} ${file.size} ${file.lastModified}`,
-                });
-            }}
-          />
-          <button
-            type="button"
-            disabled={!scene}
-            onClick={() =>
-              setRobot((r) => ({ glb: r.glb, key: `${r.key} (again)` }))
-            }
-          >
-            Load this robot again, under a new key
-          </button>
-          <form
-            style={{ display: "flex", gap: 8 }}
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const url = String(new FormData(e.currentTarget).get("url"));
-              const response = await fetch(url);
-              if (!response.ok) return note(`${url}: ${response.status}`);
-              setRobot({
-                glb: new Uint8Array(await response.arrayBuffer()),
-                key: url,
-              });
-            }}
-          >
-            <input name="url" placeholder="robot URL" required />
-            <button type="submit" disabled={!scene}>
-              Load
-            </button>
-          </form>
-        </div>
         <h4>Controls</h4>
         <form onSubmit={addControl} style={{ display: "grid", gap: 8 }}>
-          <input
-            name="key"
-            placeholder="joint value animatable, or any key"
-            required
-          />
-          <button type="submit" value="joint" disabled={!scene}>
-            Add a joint control
-          </button>
-          <button type="submit" value="goal" disabled={!scene}>
-            Add a goal
-          </button>
-          <button type="submit" value="remove" disabled={!scene}>
-            Remove
-          </button>
+          <input name="key" placeholder="the control's key" required />
+          <input name="joint" placeholder="joint value animatable" />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="submit" value="joint" disabled={!scene}>
+              Joint control
+            </button>
+            <button type="submit" value="robot" disabled={!scene}>
+              Move the robot
+            </button>
+            <button type="submit" value="goal" disabled={!scene}>
+              Goal
+            </button>
+            <button type="submit" value="remove" disabled={!scene}>
+              Remove
+            </button>
+          </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button type="submit" value="highlight" disabled={!scene}>
               Highlight
@@ -340,9 +428,9 @@ function Running({ robot: first }: { robot: Robot }) {
             Write drags back, as a driver would
           </label>
         </form>
-        <h4>Joints</h4>
+        <h4>Joints of {current}</h4>
         <ul style={{ paddingLeft: 16 }}>
-          {joints.map((joint) => (
+          {(joints[current] ?? []).map((joint) => (
             <li key={joint.name}>
               {joint.name} ({joint.kind})
               {joint.animatable && <code> {joint.animatable.slice(0, 8)}</code>}
@@ -357,7 +445,7 @@ function Running({ robot: first }: { robot: Robot }) {
             const element = String(
               new FormData(e.currentTarget).get("element"),
             );
-            const found = scene?.elementPose(element);
+            const found = scene?.elementPose(current, element);
             setPose(found ? JSON.stringify(found) : "no such element");
           }}
         >
