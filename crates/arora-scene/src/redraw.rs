@@ -38,7 +38,7 @@ use bevy::window::RequestRedraw;
 use bevy::winit::{UpdateMode, WinitSettings};
 
 use crate::aurora::AuroraCurtain;
-use crate::stage::{Palette, Stage};
+use crate::stage::{BelowFloor, Palette, Stage};
 use crate::Glide;
 
 /// How the scene redraws when it is not changing.
@@ -122,6 +122,7 @@ struct Owed<'w, 's> {
     unspawned: Query<'w, 's, (), (With<WorldAssetRoot>, Without<Children>)>,
     stage: Res<'w, Stage>,
     palette: Res<'w, Palette>,
+    below: Res<'w, BelowFloor>,
     selections: Res<'w, arora_visuals::select::Selections>,
     meshes: MessageReader<'w, 's, AssetEvent<Mesh>>,
     materials: MessageReader<'w, 's, AssetEvent<StandardMaterial>>,
@@ -179,6 +180,7 @@ impl Owed<'_, '_> {
             || !self.unspawned.is_empty()
             || self.stage.is_changed()
             || self.palette.is_changed()
+            || self.below.is_changed()
             || self.selections.is_changed()
     }
 }

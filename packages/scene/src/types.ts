@@ -26,6 +26,24 @@ export interface SceneOptions {
   pitch?: number;
   /** The camera's starting yaw about the model, in radians. */
   angle?: number;
+  /** Show what sinks below the floor through it. Not shown when absent. */
+  belowFloor?: BelowFloorOptions;
+}
+
+/**
+ * How the floor shows what has sunk below it: tinted and seen through the
+ * floor, with a solid line where it crosses the floor. On the WebGL 2 backend
+ * the floor cannot find what is below it, and is instead half see-through
+ * while this is on.
+ */
+export interface BelowFloorOptions {
+  /** A CSS hex colour (`"#ff4d2e"`, the default). */
+  color?: string;
+  /**
+   * How far below the floor, in metres, a surface may go before it is shown,
+   * so a foot standing on the floor is not: 0.005 when absent.
+   */
+  tolerance?: number;
 }
 
 /**
