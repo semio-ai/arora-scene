@@ -1490,6 +1490,7 @@ fn take_census(
     only: Res<FrameOnly>,
     parents: Query<&ChildOf>,
     robots: Query<&robots::RobotAsset>,
+    loading: Query<(), With<robots::Incoming>>,
 ) {
     if census.taken || frames.elapsed - census.since < CENSUS_SETTLE {
         return;
@@ -1542,7 +1543,11 @@ fn take_census(
         }
     }
     if count == 0 || !min.is_finite() || !max.is_finite() {
-        if census.asked {
+        // Nothing to fit ends the count: a framing asked for, or the first
+        // one once every robot is showing, since a robot spawns whole and
+        // has all the meshes it will have. Waiting longer would wait for
+        // good, and keep the scene drawing.
+        if census.asked || (count == 0 && !robots.is_empty() && loading.is_empty()) {
             census.taken = true;
         }
         return;
@@ -1937,6 +1942,43 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<FrameOnly>().0, vec!["a".to_string()]);
         assert!(app.world().resource::<Census>().asked);
+    }
+
+    /// The first framing of robots with no meshes ends once every robot is
+    /// showing, rather than waiting for meshes that will never come.
+    #[test]
+    fn a_first_framing_of_meshless_robots_ends_once_they_show() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<Frames>()
+            .init_resource::<Census>()
+            .init_resource::<Framing>()
+            .init_resource::<FrameOnly>()
+            .add_systems(Update, take_census);
+        let robot = app
+            .world_mut()
+            .spawn((
+                robots::RobotAsset {
+                    instance: "a".into(),
+                    key: None,
+                    glb: String::new(),
+                    meta: Default::default(),
+                    joints: Vec::new(),
+                },
+                robots::Incoming,
+            ))
+            .id();
+        app.world_mut().resource_mut::<Census>().since = -CENSUS_SETTLE;
+        app.update();
+        assert!(!app.world().resource::<Census>().taken, "still loading");
+
+        app.world_mut()
+            .entity_mut(robot)
+            .remove::<robots::Incoming>();
+        app.update();
+        assert!(app.world().resource::<Census>().taken);
+        assert!(!app.world().resource::<Framing>().fitted);
     }
 
     /// What the view gizmo's request asks the controller to face, looking

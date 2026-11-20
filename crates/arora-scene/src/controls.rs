@@ -421,6 +421,29 @@ impl Plugin for ControlsPlugin {
     }
 }
 
+/// Refuses an add under `key`: the changes sent before it with no control
+/// placed under the key were waiting for it and go with it, and the changes
+/// after it, up to the next add or remove under the key, are dropped as they
+/// come ([`carry_out`]'s `refused`). A control already placed under the key
+/// keeps the changes sent for it.
+fn refuse(
+    key: String,
+    controls: &Controls,
+    waiting: &mut Vec<ControlCommand>,
+    refused: &mut std::collections::HashSet<String>,
+) {
+    if !controls.0.contains_key(&key) {
+        waiting.retain(|waiting| {
+            waiting.key() != key
+                || matches!(
+                    waiting,
+                    ControlCommand::Add { .. } | ControlCommand::Remove { .. }
+                )
+        });
+    }
+    refused.insert(key);
+}
+
 /// The most passes a frame runs. Each control replaced under one key in one
 /// batch takes a pass; a batch chaining more than this shows the control the
 /// last pass placed for a frame before its changes land, in order, in the
@@ -628,19 +651,7 @@ fn carry_out(
                     (None, Some(_)) => None,
                     (Some((name, None)), _) if !coming(name) => {
                         log::warn!("no robot {name:?}; no control added for {key:?}");
-                        // Changes sent before it with no control placed under
-                        // the key were waiting for this add: they go with it,
-                        // rather than landing on a later one.
-                        if !controls.0.contains_key(&key) {
-                            waiting.retain(|waiting: &ControlCommand| {
-                                waiting.key() != key
-                                    || matches!(
-                                        waiting,
-                                        ControlCommand::Add { .. } | ControlCommand::Remove { .. }
-                                    )
-                            });
-                        }
-                        refused.insert(key);
+                        refuse(key, &controls, &mut waiting, &mut refused);
                         continue;
                     }
                     _ => {
@@ -652,9 +663,8 @@ fn carry_out(
                 let Some(camera) = camera else {
                     continue;
                 };
-                if let Some(old) = controls.0.remove(&key) {
-                    despawn(&mut commands, old);
-                }
+                // The control under this key goes only once its replacement
+                // is placed: an add refused below leaves it as it was.
                 let placed = match control {
                     Control::Joint { joint, color, .. } => {
                         let Some((_, _, rig, asset)) = robot else {
@@ -672,6 +682,7 @@ fn carry_out(
                                 "no joint of {} is driven by {joint:?}; no control added for {key:?}",
                                 asset.instance
                             );
+                            refuse(key, &controls, &mut waiting, &mut refused);
                             continue;
                         };
                         let joint = declared;
@@ -720,6 +731,7 @@ fn carry_out(
                                             "no element {id:?} on {}; no control added for {key:?}",
                                             instance.id
                                         );
+                                        refuse(key, &controls, &mut waiting, &mut refused);
                                         continue;
                                     }
                                 }
@@ -768,7 +780,9 @@ fn carry_out(
                         }
                     }
                 };
-                controls.0.insert(key, placed);
+                if let Some(old) = controls.0.insert(key, placed) {
+                    despawn(&mut commands, old);
+                }
             }
             ControlCommand::Remove { key } => {
                 if let Some(old) = controls.0.remove(&key) {
@@ -1466,6 +1480,34 @@ mod tests {
             Some(&Visibility::Hidden),
             "the show was for the refused add"
         );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// An add refused for a joint the robot does not have leaves the control
+    /// under its key as it was, with the changes sent for it, and takes the
+    /// changes sent for itself.
+    #[test]
+    fn an_add_refused_for_an_unknown_joint_leaves_the_control_it_would_replace() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let joint = |name: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: ROBOT.into(),
+                joint: name.into(),
+                color: None,
+            },
+        };
+        send(&mut app, joint(TILT));
+        let before = only::<JointGizmo>(&mut app).expect("placed");
+        app.world_mut()
+            .resource_mut::<ControlCommands>()
+            .0
+            .extend([joint("no-such-joint"), configure("k", None, Some(false))]);
+        app.update();
+        let after = only::<JointGizmo>(&mut app).expect("the old control stays");
+        assert_eq!(after, before);
+        assert!(app.world().get::<JointGizmo>(after).unwrap().interactive);
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
     }
 
