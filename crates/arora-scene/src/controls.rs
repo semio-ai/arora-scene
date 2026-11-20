@@ -390,11 +390,11 @@ impl Plugin for ControlsPlugin {
             .init_resource::<ControlEvents>()
             .init_resource::<ControlPresses>()
             .init_resource::<Controls>()
-            // Twice, the gizmos an add spawns being there for the second:
-            // a change sent with its control's add then takes hold the
-            // frame the control first shows, rather than one frame later,
-            // live and at full strength in between. Both before the
-            // gizmos' own drag handling, so a left press in the frame a
+            // In passes, the gizmos one pass's adds spawn being there for
+            // the next ([`run_passes`]): a change sent with its control's add
+            // then takes hold the frame the control first shows, rather than
+            // one frame later, live and at full strength in between. Before
+            // the gizmos' own drag handling, so a left press in the frame a
             // control is made inert does not take it. A press with another
             // button is reported in `PreUpdate`, before either pass, so one
             // in that frame can still reach the host: a press and a change
@@ -402,8 +402,7 @@ impl Plugin for ControlsPlugin {
             .add_systems(
                 Update,
                 (
-                    carry_out.in_set(ControlSystems::Commands),
-                    carry_out.in_set(ControlSystems::Commands),
+                    run_passes.in_set(ControlSystems::Commands),
                     fade.in_set(ControlSystems::Fade),
                 )
                     .chain()
@@ -412,6 +411,37 @@ impl Plugin for ControlsPlugin {
             .add_observer(report_transform_drag)
             .add_observer(report_joint_drag)
             .add_observer(report_press);
+    }
+}
+
+/// The most passes a frame runs. Each control replaced under one key in one
+/// batch takes a pass; a batch chaining more than this shows the control the
+/// last pass placed for a frame before its changes land, in order, in the
+/// next.
+const MOST_PASSES: usize = 8;
+
+/// Carries the host's commands out in passes, each applying the gizmos the
+/// last one spawned, while a change still waits for the gizmo of a control
+/// placed under its key: so every change sent with its add holds from the
+/// control's first frame, however many adds a batch chains under a key.
+fn run_passes(world: &mut World) {
+    for pass in 0..MOST_PASSES {
+        if let Err(error) = world.run_system_cached(carry_out) {
+            log::warn!("the control pass did not run: {error}");
+            return;
+        }
+        let controls = world.resource::<Controls>();
+        let spawning = world.resource::<ControlCommands>().0.iter().any(|command| {
+            !matches!(command, ControlCommand::Add { .. }) && controls.0.contains_key(command.key())
+        });
+        if !spawning {
+            return;
+        }
+        if pass + 1 == MOST_PASSES {
+            log::warn!(
+                "control commands still waiting after {MOST_PASSES} passes; the rest land next frame"
+            );
+        }
     }
 }
 
@@ -1297,6 +1327,38 @@ mod tests {
                 visible: false,
             },
         );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// Every change sent with its add holds from the control's first frame,
+    /// however many adds the batch chains under one key.
+    #[test]
+    fn a_change_holds_from_the_first_frame_through_chained_replacements() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let other = app.world_mut().spawn(Transform::default()).id();
+        second_robot(&mut app, other);
+        let on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            on(ROBOT),
+            configure("k", Some(0.5), None),
+            on("robot-1"),
+            configure("k", Some(0.25), Some(false)),
+        ]);
+        app.update();
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let on: Vec<(Entity, f32, bool)> = gizmos
+            .iter(app.world())
+            .map(|gizmo| (gizmo.target, gizmo.opacity, gizmo.interactive))
+            .collect();
+        assert_eq!(on, vec![(other, 0.25, false)]);
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
     }
 
