@@ -258,3 +258,80 @@ fn ready_drawn_robots(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn robot(app: &mut App, instance: &str) -> Entity {
+        app.world_mut()
+            .spawn((
+                RobotAsset {
+                    instance: instance.into(),
+                    key: None,
+                    glb: String::new(),
+                    meta: Default::default(),
+                    joints: Vec::new(),
+                },
+                Drawing,
+            ))
+            .id()
+    }
+
+    /// An app with the main world's half: reports arriving from the render
+    /// world through the channel, as the GPU callback and the give-up send
+    /// them.
+    fn app() -> (App, Sender<(Entity, bool)>) {
+        let (sender, receiver) = channel();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(Reports(Mutex::new(receiver)))
+            .init_resource::<RobotsReady>()
+            .add_systems(Update, ready_drawn_robots);
+        (app, sender)
+    }
+
+    fn told(app: &mut App) -> Vec<(String, bool)> {
+        std::mem::take(&mut app.world_mut().resource_mut::<RobotsReady>().0)
+            .into_iter()
+            .map(|ready| (ready.instance, ready.drawn))
+            .collect()
+    }
+
+    /// Each robot is reported once, saying whether it was seen drawn or given
+    /// up on, and stops being watched.
+    #[test]
+    fn a_robot_is_reported_once_with_whether_it_was_drawn() {
+        let (mut app, sender) = app();
+        let drawn = robot(&mut app, "drawn");
+        let given_up = robot(&mut app, "given-up");
+        sender.send((drawn, true)).unwrap();
+        sender.send((given_up, false)).unwrap();
+        // The GPU finishing after the give-up reports nothing more.
+        sender.send((given_up, true)).unwrap();
+        app.update();
+
+        assert_eq!(
+            told(&mut app),
+            vec![("drawn".to_string(), true), ("given-up".to_string(), false)]
+        );
+        for root in [drawn, given_up] {
+            assert!(app.world().get::<Drawing>(root).is_none());
+        }
+
+        sender.send((drawn, true)).unwrap();
+        app.update();
+        assert!(told(&mut app).is_empty(), "a robot already reported");
+    }
+
+    /// A report for a robot taken away before it arrived says nothing.
+    #[test]
+    fn a_robot_gone_before_its_report_is_not_reported() {
+        let (mut app, sender) = app();
+        let gone = robot(&mut app, "gone");
+        app.world_mut().despawn(gone);
+        sender.send((gone, true)).unwrap();
+        app.update();
+        assert!(told(&mut app).is_empty());
+    }
+}
