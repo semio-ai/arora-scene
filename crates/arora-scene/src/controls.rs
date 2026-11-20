@@ -621,6 +621,18 @@ fn carry_out(
                     (None, Some(_)) => None,
                     (Some((name, None)), _) if !coming(name) => {
                         log::warn!("no robot {name:?}; no control added for {key:?}");
+                        // Changes sent before it with no control placed under
+                        // the key were waiting for this add: they go with it,
+                        // rather than landing on a later one.
+                        if !controls.0.contains_key(&key) {
+                            waiting.retain(|waiting: &ControlCommand| {
+                                waiting.key() != key
+                                    || matches!(
+                                        waiting,
+                                        ControlCommand::Add { .. } | ControlCommand::Remove { .. }
+                                    )
+                            });
+                        }
                         refused.insert(key);
                         continue;
                     }
@@ -1414,6 +1426,38 @@ mod tests {
             app.world().get::<Visibility>(gizmo),
             Some(&Visibility::Hidden),
             "the show was for the refused add's control"
+        );
+        assert!(app.world().resource::<ControlCommands>().0.is_empty());
+    }
+
+    /// Changes sent before an add that is refused were waiting for it: they
+    /// go with it, rather than landing on a later add under the key.
+    #[test]
+    fn changes_waiting_for_a_refused_add_do_not_reach_a_later_one() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let joint_on = |instance: &str| ControlCommand::Add {
+            key: "k".into(),
+            control: Control::Joint {
+                instance: instance.into(),
+                joint: TILT.into(),
+                color: None,
+            },
+        };
+        app.world_mut().resource_mut::<ControlCommands>().0.extend([
+            ControlCommand::Show {
+                key: "k".into(),
+                visible: false,
+            },
+            joint_on("ghost"),
+        ]);
+        app.update();
+        send(&mut app, joint_on(ROBOT));
+        let gizmo = only::<JointGizmo>(&mut app).expect("the later add is placed");
+        assert_ne!(
+            app.world().get::<Visibility>(gizmo),
+            Some(&Visibility::Hidden),
+            "the show was for the refused add"
         );
         assert!(app.world().resource::<ControlCommands>().0.is_empty());
     }
