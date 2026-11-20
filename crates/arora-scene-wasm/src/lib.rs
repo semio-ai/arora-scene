@@ -29,7 +29,7 @@ use arora_scene::{RobotSpec, SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
 use arora_visuals::meta::FeatureKind;
 use arora_visuals::overlay::Overlay;
-use arora_visuals::pick::Picks;
+use arora_visuals::pick::Picked;
 use arora_visuals::select::Selection;
 use arora_visuals::value::Decoded;
 use bevy::asset::io::memory::{Dir, MemoryAssetReader};
@@ -656,12 +656,15 @@ fn send(event: &SceneEvent) {
     });
 }
 
-/// Sends the frame's overlay when it changed, and every pick since the last
-/// frame. Picks are drained either way, so a page that sets its handler late
-/// does not get a backlog.
+/// Sends the frame's overlay when it changed, and every pick on a robot since
+/// the last frame. Picks are read either way, so a page that sets its handler
+/// late does not get a backlog; a pick on another consumer's instance sharing
+/// the app is that consumer's.
+#[allow(clippy::too_many_arguments)]
 fn emit_events(
     overlay: Res<Overlay>,
-    mut picks: ResMut<Picks>,
+    mut picks: MessageReader<Picked>,
+    rigged: Query<(), With<arora_scene::joints::JointRig>>,
     mut controls: ResMut<ControlEvents>,
     mut presses: ResMut<ControlPresses>,
     mut robots: ResMut<arora_scene::RobotOutcomes>,
@@ -695,7 +698,11 @@ fn emit_events(
     for press in std::mem::take(&mut presses.0) {
         send(&SceneEvent::ControlPress(&press));
     }
-    let picks = std::mem::take(&mut picks.0);
+    let picks: Vec<Picked> = picks
+        .read()
+        .filter(|pick| rigged.contains(pick.instance))
+        .cloned()
+        .collect();
     if SNAPSHOT.swap(false, Ordering::SeqCst) || overlay.is_changed() {
         send(&SceneEvent::Overlay(&overlay.0));
     }
