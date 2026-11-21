@@ -32,6 +32,15 @@
 //! the viewer goes round, so from the side the light comes from it lies behind
 //! the content and the content hides it, in part or whole.
 //!
+//! **What sinks below the floor can be shown through it** ([`BelowFloor`]),
+//! for a host checking that a pose keeps every part above the ground. The
+//! floor stays opaque wherever nothing is beneath it; where a surface lies
+//! below it, deeper than a contact allowance, the floor turns see-through in
+//! a warning colour, with a solid line where the surface crosses it. The
+//! floor finds what is beneath it in the camera's depth prepass, which
+//! WebGL 2 cannot read: there the floor is instead half see-through
+//! everywhere while the warning is on, with its grid kept solid.
+//!
 //! Every choice can change while the scene runs. [`Stage`] holds the current
 //! one and the scene follows it; in a window the toggles in the corner and
 //! the keys they name change it.
@@ -57,13 +66,18 @@ use std::f32::consts::PI;
 
 use bevy::asset::{embedded_asset, embedded_path, AssetPath};
 use bevy::camera::Exposure;
+use bevy::core_pipeline::core_3d::DEPTH_PREPASS_TEXTURE_SUPPORTED;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver,
 };
-use bevy::pbr::{Material, MaterialPlugin};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+};
 use bevy::shader::ShaderRef;
 
 use arora_visuals::outline::OutlineView;
@@ -110,6 +124,43 @@ pub struct Stage {
     pub environment: Environment,
     pub lighting: Lighting,
 }
+
+/// Whether, and how, the floor shows what has sunk below it. Change it and
+/// the scene follows.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct BelowFloor {
+    pub show: bool,
+    /// What a sunken surface is tinted, and the line where it crosses the
+    /// floor drawn, in.
+    pub colour: Color,
+    /// How far below the floor, in metres, a surface may go before it is
+    /// shown: a foot planted on the floor touches it, and its faces at the
+    /// floor's height land a hair either side of it.
+    pub tolerance: f32,
+}
+
+impl Default for BelowFloor {
+    /// Off, in a red-orange that reads against either theme's ground, with
+    /// five millimetres' allowance.
+    fn default() -> Self {
+        Self {
+            show: false,
+            colour: Color::srgb_u8(0xff, 0x4d, 0x2e),
+            tolerance: 0.005,
+        }
+    }
+}
+
+/// How opaque the floor's ground is while [`BelowFloor`] is on and the floor
+/// cannot read the depth prepass, so whatever is beneath it shows through.
+const SEE_THROUGH: f32 = 0.5;
+
+/// How opaque the floor stays over a sunken surface: enough to tint it, little
+/// enough to show its shape.
+const OVER_SUNKEN: f32 = 0.5;
+
+/// The width of the line where a surface crosses the floor, in pixels.
+const WATERLINE_WIDTH: f32 = 2.0;
 
 /// The `ev100` at which Bevy's exposure factor, `2^-ev100 / 1.2`, is exactly
 /// one: `-log2(1.2)`.
@@ -298,8 +349,9 @@ fn default_view(opts: &SceneOptions) -> Quat {
 
 /// The floor for a theme: its ground colour, Studio's grid drawn into it —
 /// one-metre cells and ten-metre sections, 1 and 1.5 pixels wide, fading
-/// over 100 metres raised to the third power — and how dark a shadow falls.
-fn floor_for(theme: Theme, look: &Look) -> FloorUniform {
+/// over 100 metres raised to the third power — how dark a shadow falls, and
+/// what it shows of what has sunk below it.
+fn floor_for(theme: Theme, look: &Look, below: &BelowFloor) -> FloorUniform {
     let (minor, major) = match theme {
         Theme::Dark => (
             Color::srgb_u8(0xa0, 0xa0, 0xa0),
@@ -318,7 +370,16 @@ fn floor_for(theme: Theme, look: &Look) -> FloorUniform {
         major_width: 1.5,
         fade_distance: 100.0,
         fade_strength: 3.0,
-        ..default()
+        opacity: if below.show && !DEPTH_PREPASS_TEXTURE_SUPPORTED {
+            SEE_THROUGH
+        } else {
+            1.0
+        },
+        warning: linear(below.colour),
+        below: if below.show { 1.0 } else { 0.0 },
+        tolerance: below.tolerance,
+        waterline: WATERLINE_WIDTH,
+        over_sunken: OVER_SUNKEN,
     }
 }
 
@@ -348,6 +409,12 @@ impl Material for SkyMaterial {
             AssetPath::from_path_buf(embedded_path!("sky.wesl")).with_source("embedded"),
         )
     }
+
+    /// Kept out of the depth prepass, where the floor looks for what lies
+    /// beneath it: the dome's lower half is beneath every part of the floor.
+    fn enable_prepass() -> bool {
+        false
+    }
 }
 
 #[derive(ShaderType, Clone, Debug, Default)]
@@ -366,7 +433,18 @@ pub struct FloorUniform {
     /// The grid fades as `(1 - distance / fade_distance) ^ fade_strength`.
     pub fade_distance: f32,
     pub fade_strength: f32,
-    pub _padding: f32,
+    /// How opaque the ground between the grid's lines is.
+    pub opacity: f32,
+    /// What a sunken surface is tinted in; see [`BelowFloor`].
+    pub warning: Vec4,
+    /// One to show what has sunk below the floor, zero not to.
+    pub below: f32,
+    /// How far below the floor a surface may go unshown, in metres.
+    pub tolerance: f32,
+    /// The width of the line where a surface crosses the floor, in pixels.
+    pub waterline: f32,
+    /// How opaque the floor stays over a sunken surface.
+    pub over_sunken: f32,
 }
 
 /// The floor's material; see `floor.wesl`.
@@ -376,11 +454,47 @@ pub struct FloorMaterial {
     pub surface: FloorUniform,
 }
 
+impl FloorMaterial {
+    /// Whether anything may show through the floor: once it reads what lies
+    /// beneath it, or while it is see-through.
+    fn blends(&self) -> bool {
+        self.surface.below > 0.0 || self.surface.opacity < 1.0
+    }
+}
+
 impl Material for FloorMaterial {
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Path(
             AssetPath::from_path_buf(embedded_path!("floor.wesl")).with_source("embedded"),
         )
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        if self.blends() {
+            AlphaMode::Blend
+        } else {
+            AlphaMode::Opaque
+        }
+    }
+
+    /// First of whatever is blended, so a blended floor is drawn as an opaque
+    /// one is, beneath everything else that blends.
+    fn depth_bias(&self) -> f32 {
+        -1.0e9
+    }
+
+    /// Writes depth even when blended, so whatever is drawn after it is
+    /// hidden below it exactly as behind an opaque floor.
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = Some(true);
+        }
+        Ok(())
     }
 }
 
@@ -424,12 +538,18 @@ impl Plugin for StagePlugin {
             MaterialPlugin::<FloorMaterial>::default(),
         ))
         .init_resource::<Palette>()
+        .init_resource::<BelowFloor>()
         .add_systems(Startup, build_stage.after(crate::setup))
         .add_systems(
             Update,
             (
                 stage_keys,
-                apply_look.run_if(resource_changed::<Stage>.or_else(resource_changed::<Palette>)),
+                apply_look.run_if(
+                    resource_changed::<Stage>
+                        .or_else(resource_changed::<Palette>)
+                        .or_else(resource_changed::<BelowFloor>),
+                ),
+                look_below_floor.run_if(resource_changed::<BelowFloor>),
                 apply_lighting.run_if(resource_changed::<Stage>),
                 reach_shadows,
             )
@@ -537,6 +657,24 @@ fn build_stage(
     });
 }
 
+/// Gives the camera a depth prepass while the floor shows what has sunk below
+/// it and can read one, and takes it away otherwise: the prepass draws every
+/// opaque mesh a second time.
+fn look_below_floor(
+    below: Res<BelowFloor>,
+    mut commands: Commands,
+    cameras: Query<(Entity, Has<DepthPrepass>), With<OrbitCamera>>,
+) {
+    let wanted = below.show && DEPTH_PREPASS_TEXTURE_SUPPORTED;
+    for (camera, has) in &cameras {
+        if wanted && !has {
+            commands.entity(camera).insert(DepthPrepass);
+        } else if !wanted && has {
+            commands.entity(camera).remove::<DepthPrepass>();
+        }
+    }
+}
+
 /// `E` environment, `L` lighting, `T` theme.
 fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
     if keys.just_pressed(KeyCode::KeyE) {
@@ -565,6 +703,7 @@ fn stage_keys(keys: Res<ButtonInput<KeyCode>>, mut stage: ResMut<Stage>) {
 fn apply_look(
     stage: Res<Stage>,
     palette: Res<Palette>,
+    below: Res<BelowFloor>,
     mut cameras: Query<&mut Camera, With<OrbitCamera>>,
     mut skies: ResMut<Assets<SkyMaterial>>,
     domes: Query<&MeshMaterial3d<SkyMaterial>, With<Dome>>,
@@ -584,7 +723,7 @@ fn apply_look(
     }
     for handle in &floor {
         if let Some(mut material) = floors.get_mut(&handle.0) {
-            material.surface = floor_for(stage.theme, look);
+            material.surface = floor_for(stage.theme, look, &below);
         }
     }
 }
@@ -684,6 +823,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SceneOptions::default());
         world.insert_resource(Palette::default());
+        world.insert_resource(BelowFloor::default());
         world.insert_resource(stage);
         let main = world.spawn((Camera::default(), OrbitCamera)).id();
         let anchor = world.spawn((Transform::IDENTITY, RigAnchor)).id();
@@ -766,6 +906,56 @@ mod tests {
             .iter(world)
             .map(|(parent, light, transform)| (parent.map(ChildOf::parent), *light, *transform))
             .collect()
+    }
+
+    /// The floor stays opaque and leaves the camera without a prepass until
+    /// it is asked to show what has sunk below it, and goes back to both when
+    /// asked to stop.
+    #[test]
+    fn showing_what_sank_turns_the_floor_blended_and_the_prepass_on() {
+        let (mut world, main, _) = world(stage(Environment::Plain, Lighting::World, Theme::Dark));
+        world.run_system_once(apply_look).unwrap();
+        world.run_system_once(look_below_floor).unwrap();
+        let material = |world: &mut World| {
+            let handle = world
+                .query_filtered::<&MeshMaterial3d<FloorMaterial>, With<Floor>>()
+                .single(world)
+                .unwrap()
+                .0
+                .clone();
+            world
+                .resource::<Assets<FloorMaterial>>()
+                .get(&handle)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(material(&mut world).alpha_mode(), AlphaMode::Opaque);
+        assert_eq!(floor(&mut world).opacity, 1.0);
+        assert!(world.get::<DepthPrepass>(main).is_none());
+
+        world.resource_mut::<BelowFloor>().show = true;
+        world.run_system_once(apply_look).unwrap();
+        world.run_system_once(look_below_floor).unwrap();
+        assert_eq!(material(&mut world).alpha_mode(), AlphaMode::Blend);
+        assert_eq!(floor(&mut world).below, 1.0);
+        assert_eq!(
+            world.get::<DepthPrepass>(main).is_some(),
+            DEPTH_PREPASS_TEXTURE_SUPPORTED
+        );
+        assert_eq!(
+            floor(&mut world).opacity,
+            if DEPTH_PREPASS_TEXTURE_SUPPORTED {
+                1.0
+            } else {
+                SEE_THROUGH
+            }
+        );
+
+        world.resource_mut::<BelowFloor>().show = false;
+        world.run_system_once(apply_look).unwrap();
+        world.run_system_once(look_below_floor).unwrap();
+        assert_eq!(material(&mut world).alpha_mode(), AlphaMode::Opaque);
+        assert!(world.get::<DepthPrepass>(main).is_none());
     }
 
     /// Below the horizon every view shows the same ground, whatever is above

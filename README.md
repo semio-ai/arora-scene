@@ -84,10 +84,20 @@ which backend a page would get.
 - **Show one `<Scene>` at a time.** A second one mounted takes the canvas, and
   from then on the first neither drives the scene nor receives its events.
 - **`options` are read once**, when the page's scene first starts. A later
-  `<Scene>`'s options are ignored. The theme, environment and active area can
-  change at any time: `scene.setTheme`, `scene.setEnvironment` and
-  `scene.setActiveArea` (the camera eases from one active area to the next;
-  the first area, and the whole canvas given back, are taken at once).
+  `<Scene>`'s options are ignored. The theme, environment, active area and
+  below-floor warning can change at any time: `scene.setTheme`,
+  `scene.setEnvironment`, `scene.setActiveArea` (the camera eases from one
+  active area to the next; the first area, and the whole canvas given back,
+  are taken at once) and `scene.setBelowFloor`.
+- **The floor can show what sinks below it**: `belowFloor` in the options, or
+  `scene.setBelowFloor({ color, tolerance })`. A surface more than
+  `tolerance` metres below the floor shows through it in `color`, with a
+  solid line where it crosses the floor; the floor elsewhere is unchanged.
+  The floor finds what is below it in a depth prepass, which costs a second
+  draw of every opaque mesh while the warning is on. WebGL 2 cannot read
+  that prepass, so on the `webgl2` backend the floor is instead half
+  see-through while the warning is on. A ghost is not drawn into the
+  prepass, so a sunken ghost is not shown.
 - **Every robot is an instance the host names**: its own string, never
   rewritten — an Arora path, a slot name. Every call about a robot and every
   event from it carries that id. `scene.load(instance, glb, { key, pose })`

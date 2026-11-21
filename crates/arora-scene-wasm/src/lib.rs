@@ -26,7 +26,7 @@ use arora_scene::controls::{
 };
 use arora_scene::redraw::RedrawOnChangePlugin;
 use arora_scene::robots::{Outcome, RobotLoad, RobotRequest, RobotRequests};
-use arora_scene::stage::{Environment, Theme};
+use arora_scene::stage::{BelowFloor, Environment, Theme};
 use arora_scene::values::{ApplyValues, ValueWrite, ValueWrites};
 use arora_scene::{SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
@@ -67,7 +67,40 @@ enum Request {
     Frame(Vec<String>),
     Theme(Theme),
     Environment(Environment),
+    BelowFloor(BelowFloor),
     Area(Option<Rect>),
+}
+
+/// What the floor shows of whatever has sunk below it, as JSON from the page.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct BelowFloorOptions {
+    /// A CSS hex colour; the scene's warning colour when absent.
+    color: Option<String>,
+    /// How far below the floor, in metres, a surface may go unshown.
+    tolerance: Option<f32>,
+}
+
+impl BelowFloorOptions {
+    /// The floor's setting, shown.
+    fn shown(self) -> Result<BelowFloor, JsValue> {
+        let mut below = BelowFloor {
+            show: true,
+            ..default()
+        };
+        if let Some(colour) = self.color {
+            below.colour = Srgba::hex(&colour)
+                .map_err(|e| error(format!("{colour:?} is not a colour: {e}")))?
+                .into();
+        }
+        if let Some(tolerance) = self.tolerance {
+            if !(tolerance.is_finite() && tolerance >= 0.0) {
+                return Err(error("a tolerance is a distance of zero or more"));
+            }
+            below.tolerance = tolerance;
+        }
+        Ok(below)
+    }
 }
 
 /// How a load is asked for, as JSON from the page. Every field is optional.
@@ -189,6 +222,22 @@ pub fn set_environment(environment: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Shows what has sunk below the floor through it, with `options` as JSON
+/// (`color`, `tolerance`), or stops showing it for an empty string.
+#[wasm_bindgen]
+pub fn set_below_floor(options: &str) -> Result<(), JsValue> {
+    let below = if options.is_empty() {
+        BelowFloor::default()
+    } else {
+        serde_json::from_str::<BelowFloorOptions>(options)
+            .map_err(error)?
+            .shown()?
+    };
+    REQUESTS.lock().unwrap().push(Request::BelowFloor(below));
+    wake();
+    Ok(())
+}
+
 /// Sets the part of the canvas left visible beside the host's panels,
 /// `[x, y, width, height]` in CSS pixels, which the camera frames the robots
 /// in, easing there from an area set before; the first is taken at once,
@@ -224,6 +273,7 @@ fn asset_id(path: &str) -> String {
 fn take_requests(
     mut requests: ResMut<RobotRequests>,
     mut stage: ResMut<arora_scene::stage::Stage>,
+    mut below: ResMut<BelowFloor>,
     cameras: Query<Entity, With<arora_scene::OrbitCamera>>,
     mut commands: Commands,
 ) {
@@ -232,6 +282,11 @@ fn take_requests(
             Request::Frame(instances) => requests.frame = Some(instances),
             Request::Theme(theme) => stage.theme = theme,
             Request::Environment(environment) => stage.environment = environment,
+            Request::BelowFloor(setting) => {
+                if *below != setting {
+                    *below = setting;
+                }
+            }
             Request::Area(area) => {
                 for camera in &cameras {
                     match area {
@@ -260,6 +315,8 @@ struct Options {
     /// `[x, y, width, height]` in CSS pixels; the camera frames the robot in
     /// it. The whole canvas when absent.
     active_area: Option<[f32; 4]>,
+    /// Show what has sunk below the floor through it. Not shown when absent.
+    below_floor: Option<BelowFloorOptions>,
     /// Render at this many physical pixels per CSS pixel instead of the
     /// page's `devicePixelRatio`.
     scale_factor: Option<f32>,
@@ -301,7 +358,11 @@ pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
         return Err(error("the scene is already mounted; a page holds one"));
     }
     mark("start");
-    let opts: Options = serde_json::from_str(&options).map_err(error)?;
+    let mut opts: Options = serde_json::from_str(&options).map_err(error)?;
+    let below = match opts.below_floor.take() {
+        Some(below) => below.shown()?,
+        None => BelowFloor::default(),
+    };
     // Claimed only once the options are known good, so a mount refused for
     // bad options leaves the page free to mount again.
     if MOUNTED.swap(true, Ordering::SeqCst) {
@@ -386,6 +447,7 @@ pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
         angle: opts.angle.unwrap_or(SceneOptions::default().angle),
         ..default()
     })
+    .insert_resource(below)
     .add_systems(Startup, keep_waker)
     .add_systems(Update, take_pushed.before(ApplyValues))
     // Before Update, where the scene carries control commands out, and after

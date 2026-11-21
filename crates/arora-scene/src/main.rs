@@ -193,6 +193,16 @@ struct Cli {
     #[arg(long, default_value = "arrows", value_parser = ["arrows", "lines", "both"])]
     frame_style: String,
 
+    /// Show what sinks below the floor through it, in this CSS hex colour, or
+    /// the default warning colour for `default`.
+    #[arg(long)]
+    below_floor: Option<String>,
+
+    /// Stand each robot this many metres lower, to put part of it below the
+    /// floor.
+    #[arg(long, default_value_t = 0.0)]
+    sink: f32,
+
     /// The aurora's three colours from its lower edge up, as
     /// `#rrggbb,#rrggbb,#rrggbb`.
     #[arg(long, value_parser = parse_colours)]
@@ -344,6 +354,22 @@ fn main() {
             GizmoSpace::World
         },
     });
+    if let Some(colour) = &cli.below_floor {
+        let mut below = arora_scene::stage::BelowFloor {
+            show: true,
+            ..default()
+        };
+        if colour != "default" {
+            match Srgba::hex(colour) {
+                Ok(colour) => below.colour = colour.into(),
+                Err(error) => {
+                    log::error!("{colour} is not a colour: {error}");
+                    return;
+                }
+            }
+        }
+        app.insert_resource(below);
+    }
     if let Some(colours) = cli.aurora_colours {
         app.insert_resource(arora_scene::aurora::Aurora {
             colours,
@@ -385,7 +411,7 @@ fn main() {
         .map(|copy| {
             let (x, y) = ((copy % stride) as f32, (copy / stride) as f32);
             let pose = arora_scene::controls::Pose {
-                position: [(x - (stride - 1) as f32 * 0.5) * 0.8, -y * 0.8, 0.0],
+                position: [(x - (stride - 1) as f32 * 0.5) * 0.8, -y * 0.8, -cli.sink],
                 rotation: [0.0, 0.0, 0.0, 1.0],
             };
             (format!("robot-{copy}"), Some(pose))

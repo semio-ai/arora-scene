@@ -428,6 +428,45 @@ function Running({ robot: first }: { robot: Robot }) {
             Write drags back, as a driver would
           </label>
         </form>
+        <h4>Floor</h4>
+        <div style={{ display: "grid", gap: 8 }}>
+          <label>
+            <input
+              type="checkbox"
+              disabled={!scene}
+              onChange={(e) =>
+                scene?.setBelowFloor(e.target.checked ? {} : undefined)
+              }
+            />{" "}
+            Show what sinks below the floor
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              disabled={!scene}
+              onClick={() =>
+                scene?.setPose(current, {
+                  position: [0, 0, -0.15],
+                  rotation: [0, 0, 0, 1],
+                })
+              }
+            >
+              Sink {current} 15 cm
+            </button>
+            <button
+              type="button"
+              disabled={!scene}
+              onClick={() =>
+                scene?.setPose(current, {
+                  position: [0, 0, 0],
+                  rotation: [0, 0, 0, 1],
+                })
+              }
+            >
+              Stand it on the floor
+            </button>
+          </div>
+        </div>
         <h4>Joints of {current}</h4>
         <ul style={{ paddingLeft: 16 }}>
           {(joints[current] ?? []).map((joint) => (
