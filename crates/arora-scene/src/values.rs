@@ -26,10 +26,13 @@ pub struct ValueWrite {
     pub instance: Option<String>,
     /// An animatable's id, or failing that an element's.
     pub target: String,
-    /// The feature an element write changes. An animatable carries its own
-    /// feature, so a write to one needs none, and a joint's value has no
-    /// feature to name.
-    pub feature: Option<FeatureKind>,
+    /// The feature an element write changes, as `RobotData` names it:
+    /// `translation`, `color`, a per-axis `translation.x`, one of the
+    /// element's morph target names. Resolved against the element it lands
+    /// on, since only the element knows its morph targets. An animatable
+    /// carries its own feature, so a write to one needs none, and a joint's
+    /// value has no feature to name.
+    pub feature: Option<String>,
     pub value: Decoded,
     /// A time the host attached, handed back in [`AppliedValues`] once the
     /// write lands: what a host measuring push-to-drawn latency times from.
@@ -206,43 +209,61 @@ pub fn apply_values(
                 }
                 None => match bindings.elements.get(&write.target) {
                     Some(element) => {
-                        let Some(feature) = &write.feature else {
+                        let Some(name) = &write.feature else {
                             continue;
                         };
-                        let entities = if is_material(feature) {
-                            let mut meshes = primitives(element.node, &children, |e| {
-                                material_handles.contains(e)
-                            });
-                            if meshes.is_empty() {
-                                meshes.extend(element.mesh);
-                            }
-                            // An element written directly is one element,
-                            // but the GLB may share its materials with
-                            // others, which a material write would change
-                            // too. Each mesh gets a copy of its own the first
-                            // time.
-                            for &mesh in &meshes {
-                                if own.0.insert(mesh) {
-                                    if let Ok(mut handle) = material_handles.get_mut(mesh) {
-                                        if let Some(copy) = materials.get(&handle.0).cloned() {
-                                            handle.0 = materials.add(copy);
+                        let Some((feature, axis, morph_index)) =
+                            element_feature(instance, &write.target, name, write.value)
+                        else {
+                            continue;
+                        };
+                        let feature = &feature;
+                        if let FeatureKind::Morph(_) = feature {
+                            let Some(bearer) = element.morph else {
+                                continue;
+                            };
+                            vec![SceneBinding {
+                                entity: bearer,
+                                feature: feature.clone(),
+                                axis: None,
+                                morph_index,
+                            }]
+                        } else {
+                            let entities = if is_material(feature) {
+                                let mut meshes = primitives(element.node, &children, |e| {
+                                    material_handles.contains(e)
+                                });
+                                if meshes.is_empty() {
+                                    meshes.extend(element.mesh);
+                                }
+                                // An element written directly is one element,
+                                // but the GLB may share its materials with
+                                // others, which a material write would change
+                                // too. Each mesh gets a copy of its own the first
+                                // time.
+                                for &mesh in &meshes {
+                                    if own.0.insert(mesh) {
+                                        if let Ok(mut handle) = material_handles.get_mut(mesh) {
+                                            if let Some(copy) = materials.get(&handle.0).cloned() {
+                                                handle.0 = materials.add(copy);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            meshes
-                        } else {
-                            vec![element.node]
-                        };
-                        entities
-                            .into_iter()
-                            .map(|entity| SceneBinding {
-                                entity,
-                                feature: feature.clone(),
-                                axis: None,
-                                morph_index: None,
-                            })
-                            .collect()
+                                meshes
+                            } else {
+                                vec![element.node]
+                            };
+                            entities
+                                .into_iter()
+                                .map(|entity| SceneBinding {
+                                    entity,
+                                    feature: feature.clone(),
+                                    axis,
+                                    morph_index: None,
+                                })
+                                .collect()
+                        }
                     }
                     None => continue,
                 },
@@ -287,6 +308,56 @@ pub fn primitives(
         .get(node)
         .map(|c| c.iter().filter(|&e| is_mesh(e)).collect())
         .unwrap_or_default()
+}
+
+/// The feature an element write names, resolved against the element: its
+/// kind, the component a per-axis name drives, and a morph target's index.
+/// `None`, said in the log, for a name the element does not have or a value
+/// of the wrong shape for it: one number for a per-axis name, a morph, or a
+/// scalar feature, three for a vector or a colour, and either for `scale`,
+/// where one scales evenly.
+fn element_feature(
+    instance: &EntityInstance,
+    element_id: &str,
+    name: &str,
+    value: Decoded,
+) -> Option<(FeatureKind, Option<usize>, Option<usize>)> {
+    let morphs = instance
+        .meta
+        .elements
+        .iter()
+        .find(|element| element.id == element_id)
+        .map_or(&[][..], |element| element.morph_targets.as_slice());
+    let Some((kind, axis)) = FeatureKind::parse(name, morphs) else {
+        log::warn!("{}: {element_id} has no feature {name:?}", instance.id);
+        return None;
+    };
+    let scalar = matches!(value, Decoded::Scalar(_));
+    let fits = match (&kind, axis) {
+        (_, Some(_)) => scalar,
+        (FeatureKind::Scale, None) => true,
+        (
+            FeatureKind::Translation
+            | FeatureKind::Rotation
+            | FeatureKind::Color
+            | FeatureKind::Emissive
+            | FeatureKind::Specular,
+            None,
+        ) => !scalar,
+        _ => scalar,
+    };
+    if !fits {
+        log::warn!(
+            "{}: {name} of {element_id} does not take {value:?}",
+            instance.id
+        );
+        return None;
+    }
+    let morph_index = match &kind {
+        FeatureKind::Morph(target) => morphs.iter().position(|m| m == target),
+        _ => None,
+    };
+    Some((kind, axis, morph_index))
 }
 
 /// Whether a feature is written onto a material rather than a transform or
@@ -365,7 +436,10 @@ fn apply(
                 None => false,
             }
         }
-        FeatureKind::Color | FeatureKind::Opacity | FeatureKind::Emissive => {
+        FeatureKind::Color
+        | FeatureKind::Opacity
+        | FeatureKind::Emissive
+        | FeatureKind::Metalness => {
             let Some(mut material) = material_handles
                 .get(binding.entity)
                 .ok()
@@ -379,6 +453,7 @@ fn apply(
                     let [r, g, b] = triple([current.red, current.green, current.blue]);
                     material.base_color = Color::linear_rgba(r, g, b, current.alpha);
                 }
+                FeatureKind::Metalness => material.metallic = scalar,
                 FeatureKind::Opacity => {
                     material.base_color.set_alpha(scalar);
                     material.alpha_mode = if scalar < 1.0 {
@@ -567,6 +642,119 @@ mod tests {
         assert_ne!(a0, b0, "each robot has its own");
         assert!((red_a0 - 1.0).abs() < 1e-5 && (red_a1 - 1.0).abs() < 1e-5);
         assert!((red_b0 - 1.0).abs() > 1e-3, "b was not written");
+    }
+
+    /// An element write names its feature as `RobotData` does, resolved
+    /// against the element: a per-axis name moves one component, a morph
+    /// target's name its weight, `metalness` the material; a value of the
+    /// wrong shape, or a feature the element lacks, changes nothing.
+    #[test]
+    fn an_element_write_takes_the_names_robotdata_gives() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_message::<RequestRedraw>()
+            .add_plugins(ValuesPlugin);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let world = app.world_mut();
+        let node = world.spawn(Transform::from_xyz(1.0, 2.0, 3.0)).id();
+        let mesh = world.spawn(MeshMaterial3d(material)).id();
+        let bearer = world
+            .spawn(MorphWeights::new(vec![0.0, 0.0], None).unwrap())
+            .id();
+        let mut bindings = SceneBindings::default();
+        bindings.elements.insert(
+            "lid".into(),
+            arora_visuals::binding::ElementTargets {
+                node,
+                mesh: Some(mesh),
+                morph: Some(bearer),
+            },
+        );
+        bindings.indexed = true;
+        let mut meta = arora_visuals::meta::AssetMeta::default();
+        meta.elements.push(arora_visuals::meta::Element {
+            id: "lid".into(),
+            name: String::new(),
+            node_name: "lid".into(),
+            kind: "shape".into(),
+            material: None,
+            morph_targets: vec!["open".into(), "blink".into()],
+            primitive: None,
+        });
+        world.spawn((
+            asset("a"),
+            EntityInstance {
+                id: "a".into(),
+                asset_path: String::new(),
+                meta,
+                bindings,
+                camera: Entity::PLACEHOLDER,
+                draw_order: 0,
+                ready: true,
+            },
+        ));
+        let write = |app: &mut App, feature: &str, value: Decoded| {
+            app.world_mut()
+                .resource_mut::<ValueWrites>()
+                .0
+                .push(ValueWrite {
+                    instance: Some("a".into()),
+                    target: "lid".into(),
+                    feature: Some(feature.into()),
+                    value,
+                    stamp: None,
+                });
+            app.update();
+            app.world().resource::<AppliedValues>().count
+        };
+
+        assert_eq!(write(&mut app, "translation.y", Decoded::Scalar(5.0)), 1);
+        assert_eq!(
+            app.world().get::<Transform>(node).unwrap().translation,
+            Vec3::new(1.0, 5.0, 3.0)
+        );
+        assert_eq!(write(&mut app, "blink", Decoded::Scalar(0.5)), 1);
+        assert_eq!(
+            app.world().get::<MorphWeights>(bearer).unwrap().weights(),
+            &[0.0, 0.5]
+        );
+        assert_eq!(write(&mut app, "metalness", Decoded::Scalar(0.25)), 1);
+        let handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+            .unwrap()
+            .0
+            .clone();
+        let metallic = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handle)
+            .unwrap()
+            .metallic;
+        assert_eq!(metallic, 0.25);
+
+        // The wrong shape, and a name the element does not have.
+        assert_eq!(write(&mut app, "opacity", Decoded::Triple([1.0; 3])), 0);
+        assert_eq!(write(&mut app, "translation", Decoded::Scalar(9.0)), 0);
+        assert_eq!(
+            write(&mut app, "translation.y", Decoded::Triple([9.0; 3])),
+            0
+        );
+        assert_eq!(write(&mut app, "wink", Decoded::Scalar(1.0)), 0);
+        assert_eq!(
+            app.world().get::<Transform>(node).unwrap().translation,
+            Vec3::new(1.0, 5.0, 3.0)
+        );
+        // Scale takes one number, scaling evenly.
+        assert_eq!(write(&mut app, "scale", Decoded::Scalar(2.0)), 1);
+        assert_eq!(
+            app.world().get::<Transform>(node).unwrap().scale,
+            Vec3::splat(2.0)
+        );
     }
 
     /// A robot that goes takes the material copies made for it, so they do
