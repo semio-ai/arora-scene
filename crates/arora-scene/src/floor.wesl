@@ -110,8 +110,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let major = lines(coord, surface.section, surface.major_width);
     let depth = sunk(in);
     // Metres of sinking per pixel across the sunken surface, which sets the
-    // waterline's width on screen.
-    let rate = max(fwidth(depth), 1e-6);
+    // waterline's width on screen. A neighbour with nothing beyond it reads
+    // -1, and the step to it is a silhouette, not the surface crossing the
+    // floor, so that axis's gradient is left out: a flat face sunk clear of
+    // the floor keeps its tint up to its edge.
+    let shown = select(0.0, 1.0, depth >= 0.0);
+    let across = select(abs(dpdx(depth)), 0.0, dpdx(shown) != 0.0);
+    let down = select(abs(dpdy(depth)), 0.0, dpdy(shown) != 0.0);
+    let rate = max(across + down, 1e-6);
 
     let reach = distance(in.world_position.xyz, view_bindings::view.world_position);
     let fade = pow(1.0 - min(reach / surface.fade_distance, 1.0), surface.fade_strength);

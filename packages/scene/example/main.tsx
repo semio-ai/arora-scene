@@ -12,6 +12,7 @@ import {
   type Backend,
   type Joint,
   type OverlayFrame,
+  type Pose,
   type SceneEvent,
   type SceneHandle,
   type SceneRobot,
@@ -105,6 +106,10 @@ function Running({ robot: first }: { robot: Robot }) {
   const sceneRef = useRef<SceneHandle>(undefined);
   const writeBack = useRef(true);
   const jointControls = useRef(new Map<string, JointControl>());
+  // Which robot each robot control moves, and where the driver last stood
+  // each robot, so the floor buttons below change only its height.
+  const robotControls = useRef(new Map<string, string>());
+  const stood = useRef(new Map<string, Pose>());
   const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
 
   const onEvent = useCallback((event: SceneEvent) => {
@@ -136,6 +141,8 @@ function Running({ robot: first }: { robot: Robot }) {
     const joint = jointControls.current.get(event.key);
     if (event.value !== undefined && joint)
       scene.setValue(joint.instance, joint.joint, event.value);
+    const robot = robotControls.current.get(event.key);
+    if (event.pose && robot) stood.current.set(robot, event.pose);
     if (event.pose)
       scene.control({
         op: "setPose",
@@ -144,6 +151,19 @@ function Running({ robot: first }: { robot: Robot }) {
         scale: event.scale,
       });
   }, []);
+
+  // Moves the current robot to `height` above the floor, keeping where it
+  // stands across the floor and which way it faces.
+  const standAt = (height: number) => {
+    const was = stood.current.get(current) ??
+      robots[current]?.pose ?? { position: [0, 0, 0] };
+    const pose: Pose = {
+      position: [was.position[0], was.position[1], height],
+      rotation: was.rotation,
+    };
+    stood.current.set(current, pose);
+    scene?.setPose(current, pose);
+  };
 
   const ready = (handle: SceneHandle) => {
     sceneRef.current = handle;
@@ -221,6 +241,7 @@ function Running({ robot: first }: { robot: Robot }) {
         });
       }
       case "robot":
+        robotControls.current.set(key, current);
         return scene.control({
           op: "add",
           key,
@@ -240,6 +261,7 @@ function Running({ robot: first }: { robot: Robot }) {
         });
       case "remove":
         jointControls.current.delete(key);
+        robotControls.current.delete(key);
         return scene.control({ op: "remove", key });
       case "highlight":
       case "unhighlight":
@@ -444,25 +466,11 @@ function Running({ robot: first }: { robot: Robot }) {
             <button
               type="button"
               disabled={!scene}
-              onClick={() =>
-                scene?.setPose(current, {
-                  position: [0, 0, -0.15],
-                  rotation: [0, 0, 0, 1],
-                })
-              }
+              onClick={() => standAt(-0.15)}
             >
               Sink {current} 15 cm
             </button>
-            <button
-              type="button"
-              disabled={!scene}
-              onClick={() =>
-                scene?.setPose(current, {
-                  position: [0, 0, 0],
-                  rotation: [0, 0, 0, 1],
-                })
-              }
-            >
+            <button type="button" disabled={!scene} onClick={() => standAt(0)}>
               Stand it on the floor
             </button>
           </div>
