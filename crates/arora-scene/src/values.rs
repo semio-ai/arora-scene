@@ -62,6 +62,7 @@ impl Plugin for ValuesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ValueWrites>()
             .init_resource::<AppliedValues>()
+            .init_resource::<Emission>()
             .add_systems(Update, apply_values.in_set(ApplyValues));
     }
 }
@@ -101,8 +102,9 @@ pub struct InstanceMaterials {
 /// the colour kept beside it: the colour is the material's emissive when it is
 /// first touched, which is what its GLB gave it at that intensity, 1. Kept by
 /// material, as the material is what the two writes share, and dropped once
-/// the material is.
-#[derive(Default)]
+/// the material is. A resource rather than the value system's own, because
+/// whatever else copies a material has to carry its state to the copy.
+#[derive(Resource, Default)]
 pub struct Emission(HashMap<AssetId<StandardMaterial>, Emitting>);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +129,19 @@ impl Emission {
     /// A copy of `from` emits as it does, so its state goes with it: read
     /// afresh, the copy's emissive would be taken as the colour with the
     /// intensity already in it.
-    fn copied(&mut self, from: AssetId<StandardMaterial>, to: AssetId<StandardMaterial>) {
+    /// A material's colour and intensity, given one.
+    #[cfg(test)]
+    pub(crate) fn set(&mut self, id: AssetId<StandardMaterial>, colour: [f32; 3], intensity: f32) {
+        self.0.insert(id, Emitting { colour, intensity });
+    }
+
+    /// A material's colour and intensity, if it has been touched.
+    #[cfg(test)]
+    pub(crate) fn state(&self, id: AssetId<StandardMaterial>) -> Option<([f32; 3], f32)> {
+        self.0.get(&id).map(|e| (e.colour, e.intensity))
+    }
+
+    pub fn copied(&mut self, from: AssetId<StandardMaterial>, to: AssetId<StandardMaterial>) {
         if let Some(state) = self.0.get(&from).copied() {
             self.0.insert(to, state);
         }
@@ -148,7 +162,7 @@ pub fn apply_values(
     children: Query<&Children>,
     mut own: Local<OwnMaterials>,
     mut shared: Local<InstanceMaterials>,
-    mut emission: Local<Emission>,
+    mut emission: ResMut<Emission>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     applied.count = 0;

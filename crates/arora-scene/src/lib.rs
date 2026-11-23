@@ -1597,6 +1597,7 @@ fn split_materials(
     frames: Res<Frames>,
     mut done: Local<bool>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut emission: Option<ResMut<values::Emission>>,
     meshes: Query<(Entity, &MeshMaterial3d<StandardMaterial>), With<Mesh3d>>,
     mut commands: Commands,
 ) {
@@ -1608,9 +1609,12 @@ fn split_materials(
         let Some(own) = materials.get(&material.0).cloned() else {
             continue;
         };
-        commands
-            .entity(entity)
-            .insert(MeshMaterial3d(materials.add(own)));
+        let copy = materials.add(own);
+        // The copy emits as the original does, intensity included.
+        if let Some(emission) = emission.as_mut() {
+            emission.copied(material.0.id(), copy.id());
+        }
+        commands.entity(entity).insert(MeshMaterial3d(copy));
         split += 1;
     }
     if split > 0 {
@@ -1752,6 +1756,56 @@ pub fn report(opts: &SceneOptions, frames: &Frames, census: &Census) {
 
 #[cfg(test)]
 mod tests {
+    /// Giving each mesh its own material carries what the original emitted
+    /// before its intensity scaled it: read afresh, a copy of a material
+    /// dimmed to nothing would take black for its colour, and stay black
+    /// whatever intensity it was given later.
+    #[test]
+    fn a_split_material_keeps_its_emission() {
+        use bevy::prelude::*;
+
+        let mut app = App::new();
+        app.insert_resource(super::SceneOptions {
+            unique_materials: true,
+            ..Default::default()
+        })
+        .insert_resource(super::Frames {
+            elapsed: 1.0,
+            ..Default::default()
+        })
+        .init_resource::<Assets<StandardMaterial>>()
+        .init_resource::<super::values::Emission>()
+        .add_systems(Update, super::split_materials);
+        let original = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                emissive: LinearRgba::BLACK,
+                ..default()
+            });
+        app.world_mut()
+            .resource_mut::<super::values::Emission>()
+            .set(original.id(), [1.0, 0.5, 0.0], 0.0);
+        let mesh = app
+            .world_mut()
+            .spawn((Mesh3d::default(), MeshMaterial3d(original.clone())))
+            .id();
+        app.update();
+        let copy = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+            .unwrap()
+            .0
+            .id();
+        assert_ne!(copy, original.id(), "split");
+        assert_eq!(
+            app.world()
+                .resource::<super::values::Emission>()
+                .state(copy),
+            Some(([1.0, 0.5, 0.0], 0.0)),
+        );
+    }
+
     use super::*;
     use crate::controls::ScenePose;
 
