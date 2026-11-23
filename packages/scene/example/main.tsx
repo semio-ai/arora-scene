@@ -12,6 +12,7 @@ import {
   type Backend,
   type Joint,
   type OverlayFrame,
+  type Pose,
   type SceneEvent,
   type SceneHandle,
   type SceneRobot,
@@ -105,6 +106,10 @@ function Running({ robot: first }: { robot: Robot }) {
   const sceneRef = useRef<SceneHandle>(undefined);
   const writeBack = useRef(true);
   const jointControls = useRef(new Map<string, JointControl>());
+  // Which robot each robot control moves, and where the driver last stood
+  // each robot, so the floor buttons below change only its height.
+  const robotControls = useRef(new Map<string, string>());
+  const stood = useRef(new Map<string, Pose>());
   const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
 
   const onEvent = useCallback((event: SceneEvent) => {
@@ -112,6 +117,9 @@ function Running({ robot: first }: { robot: Robot }) {
     if (event.type === "pick")
       return note(`pick ${event.instance} ${event.element ?? "(no element)"}`);
     if (event.type === "loaded") {
+      // A robot loaded into the instance stands at its load pose, whatever
+      // the one it replaced was moved to.
+      stood.current.delete(event.instance);
       setJoints((j) => ({ ...j, [event.instance]: event.joints }));
       return note(`${event.instance} shows ${event.key ?? "a robot"}`);
     }
@@ -136,6 +144,8 @@ function Running({ robot: first }: { robot: Robot }) {
     const joint = jointControls.current.get(event.key);
     if (event.value !== undefined && joint)
       scene.setValue(joint.instance, joint.joint, event.value);
+    const robot = robotControls.current.get(event.key);
+    if (event.pose && robot) stood.current.set(robot, event.pose);
     if (event.pose)
       scene.control({
         op: "setPose",
@@ -144,6 +154,19 @@ function Running({ robot: first }: { robot: Robot }) {
         scale: event.scale,
       });
   }, []);
+
+  // Moves the current robot to `height` above the floor, keeping where it
+  // stands across the floor and which way it faces.
+  const standAt = (height: number) => {
+    const was = stood.current.get(current) ??
+      robots[current]?.pose ?? { position: [0, 0, 0] };
+    const pose: Pose = {
+      position: [was.position[0], was.position[1], height],
+      rotation: was.rotation,
+    };
+    stood.current.set(current, pose);
+    scene?.setPose(current, pose);
+  };
 
   const ready = (handle: SceneHandle) => {
     sceneRef.current = handle;
@@ -210,7 +233,14 @@ function Running({ robot: first }: { robot: Robot }) {
     const form = new FormData(e.currentTarget);
     const key = String(form.get("key"));
     if (!scene || !key) return;
-    switch (submitter?.value) {
+    const op = submitter?.value;
+    // An add replaces whatever control had the key, so what the driver kept
+    // about that one goes with it.
+    if (op === "joint" || op === "robot" || op === "goal") {
+      jointControls.current.delete(key);
+      robotControls.current.delete(key);
+    }
+    switch (op) {
       case "joint": {
         const joint = String(form.get("joint"));
         jointControls.current.set(key, { instance: current, joint });
@@ -221,6 +251,7 @@ function Running({ robot: first }: { robot: Robot }) {
         });
       }
       case "robot":
+        robotControls.current.set(key, current);
         return scene.control({
           op: "add",
           key,
@@ -240,6 +271,7 @@ function Running({ robot: first }: { robot: Robot }) {
         });
       case "remove":
         jointControls.current.delete(key);
+        robotControls.current.delete(key);
         return scene.control({ op: "remove", key });
       case "highlight":
       case "unhighlight":
@@ -428,6 +460,31 @@ function Running({ robot: first }: { robot: Robot }) {
             Write drags back, as a driver would
           </label>
         </form>
+        <h4>Floor</h4>
+        <div style={{ display: "grid", gap: 8 }}>
+          <label>
+            <input
+              type="checkbox"
+              disabled={!scene}
+              onChange={(e) =>
+                scene?.setBelowFloor(e.target.checked ? {} : undefined)
+              }
+            />{" "}
+            Show what sinks below the floor
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              disabled={!scene}
+              onClick={() => standAt(-0.15)}
+            >
+              Sink {current} 15 cm
+            </button>
+            <button type="button" disabled={!scene} onClick={() => standAt(0)}>
+              Stand it on the floor
+            </button>
+          </div>
+        </div>
         <h4>Joints of {current}</h4>
         <ul style={{ paddingLeft: 16 }}>
           {(joints[current] ?? []).map((joint) => (

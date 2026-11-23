@@ -1,5 +1,6 @@
 import type {
   Backend,
+  BelowFloorOptions,
   ControlCommand,
   FeatureValue,
   Pose,
@@ -19,6 +20,7 @@ interface Module {
   frame: (instances: string[]) => void;
   set_theme: (theme: string) => void;
   set_environment: (environment: string) => void;
+  set_below_floor: (options: string) => void;
   set_active_area: (area: Float32Array) => void;
   set_value: (
     instance: string,
@@ -145,6 +147,11 @@ export interface SceneHandle {
   frame(instances?: string[]): void;
   setTheme(theme: NonNullable<SceneOptions["theme"]>): void;
   setEnvironment(environment: NonNullable<SceneOptions["environment"]>): void;
+  /**
+   * Shows what has sunk below the floor through it, or stops showing it for
+   * `undefined`.
+   */
+  setBelowFloor(options: BelowFloorOptions | undefined): void;
   /**
    * The part of the canvas left visible beside the host's panels,
    * `[x, y, width, height]` in CSS pixels, which the camera frames the robots
@@ -376,6 +383,9 @@ async function start(
     },
     setEnvironment(environment) {
       wasm.set_environment(environment);
+    },
+    setBelowFloor(options) {
+      wasm.set_below_floor(options ? JSON.stringify(options) : "");
     },
     setActiveArea(area) {
       wasm.set_active_area(Float32Array.from(area ?? []));

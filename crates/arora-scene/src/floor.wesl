@@ -11,13 +11,21 @@
 // that cannot be drawn faithfully — they beat against the pixel grid into
 // moiré that crawls as the camera moves — so they are faded before they get
 // there rather than hidden behind a distance.
+//
+// What has sunk below the floor is found in the depth prepass: the nearest
+// opaque surface along this fragment's ray, which with the camera above the
+// floor lies beyond the floor only if it is below it. The sky dome is kept out
+// of the prepass, so where nothing is beneath, the prepass holds its clear
+// value and the floor stays as it is.
 
 import bevy_pbr::render::{
     forward_io::VertexOutput,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     shadows,
+    view_transformations,
 };
+import bevy_pbr::prepass::utils;
 
 struct Floor {
     colour: vec4<f32>,
@@ -35,7 +43,18 @@ struct Floor {
     // raised to this power.
     fade_distance: f32,
     fade_strength: f32,
-    _padding: f32,
+    // How opaque the ground between the lines is.
+    opacity: f32,
+    // What a sunken surface is tinted in.
+    warning: vec4<f32>,
+    // One to show what has sunk below the floor, zero not to.
+    below: f32,
+    // How far below the floor a surface may go unshown, in metres.
+    tolerance: f32,
+    // The width of the line where a surface crosses the floor, in pixels.
+    waterline: f32,
+    // How opaque the floor stays over a sunken surface.
+    over_sunken: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> surface: Floor;
@@ -62,12 +81,62 @@ fn lines(coord: vec2<f32>, spacing: f32, width: f32) -> f32 {
     return max(coverage.x, coverage.y);
 }
 
+// What the prepass saw along this fragment's ray: how far below the floor it
+// lies in metres (negative above it), how far from the eye, and whether it
+// saw anything at all. Nothing is seen when nothing is there, the camera is
+// below the floor, or the prepass cannot be read. A surface in front of the
+// floor hides this fragment, but its height is still given, because a
+// neighbouring fragment's waterline needs the crossing it makes.
+fn sunk(in: VertexOutput) -> vec3<f32> {
+    @if(DEPTH_PREPASS) {
+        // Seen from below, what lies beyond the floor is above it.
+        if surface.below > 0.5 && view_bindings::view.world_position.y > in.world_position.y {
+            let depth = utils::prepass_depth(in.position, 0u);
+            // Depth runs from one at the near plane to zero at infinity, so
+            // zero is nothing.
+            if depth > 0.0 {
+                let beyond = view_transformations::position_ndc_to_world(
+                    view_transformations::frag_coord_to_ndc(vec4(in.position.xy, depth, 1.0))
+                );
+                let far = distance(beyond, view_bindings::view.world_position);
+                return vec3(in.world_position.y - beyond.y, far, 1.0);
+            }
+        }
+    }
+    return vec3(0.0, 0.0, 0.0);
+}
+
+// The share of its own distance the surface beyond may jump between
+// neighbouring pixels and still be one surface. Past it, the step is one
+// surface's edge in front of another, not a surface crossing the floor.
+const EDGE: f32 = 0.05;
+
+// How much a pixel's height differs from its neighbour's along one screen
+// axis, or zero where the two are not one surface: one of them sees nothing,
+// or the distance to what they see jumps.
+fn within(change: f32, seen_change: f32, far: f32, far_change: f32) -> f32 {
+    if seen_change != 0.0 || abs(far_change) > EDGE * far {
+        return 0.0;
+    }
+    return abs(change);
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Derivatives first, while every fragment of the quad is still running.
     let coord = in.world_position.xz;
     let minor = lines(coord, surface.cell, surface.minor_width);
     let major = lines(coord, surface.section, surface.major_width);
+    let seen = sunk(in);
+    let depth = select(-1.0, seen.x, seen.z > 0.5);
+    // Metres of sinking per pixel across the surface, which sets the
+    // waterline's width on screen. Only steps within one surface count: a
+    // silhouette against nothing, or an edge in front of a farther surface,
+    // is not that surface crossing the floor, and counting it would draw a
+    // solid line along a face sunk clear of the floor.
+    let across = within(dpdx(seen.x), dpdx(seen.z), seen.y, dpdx(seen.y));
+    let down = within(dpdy(seen.x), dpdy(seen.z), seen.y, dpdy(seen.y));
+    let rate = max(across + down, 1e-6);
 
     let reach = distance(in.world_position.xyz, view_bindings::view.world_position);
     let fade = pow(1.0 - min(reach / surface.fade_distance, 1.0), surface.fade_strength);
@@ -92,5 +161,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             lit = min(lit, shadows::fetch_directional_shadow(i, in.world_position, normal, view_z, in.position.xy));
         }
     }
-    return vec4(colour * mix(1.0 - surface.shadow, 1.0, lit), 1.0);
+    colour *= mix(1.0 - surface.shadow, 1.0, lit);
+
+    if depth > surface.tolerance {
+        // Within the waterline's width of where the surface sinks past the
+        // allowance: the line, solid.
+        if (depth - surface.tolerance) / rate < surface.waterline {
+            return vec4(surface.warning.rgb, 1.0);
+        }
+        return vec4(mix(colour, surface.warning.rgb, 0.7), surface.over_sunken);
+    }
+    // The grid's lines stay solid on a see-through floor.
+    let line = max(minor, major) * fade;
+    return vec4(colour, mix(surface.opacity, 1.0, line));
 }
