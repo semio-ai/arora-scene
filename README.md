@@ -204,12 +204,14 @@ scene.control({ op: "remove", key: "left-hand-goal" });
 - **A transform control's target** is `{ kind: "robot", instance }`,
   `{ kind: "element", instance, id }` or `{ kind: "goal", pose }`. It offers moving,
   turning and scaling unless `modes` names fewer, along the world's axes unless
-  `local` is set.
+  `local` is set. Its arrows, with their squares and balls, stay on each
+  axis's positive side, so each shows which way its axis runs, unless
+  `faceViewer` turns them toward the camera.
 - **Colours are the host's** when it gives them, as CSS hex: `color` on a joint
   control (its joint's own otherwise), `colors` for a transform control's X, Y
   and Z (red, green and blue otherwise).
 - **`configure` changes a control in place**: a joint control's `color`, a
-  transform control's `colors` and `local`, and for either its `opacity` and
+  transform control's `colors`, `local` and `faceViewer`, and for either its `opacity` and
   whether it is `interactive`. What it leaves out stays as it is, and what a
   control's kind does not take is ignored, so one command can recolour
   controls of both kinds.
