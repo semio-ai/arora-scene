@@ -117,6 +117,9 @@ function Running({ robot: first }: { robot: Robot }) {
     if (event.type === "pick")
       return note(`pick ${event.instance} ${event.element ?? "(no element)"}`);
     if (event.type === "loaded") {
+      // A robot loaded into the instance stands at its load pose, whatever
+      // the one it replaced was moved to.
+      stood.current.delete(event.instance);
       setJoints((j) => ({ ...j, [event.instance]: event.joints }));
       return note(`${event.instance} shows ${event.key ?? "a robot"}`);
     }
