@@ -230,7 +230,14 @@ function Running({ robot: first }: { robot: Robot }) {
     const form = new FormData(e.currentTarget);
     const key = String(form.get("key"));
     if (!scene || !key) return;
-    switch (submitter?.value) {
+    const op = submitter?.value;
+    // An add replaces whatever control had the key, so what the driver kept
+    // about that one goes with it.
+    if (op === "joint" || op === "robot" || op === "goal") {
+      jointControls.current.delete(key);
+      robotControls.current.delete(key);
+    }
+    switch (op) {
       case "joint": {
         const joint = String(form.get("joint"));
         jointControls.current.set(key, { instance: current, joint });

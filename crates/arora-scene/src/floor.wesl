@@ -81,25 +81,44 @@ fn lines(coord: vec2<f32>, spacing: f32, width: f32) -> f32 {
     return max(coverage.x, coverage.y);
 }
 
-// How far below the floor the surface beyond this fragment lies, in metres,
-// or a negative where there is none to show: nothing is beyond it, the camera
-// is below the floor, or the prepass cannot be read.
-fn sunk(in: VertexOutput) -> f32 {
+// What the prepass saw along this fragment's ray: how far below the floor it
+// lies in metres (negative above it), how far from the eye, and whether it
+// saw anything at all. Nothing is seen when nothing is there, the camera is
+// below the floor, or the prepass cannot be read. A surface in front of the
+// floor hides this fragment, but its height is still given, because a
+// neighbouring fragment's waterline needs the crossing it makes.
+fn sunk(in: VertexOutput) -> vec3<f32> {
     @if(DEPTH_PREPASS) {
         // Seen from below, what lies beyond the floor is above it.
         if surface.below > 0.5 && view_bindings::view.world_position.y > in.world_position.y {
             let depth = utils::prepass_depth(in.position, 0u);
-            // Depth runs from one at the near plane to zero at infinity, so a
-            // surface beyond the floor is a smaller depth, and zero is none.
-            if depth > 0.0 && depth < in.position.z {
+            // Depth runs from one at the near plane to zero at infinity, so
+            // zero is nothing.
+            if depth > 0.0 {
                 let beyond = view_transformations::position_ndc_to_world(
                     view_transformations::frag_coord_to_ndc(vec4(in.position.xy, depth, 1.0))
                 );
-                return in.world_position.y - beyond.y;
+                let far = distance(beyond, view_bindings::view.world_position);
+                return vec3(in.world_position.y - beyond.y, far, 1.0);
             }
         }
     }
-    return -1.0;
+    return vec3(0.0, 0.0, 0.0);
+}
+
+// The share of its own distance the surface beyond may jump between
+// neighbouring pixels and still be one surface. Past it, the step is one
+// surface's edge in front of another, not a surface crossing the floor.
+const EDGE: f32 = 0.05;
+
+// How much a pixel's height differs from its neighbour's along one screen
+// axis, or zero where the two are not one surface: one of them sees nothing,
+// or the distance to what they see jumps.
+fn within(change: f32, seen_change: f32, far: f32, far_change: f32) -> f32 {
+    if seen_change != 0.0 || abs(far_change) > EDGE * far {
+        return 0.0;
+    }
+    return abs(change);
 }
 
 @fragment
@@ -108,15 +127,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let coord = in.world_position.xz;
     let minor = lines(coord, surface.cell, surface.minor_width);
     let major = lines(coord, surface.section, surface.major_width);
-    let depth = sunk(in);
-    // Metres of sinking per pixel across the sunken surface, which sets the
-    // waterline's width on screen. A neighbour with nothing beyond it reads
-    // -1, and the step to it is a silhouette, not the surface crossing the
-    // floor, so that axis's gradient is left out: a flat face sunk clear of
-    // the floor keeps its tint up to its edge.
-    let shown = select(0.0, 1.0, depth >= 0.0);
-    let across = select(abs(dpdx(depth)), 0.0, dpdx(shown) != 0.0);
-    let down = select(abs(dpdy(depth)), 0.0, dpdy(shown) != 0.0);
+    let seen = sunk(in);
+    let depth = select(-1.0, seen.x, seen.z > 0.5);
+    // Metres of sinking per pixel across the surface, which sets the
+    // waterline's width on screen. Only steps within one surface count: a
+    // silhouette against nothing, or an edge in front of a farther surface,
+    // is not that surface crossing the floor, and counting it would draw a
+    // solid line along a face sunk clear of the floor.
+    let across = within(dpdx(seen.x), dpdx(seen.z), seen.y, dpdx(seen.y));
+    let down = within(dpdy(seen.x), dpdy(seen.z), seen.y, dpdy(seen.y));
     let rate = max(across + down, 1e-6);
 
     let reach = distance(in.world_position.xyz, view_bindings::view.world_position);
