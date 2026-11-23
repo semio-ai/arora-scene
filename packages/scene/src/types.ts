@@ -125,6 +125,13 @@ export interface Pose {
  * of its elements names the robot by its instance; a goal stands on its own.
  */
 export type ControlTarget =
+  /** A robot as a whole, by its instance: the name every host's controls take. */
+  | { kind: "instance"; instance: string }
+  /**
+   * @deprecated The same target as `{ kind: "instance" }`, under the name it
+   * had before the scene's controls were shared with `@vizij/runtime`'s.
+   * Still read, and logged as deprecated; send `"instance"`.
+   */
   | { kind: "robot"; instance: string }
   /** One element of a robot, by the id its `RobotData` gives it. */
   | { kind: "element"; instance: string; id: string }

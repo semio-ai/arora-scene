@@ -201,8 +201,11 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   joint, value)` for a joint control, `control({ op: "setPose", key, pose,
   scale })` for a transform control. What the driver holds and what the scene shows cannot
   disagree. `phase` is `"start"`, `"move"` or `"end"`.
-- **A transform control's target** is `{ kind: "robot", instance }`,
-  `{ kind: "element", instance, id }` or `{ kind: "goal", pose }`. It offers moving,
+- **A transform control's target** is `{ kind: "instance", instance }` (a
+  robot as a whole), `{ kind: "element", instance, id }` or
+  `{ kind: "goal", pose }`. `{ kind: "robot", instance }`, the whole-robot
+  target's earlier name, is deprecated: it is still read as `instance`, and
+  said in the log. It offers moving,
   turning and scaling unless `modes` names fewer, along the world's axes unless
   `local` is set. Its arrows, with their squares and balls, stay on each
   axis's positive side, so each shows which way its axis runs, unless
