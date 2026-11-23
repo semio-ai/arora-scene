@@ -210,12 +210,15 @@ scene.control({ op: "remove", key: "left-hand-goal" });
   `local` is set. Its arrows, with their squares and balls, stay on each
   axis's positive side, so each shows which way its axis runs, unless
   `faceViewer` turns them toward the camera.
+- **A control's `size`** is `{ pixels }`, the same on screen however near or
+  far, or `{ metres }`, fixed in the world. A transform control is 0.25 metres
+  and a joint control 0.2 metres unless its add or a `configure` gives one.
 - **Colours are the host's** when it gives them, as CSS hex: `color` on a joint
   control (its joint's own otherwise), `colors` for a transform control's X, Y
   and Z (red, green and blue otherwise).
 - **`configure` changes a control in place**: a joint control's `color`, a
-  transform control's `colors`, `local` and `faceViewer`, and for either its `opacity` and
-  whether it is `interactive`. What it leaves out stays as it is, and what a
+  transform control's `colors`, `local` and `faceViewer`, and for either its
+  `size`, its `opacity` and whether it is `interactive`. What it leaves out stays as it is, and what a
   control's kind does not take is ignored, so one command can recolour
   controls of both kinds.
 - **`opacity` fades a control** evenly to a value from 0 to 1 over a fifth of

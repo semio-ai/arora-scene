@@ -1828,6 +1828,57 @@ mod tests {
         ));
     }
 
+    /// A control is the size its add gives it, and changes to the size a
+    /// configure gives it; given none, it is the shared default for its kind.
+    #[test]
+    fn a_control_takes_the_size_it_is_given() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let read = |json: &str| read_command(json).unwrap();
+        send(
+            &mut app,
+            read(
+                r#"{"op":"add","key":"goal","control":{"kind":"transform","target":{"kind":"goal","pose":{"position":[0,0,1]}},"size":{"pixels":40}}}"#,
+            ),
+        );
+        let gizmo = only::<TransformGizmo>(&mut app).expect("a transform control");
+        let size = |app: &App| app.world().get::<TransformGizmo>(gizmo).unwrap().size;
+        assert_eq!(size(&app), GizmoSize::Pixels(40.0));
+        send(
+            &mut app,
+            read(r#"{"op":"configure","key":"goal","size":{"metres":0.5}}"#),
+        );
+        assert_eq!(size(&app), GizmoSize::World(0.5));
+
+        send(
+            &mut app,
+            read(&format!(
+                r#"{{"op":"add","key":"tilt","control":{{"kind":"joint","instance":"{ROBOT}","joint":"{TILT}","size":{{"pixels":30}}}}}}"#
+            )),
+        );
+        let joint = only::<JointGizmo>(&mut app).expect("a joint control");
+        assert_eq!(
+            app.world().get::<JointGizmo>(joint).unwrap().size,
+            GizmoSize::Pixels(30.0)
+        );
+
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: "plain".into(),
+                control: goal_at([1.0, 0.0, 1.0]),
+            },
+        );
+        let plain = app
+            .world_mut()
+            .query::<&TransformGizmo>()
+            .iter(app.world())
+            .find(|gizmo| gizmo.key == "plain")
+            .expect("the plain control")
+            .size;
+        assert_eq!(plain, arora_visuals::transform_gizmo::GIZMO_SIZE);
+    }
+
     /// A whole robot as a target reads as `instance`, and as the older
     /// `robot`; any other target is read as sent.
     #[test]
