@@ -30,7 +30,6 @@ use arora_scene::stage::{BelowFloor, Environment, Theme};
 use arora_scene::values::{ApplyValues, ValueWrite, ValueWrites};
 use arora_scene::{SceneOptions, ScenePlugin};
 use arora_visuals::active_area::ActiveArea;
-use arora_visuals::meta::FeatureKind;
 use arora_visuals::overlay::Overlay;
 use arora_visuals::pick::Picked;
 use arora_visuals::select::Selection;
@@ -556,8 +555,10 @@ fn take_pushed(mut writes: ResMut<ValueWrites>) {
 /// instance `instance`: an animatable's id as the robot's `RobotData` declares
 /// it, which carries its own feature (a joint's value among them), or an
 /// element's id with the `feature` to change as `RobotData` names it
-/// (`rotation`, `translation`, `color`, ...). An empty `feature` writes an
-/// animatable. Takes effect in the next frame, which the call wakes the scene
+/// (`rotation`, `translation`, `color`, a per-axis `translation.x`, one of
+/// the element's morph target names, ...). An empty `feature` writes an
+/// animatable. A feature the element does not have, or a value of the wrong
+/// shape for it, is said in the log and changes nothing. Takes effect in the next frame, which the call wakes the scene
 /// to draw, or, for a robot still loading, in the frame it arrives in.
 #[wasm_bindgen]
 pub fn set_value(
@@ -566,13 +567,9 @@ pub fn set_value(
     feature: String,
     values: Vec<f32>,
 ) -> Result<(), JsValue> {
-    let feature = match feature.as_str() {
-        "" => None,
-        name => Some(
-            FeatureKind::from_name(name, &[])
-                .ok_or_else(|| error(format!("unknown feature {feature:?}")))?,
-        ),
-    };
+    // Resolved against the element it lands on, which alone knows its morph
+    // targets.
+    let feature = (!feature.is_empty()).then_some(feature);
     let value = match values.as_slice() {
         [s] => Decoded::Scalar(*s),
         [x, y, z] => Decoded::Triple([*x, *y, *z]),
