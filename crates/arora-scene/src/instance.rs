@@ -43,7 +43,24 @@ type Unindexed = (
     With<WorldAssetRoot>,
     Without<EntityInstance>,
     Without<crate::robots::Incoming>,
+    Without<Unindexable>,
 );
+
+/// On a loaded robot root that has had indexing passes in which none of its
+/// declared nodes was found: how many.
+#[derive(Component, Default)]
+pub struct Unmatched(u8);
+
+/// On a loaded robot root whose scene names none of the nodes its
+/// declaration does, so it will never be indexed.
+#[derive(Component)]
+pub struct Unindexable;
+
+/// Passes after a robot's load finishes in which none of its declared nodes
+/// may be found before it is taken to have none. A loaded robot's scene has
+/// spawned whole, so one pass should settle it; the second allows for the
+/// spawn's commands landing a frame late.
+const UNMATCHED_PASSES: u8 = 2;
 
 /// Joins each spawned robot's elements to its entities, once its scene exists.
 ///
@@ -52,14 +69,14 @@ type Unindexed = (
 #[allow(clippy::too_many_arguments)]
 pub fn index_instances(
     camera: Query<Entity, With<OrbitCamera>>,
-    roots: Query<(Entity, &RobotAsset), Unindexed>,
+    mut roots: Query<(Entity, &RobotAsset, Option<&mut Unmatched>), Unindexed>,
     scene: SpawnedScene,
     mut commands: Commands,
 ) {
     let Ok(camera) = camera.single() else {
         return;
     };
-    for (root, asset) in &roots {
+    for (root, asset, unmatched) in &mut roots {
         let id = &asset.instance;
         let meta = &asset.meta;
         let mut by_name = std::collections::HashMap::new();
@@ -68,8 +85,26 @@ pub fn index_instances(
                 by_name.entry(name.as_str().to_string()).or_insert(entity);
             }
         }
-        // Its scene has not spawned yet; a later frame will catch it.
+        // A loaded robot whose scene shows none of its declared nodes, pass
+        // after pass, never will. It gives up its `Loading` mark, because
+        // while that is on, the shared controls hold every change for a key
+        // not yet placed as though this robot might still add it: the queue
+        // grows without bound, and a stale change lands on whatever control
+        // is later added under its key.
+        let mut give_up = |what: &str| {
+            let passes = unmatched.as_ref().map_or(0, |u| u.0) + 1;
+            if passes < UNMATCHED_PASSES {
+                commands.entity(root).insert(Unmatched(passes));
+                return;
+            }
+            log::warn!("{id}: {what}; it will not be indexed, so it takes no controls or values");
+            commands
+                .entity(root)
+                .remove::<(Loading, Unmatched)>()
+                .insert(Unindexable);
+        };
         if by_name.is_empty() {
+            give_up("its scene has no named nodes");
             continue;
         }
 
@@ -93,16 +128,12 @@ pub fn index_instances(
                 },
             );
         }
-        // Named descendants but no element among them: the scene is still
-        // arriving. Worth saying at debug, because the other reading — a GLB
-        // whose declaration names nodes it does not contain — looks identical
-        // from here and would otherwise be silent forever.
         if elements.is_empty() {
-            log::debug!(
-                "{id}: {} named descendants, none of the {} declared nodes",
+            give_up(&format!(
+                "{} named nodes, none of the {} its declaration names",
                 by_name.len(),
                 meta.elements.len()
-            );
+            ));
             continue;
         }
         log::info!(
@@ -170,7 +201,7 @@ pub fn index_instances(
 
         commands
             .entity(root)
-            .remove::<Loading>()
+            .remove::<(Loading, Unmatched)>()
             .insert(rig)
             .insert(EntityInstance {
                 id: id.clone(),
@@ -202,9 +233,92 @@ mod tests {
 
     use super::*;
 
+    /// A loading robot whose declaration names a node `name`, spawned with
+    /// one child node called `child`.
+    fn loaded_robot(app: &mut App, child: &str) -> Entity {
+        let mut meta = arora_visuals::meta::AssetMeta::default();
+        meta.elements.push(arora_visuals::meta::Element {
+            id: "head".into(),
+            name: String::new(),
+            node_name: "Head".into(),
+            kind: "shape".into(),
+            material: None,
+            morph_targets: Vec::new(),
+            primitive: None,
+        });
+        let root = app
+            .world_mut()
+            .spawn((
+                WorldAssetRoot(Handle::<WorldAsset>::default()),
+                crate::robots::RobotAsset {
+                    instance: "a".into(),
+                    key: None,
+                    glb: String::new(),
+                    meta,
+                    joints: Vec::new(),
+                },
+                Loading {
+                    instance: "a".into(),
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Name::new(child.to_string()),
+            Transform::default(),
+            ChildOf(root),
+        ));
+        root
+    }
+
+    fn indexing() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, index_instances);
+        app.world_mut().spawn(OrbitCamera);
+        app
+    }
+
+    /// A loaded robot whose scene never shows a node its declaration names
+    /// gives up its loading mark, so the shared controls stop holding changes
+    /// for keys it might have added; it is not tried again.
+    #[test]
+    fn a_robot_naming_nodes_its_scene_lacks_stops_loading() {
+        let mut app = indexing();
+        let root = loaded_robot(&mut app, "Neck");
+        app.update();
+        assert!(
+            app.world().get::<Loading>(root).is_some(),
+            "a pass short of giving up"
+        );
+        app.update();
+        assert!(app.world().get::<Loading>(root).is_none(), "gave up");
+        assert!(app.world().get::<Unindexable>(root).is_some());
+        assert!(app.world().get::<EntityInstance>(root).is_none());
+        app.update();
+        assert!(
+            app.world().get::<Unmatched>(root).is_none(),
+            "not counted again"
+        );
+    }
+
+    /// A node that lands a pass late is still found.
+    #[test]
+    fn a_node_arriving_a_pass_late_is_still_indexed() {
+        let mut app = indexing();
+        let root = loaded_robot(&mut app, "Neck");
+        app.update();
+        app.world_mut()
+            .spawn((Name::new("Head"), Transform::default(), ChildOf(root)));
+        app.update();
+        assert!(app.world().get::<EntityInstance>(root).is_some(), "indexed");
+        assert!(app.world().get::<Unmatched>(root).is_none());
+        assert!(app.world().get::<Loading>(root).is_none());
+    }
+
     /// Indexing a robot takes off the mark that said it was coming: left on,
-    /// the shared controls would hold a change for a key nothing will add as
-    /// though a robot were still on its way, asking for frames for good.
+    /// the shared controls would hold every change for a key nothing will
+    /// add, as though a robot were still on its way.
     #[test]
     fn indexing_a_robot_takes_its_loading_mark_off() {
         let mut app = App::new();

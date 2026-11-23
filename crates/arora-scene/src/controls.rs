@@ -335,6 +335,84 @@ mod tests {
         );
     }
 
+    /// A joint control is built from the joint its robot declares and the
+    /// body that joint moves: on the joint's own binding where a mimic's is
+    /// bound too, standing at the body's value now rather than its rest,
+    /// between the declared stops, in the declared colour.
+    #[test]
+    fn a_joint_control_takes_its_joint_s_binding_value_stops_and_colour() {
+        let (mut app, body) = scene();
+        robot(&mut app, body);
+        let follower = app.world_mut().spawn(Transform::default()).id();
+        let declared = Joint {
+            min: -0.4,
+            max: 0.6,
+            color: Srgba::RED,
+            ..tilt()
+        };
+        let mimic = Joint {
+            mimic: Some((2.0, 0.0)),
+            ..declared.clone()
+        };
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<JointRig>>()
+            .single(app.world())
+            .unwrap();
+        let mut rig = JointRig::default();
+        rig.0.insert(
+            TILT.into(),
+            vec![
+                JointBinding::new(&mimic, follower, Transform::default()).unwrap(),
+                JointBinding::new(&declared, body, Transform::default()).unwrap(),
+            ],
+        );
+        app.world_mut().entity_mut(root).insert(rig);
+        app.world_mut().get_mut::<RobotAsset>(root).unwrap().joints = vec![declared];
+        app.world_mut().get_mut::<Transform>(body).unwrap().rotation = Quat::from_rotation_x(0.3);
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: "tilt".into(),
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                    size: None,
+                },
+            },
+        );
+        let gizmo = only::<JointGizmo>(&mut app).expect("a joint control");
+        let gizmo = app.world().get::<JointGizmo>(gizmo).unwrap();
+        assert_eq!(gizmo.target, body, "on the joint's own binding");
+        assert!((gizmo.value - 0.3).abs() < 1e-5, "at the body's value now");
+        assert_eq!((gizmo.min, gizmo.max), (-0.4, 0.6));
+        assert!(gizmo.limited);
+        assert_eq!(gizmo.colour, Color::from(Srgba::RED));
+
+        // A joint that turns without end is not held to its stops, though
+        // it declares them.
+        app.world_mut().get_mut::<RobotAsset>(root).unwrap().joints[0].kind = JointKind::Continuous;
+        send(
+            &mut app,
+            ControlCommand::Add {
+                key: "spin".into(),
+                control: Control::Joint {
+                    instance: ROBOT.into(),
+                    joint: TILT.into(),
+                    color: None,
+                    size: None,
+                },
+            },
+        );
+        let mut gizmos = app.world_mut().query::<&JointGizmo>();
+        let spin = gizmos
+            .iter(app.world())
+            .find(|gizmo| gizmo.key == "spin")
+            .expect("the second control");
+        assert!(!spin.limited, "a continuous joint is not limited");
+    }
+
     /// Of two adds under one key, the one asked for last is the control
     /// left, even when the first waits for its robot to load; and a change
     /// sent behind an add that waits acts on the control it makes.
