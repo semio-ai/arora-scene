@@ -158,9 +158,12 @@ or three, to the robot in `instance`, in the next frame.
   a value past them poses it at the stop.
 - **`target` an element's id** writes one element directly, and needs the
   `feature` (`"translation"`, `"rotation"`, `"scale"`, `"color"`,
-  `"opacity"`, `"emissive"`, ...). A material write changes that element
-  alone, across every primitive mesh it has, even where the GLB shares the
-  material with other elements.
+  `"opacity"`, `"emissive"`, `"emissiveIntensity"`, ...), with the names,
+  shapes and meaning `@vizij/runtime`'s `setValue` takes for a face's
+  elements. `"emissiveIntensity"` scales the element's `"emissive"` colour;
+  each is kept on its own, so writing one leaves the other. A material write
+  changes that element alone, across every primitive mesh it has, even where
+  the GLB shares the material with other elements.
 - **A write to a robot still loading waits for it**, so a driver can write as
   soon as it loads one. A write to an instance nothing is loading, or to an id
   the robot does not have, changes nothing.
