@@ -16,7 +16,7 @@
 //! the host's id for it.
 
 use arora_visuals::binding::{ElementTargets, SceneBinding, SceneBindings};
-use arora_visuals::instance::EntityInstance;
+use arora_visuals::instance::{EntityInstance, Loading};
 use arora_visuals::meta::FeatureKind;
 use bevy::ecs::system::SystemParam;
 use bevy::mesh::morph::MorphWeights;
@@ -168,26 +168,83 @@ pub fn index_instances(
             }
         }
 
-        commands.entity(root).insert(rig).insert(EntityInstance {
-            id: id.clone(),
-            asset_path: asset.glb.clone(),
-            meta: meta.clone(),
-            bindings: SceneBindings {
-                by_id,
-                elements,
-                indexed: true,
-            },
-            // Every instance shares the scene's one camera, where a face
-            // renderer gives each of its own. That is what `drawn` cannot
-            // accommodate — see the note below.
-            camera,
-            draw_order: 0,
-            // Set here rather than earned, because the shared layer's
-            // readiness is decided by `drawn`, which moves an instance's
-            // camera from below the clear to above it. With one camera over
-            // every instance there is no per-instance order to move, so this
-            // scene cannot use that mechanism and claims readiness outright.
-            ready: true,
+        commands
+            .entity(root)
+            .remove::<Loading>()
+            .insert(rig)
+            .insert(EntityInstance {
+                id: id.clone(),
+                asset_path: asset.glb.clone(),
+                meta: meta.clone(),
+                bindings: SceneBindings {
+                    by_id,
+                    elements,
+                    indexed: true,
+                },
+                // Every instance shares the scene's one camera, where a face
+                // renderer gives each of its own. That is what `drawn` cannot
+                // accommodate — see the note below.
+                camera,
+                draw_order: 0,
+                // Set here rather than earned, because the shared layer's
+                // readiness is decided by `drawn`, which moves an instance's
+                // camera from below the clear to above it. With one camera over
+                // every instance there is no per-instance order to move, so this
+                // scene cannot use that mechanism and claims readiness outright.
+                ready: true,
+            });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::world_serialization::WorldAsset;
+
+    use super::*;
+
+    /// Indexing a robot takes off the mark that said it was coming: left on,
+    /// the shared controls would hold a change for a key nothing will add as
+    /// though a robot were still on its way, asking for frames for good.
+    #[test]
+    fn indexing_a_robot_takes_its_loading_mark_off() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, index_instances);
+        app.world_mut().spawn(OrbitCamera);
+        let mut meta = arora_visuals::meta::AssetMeta::default();
+        meta.elements.push(arora_visuals::meta::Element {
+            id: "head".into(),
+            name: String::new(),
+            node_name: "Head".into(),
+            kind: "shape".into(),
+            material: None,
+            morph_targets: Vec::new(),
+            primitive: None,
         });
+        let root = app
+            .world_mut()
+            .spawn((
+                WorldAssetRoot(Handle::<WorldAsset>::default()),
+                crate::robots::RobotAsset {
+                    instance: "a".into(),
+                    key: None,
+                    glb: String::new(),
+                    meta,
+                    joints: Vec::new(),
+                },
+                Loading {
+                    instance: "a".into(),
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut()
+            .spawn((Name::new("Head"), Transform::default(), ChildOf(root)));
+        app.update();
+        assert!(app.world().get::<EntityInstance>(root).is_some(), "indexed");
+        assert!(
+            app.world().get::<Loading>(root).is_none(),
+            "no longer coming"
+        );
     }
 }

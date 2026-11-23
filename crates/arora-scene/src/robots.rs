@@ -33,12 +33,13 @@
 use bevy::asset::RecursiveDependencyLoadState;
 use bevy::prelude::*;
 
+use arora_visuals::instance::Loading;
 use arora_visuals::joint_gizmo::JointGizmo;
 use arora_visuals::meta::AssetMeta;
 use arora_visuals::select::Selections;
 use arora_visuals::transform_gizmo::TransformGizmo;
 
-use crate::controls::{ControlCommand, ControlCommands, Pose};
+use crate::controls::{ControlCommands, Pose, ScenePose};
 use crate::robot::{self, Joint};
 use crate::values::ValueWrites;
 
@@ -245,7 +246,7 @@ pub(crate) fn take_requests(
                 {
                     writes.0.retain(|w| w.instance.as_ref() != Some(&instance));
                 }
-                drop_commands_for(&mut controls.0, &instance, &placed);
+                controls.forget_instance(&instance, &placed);
                 let Some(was) = held.remove(&instance) else {
                     continue;
                 };
@@ -286,6 +287,11 @@ pub(crate) fn take_requests(
                         transform,
                         asset.clone(),
                         Incoming,
+                        // Until it is indexed, so a control added on it in
+                        // the frames the load takes waits for it.
+                        Loading {
+                            instance: asset.instance.clone(),
+                        },
                         Visibility::Hidden,
                     ))
                     .id();
@@ -398,60 +404,6 @@ fn failed(asset: &RobotAsset, error: &str) -> Outcome {
     }
 }
 
-/// Drops the commands that were for controls on `instance`, which is going:
-/// each control add on it, the changes it owns, and nothing else.
-///
-/// A change under a key belongs to the add it waits for when no control is
-/// placed under the key and no add came before it; otherwise it belongs to
-/// the control already there, and stays. So: the changes before a forgotten
-/// add with nothing to act on go with it, and so do those after it, up to
-/// the next add under the key, which is another control's. A remove is never
-/// dropped: it is the host taking the key away, and it ends what the
-/// forgotten add owned.
-fn drop_commands_for(
-    queue: &mut Vec<ControlCommand>,
-    instance: &str,
-    placed: &crate::controls::Controls,
-) {
-    let mut keep = vec![true; queue.len()];
-    // Per key: the changes waiting for its next add, and whether what
-    // follows belongs to a forgotten add.
-    let mut loose: std::collections::HashMap<&str, Vec<usize>> = Default::default();
-    let mut owned: std::collections::HashSet<&str> = Default::default();
-    let mut added: std::collections::HashSet<&str> = Default::default();
-    for (at, command) in queue.iter().enumerate() {
-        let key = command.key();
-        match command {
-            ControlCommand::Add { control, .. } => {
-                let forgotten = control.instance() == Some(instance);
-                let waiting = loose.remove(key).unwrap_or_default();
-                if forgotten {
-                    keep[at] = false;
-                    for index in waiting {
-                        keep[index] = false;
-                    }
-                    owned.insert(key);
-                } else {
-                    owned.remove(key);
-                }
-                added.insert(key);
-            }
-            ControlCommand::Remove { .. } => {
-                owned.remove(key);
-                loose.remove(key);
-                added.remove(key);
-            }
-            _ if owned.contains(key) => keep[at] = false,
-            _ if !added.contains(key) && !placed.contains(key) => {
-                loose.entry(key).or_default().push(at)
-            }
-            _ => {}
-        }
-    }
-    let mut keep = keep.into_iter();
-    queue.retain(|_| keep.next().unwrap_or(true));
-}
-
 /// Despawns every gizmo whose target is among `gone`: the controls on a robot
 /// taken away go with it.
 fn despawn_gizmos_on(
@@ -480,6 +432,7 @@ mod tests {
     use bevy::world_serialization::WorldAsset;
 
     use super::*;
+    use crate::controls::ControlCommand;
 
     fn asset(instance: &str, glb: &str) -> RobotAsset {
         RobotAsset {
@@ -693,6 +646,21 @@ mod tests {
             .collect()
     }
 
+    /// A robot loading carries the shared controls' mark for its instance, so
+    /// a control added on it in the frames the load takes waits for it.
+    #[test]
+    fn a_robot_loading_is_marked_for_the_controls() {
+        let mut app = app(take_requests);
+        ask(&mut app, [load("a", "a1.glb", None)]);
+        app.update();
+        let mut marks = app.world_mut().query::<&Loading>();
+        let marked: Vec<String> = marks
+            .iter(app.world())
+            .map(|mark| mark.instance.clone())
+            .collect();
+        assert_eq!(marked, vec!["a".to_string()]);
+    }
+
     /// Two loads into one instance between frames leave the later one
     /// loading, and report the earlier replaced before the later settles.
     #[test]
@@ -802,6 +770,7 @@ mod tests {
                 instance: instance.into(),
                 joint: "joint".into(),
                 color: None,
+                size: None,
             },
         };
         app.world_mut()
@@ -822,6 +791,7 @@ mod tests {
                     instance: "b".into(),
                     joint: "joint".into(),
                     color: None,
+                    size: None,
                 },
             },
         ]);
@@ -857,6 +827,7 @@ mod tests {
                 instance: instance.into(),
                 joint: "joint".into(),
                 color: None,
+                size: None,
             },
         };
         let show = |key: &str| ControlCommand::Show {
