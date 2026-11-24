@@ -49,13 +49,44 @@ mod bench;
 /// The asset source robots are served from.
 const SOURCE: &str = "memory";
 
-/// The memory robots are served from. A robot's bytes stay until its load has
-/// ended, either way: removed while the asset server is still reading them,
-/// they fail the load they were for. Once it has loaded, the asset server
-/// holds what it read. Each load puts its bytes back first, so a load of a
-/// robot whose bytes an earlier load let go of still finds them, should the
-/// asset server have dropped what it held.
-static ROBOTS: Mutex<Option<Dir>> = Mutex::new(None);
+/// The memory robots are served from, once the scene is mounted.
+static ROBOTS: Mutex<Option<Served>> = Mutex::new(None);
+
+/// Robots' bytes, served by path, with how many loads still need each.
+///
+/// A path's bytes stay while any load of them has yet to end, either way:
+/// removed while the asset server is still reading them, they fail the load
+/// they were for. Loads of the same bytes share a path ([`content_path`]),
+/// and the asset server reads after the frame a load is asked in, so one load
+/// ending — replaced, unloaded, or loaded — must not take the bytes from
+/// another of the same robot still waiting to be read. Once no load needs
+/// them they go: a robot that has loaded is held by the asset server, and a
+/// later load puts its bytes back before it is asked for.
+#[derive(Clone, Default)]
+struct Served {
+    dir: Dir,
+    loads: std::collections::HashMap<String, usize>,
+}
+
+impl Served {
+    /// Serves `bytes` at `path` for one more load.
+    fn serve(&mut self, path: &str, bytes: Vec<u8>) {
+        self.dir.insert_asset(Path::new(path), bytes);
+        *self.loads.entry(path.to_string()).or_default() += 1;
+    }
+
+    /// One load of `path` has ended; its bytes go once no load needs them.
+    fn release(&mut self, path: &str) {
+        let Some(count) = self.loads.get_mut(path) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.loads.remove(path);
+            self.dir.remove_asset(Path::new(path));
+        }
+    }
+}
 
 /// What the page asked of the robots since the last frame, in order.
 static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
@@ -127,15 +158,15 @@ pub fn load(instance: String, glb: Vec<u8>, options: String) -> Result<(), JsVal
         "" => LoadOptions::default(),
         json => serde_json::from_str(json).map_err(error)?,
     };
-    let robots = ROBOTS.lock().unwrap();
-    let Some(dir) = robots.as_ref() else {
+    let mut robots = ROBOTS.lock().unwrap();
+    let Some(served) = robots.as_mut() else {
         return Err(error("the scene is not mounted yet"));
     };
     let path = content_path(&glb);
     let mut load = RobotLoad::read(instance, options.key, asset_id(&path), &glb)
         .map_err(|e| error(format!("{e:#}")))?;
     load.pose = options.pose;
-    dir.insert_asset(Path::new(&path), glb);
+    served.serve(&path, glb);
     REQUESTS
         .lock()
         .unwrap()
@@ -292,12 +323,12 @@ fn content_path(glb: &[u8]) -> String {
 
 /// Lets go of the bytes a load no longer needs once it has ended.
 fn release_bytes(outcome: &Outcome) {
-    let robots = ROBOTS.lock().unwrap();
-    let (Some(dir), Some(path)) = (robots.as_ref(), outcome.glb().strip_prefix(&asset_id("")))
+    let mut robots = ROBOTS.lock().unwrap();
+    let (Some(served), Some(path)) = (robots.as_mut(), outcome.glb().strip_prefix(&asset_id("")))
     else {
         return;
     };
-    dir.remove_asset(Path::new(path));
+    served.release(path);
 }
 
 /// How the asset server names the robot served at `path`.
@@ -406,7 +437,10 @@ pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
     }
 
     let robots = Dir::default();
-    *ROBOTS.lock().unwrap() = Some(robots.clone());
+    *ROBOTS.lock().unwrap() = Some(Served {
+        dir: robots.clone(),
+        ..default()
+    });
 
     let mut resolution = WindowResolution::default();
     if let Some(sf) = opts.scale_factor {
@@ -906,6 +940,29 @@ fn emit_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A load ending — replaced, unloaded or loaded — leaves the bytes of
+    /// the same robot for another load still waiting to read them, and the
+    /// bytes go once the last load of them ends.
+    #[test]
+    fn bytes_stay_while_any_load_of_them_waits() {
+        let mut served = Served::default();
+        let robot = vec![1u8, 2, 3];
+        let path = content_path(&robot);
+        let there = |served: &Served| served.dir.get_asset(Path::new(&path)).is_some();
+        // `load("a", X)`, `load("b", X)`, then a's load ends before the
+        // asset server has read either.
+        served.serve(&path, robot.clone());
+        served.serve(&path, robot.clone());
+        served.release(&path);
+        assert!(there(&served), "b's load still needs them");
+        served.release(&path);
+        assert!(!there(&served), "no load needs them");
+        // An outcome for bytes no load is serving changes nothing.
+        served.release(&path);
+        served.serve(&path, robot);
+        assert!(there(&served), "a later load puts them back");
+    }
 
     /// Loads of the same bytes share one path, so the asset server answers
     /// the second with the robot it holds; different bytes never share one.
