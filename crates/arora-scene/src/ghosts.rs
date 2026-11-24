@@ -8,9 +8,9 @@
 //! the shared layer's [`GhostStyle`].
 //!
 //! **Asking for a robot solid takes away only what the host put on.** The
-//! host's style always goes; the ghost itself goes only if the host's call is
-//! what made the robot a ghost, and never while the scene's own option ghosts
-//! every robot. So a robot the option or the debug panel ghosted stays a
+//! host's style goes, and a style the robot had before it comes back; the
+//! ghost itself goes only if the host's call is what made the robot a ghost,
+//! and never while the scene's own option ghosts every robot. So a robot the option or the debug panel ghosted stays a
 //! ghost, in the scene's look, once the host is done styling it.
 //!
 //! **The debug panel's choice holds until the host next asks.** The panel
@@ -33,10 +33,12 @@ use crate::robots::RobotAsset;
 pub struct GhostedInstances(pub HashMap<String, GhostStyle>);
 
 /// On a robot the host ghosted: whether the host's call is what made it a
-/// ghost, so asking for it solid takes away only what the host put on.
+/// ghost, and the style it had before, so asking for it solid takes away only
+/// what the host put on and gives back what it replaced.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct GhostedByHost {
     pub made_it_a_ghost: bool,
+    pub style_before: Option<GhostStyle>,
 }
 
 /// A ghost's style as a host writes it: CSS hex colours, and what it leaves
@@ -53,7 +55,8 @@ pub struct GhostOptions {
     /// How opaque the whole ghost is, from nought to one.
     pub opacity: Option<f32>,
     /// `"overEverything"`, as a ghost beside its robot is drawn, or
-    /// `"tested"`, hidden by what stands in front of it.
+    /// `"tested"`, hidden by the solid scene in front of it; ghosts still
+    /// show through one another.
     pub depth: Option<Depth>,
 }
 
@@ -118,10 +121,11 @@ pub fn ghost_robots(
                     *wanted,
                     GhostedByHost {
                         made_it_a_ghost: !is_ghost,
+                        style_before: style.copied(),
                     },
                 ));
             }
-            (Some(wanted), Some(_)) if style != Some(wanted) => {
+            (Some(wanted), Some(by_host)) if style != Some(wanted) => {
                 let mut entity = commands.entity(root);
                 entity.insert(*wanted);
                 // Made solid since by the panel: the host's new style is
@@ -131,6 +135,7 @@ pub fn ghost_robots(
                         Ghost,
                         GhostedByHost {
                             made_it_a_ghost: true,
+                            ..*by_host
                         },
                     ));
                 }
@@ -138,7 +143,11 @@ pub fn ghost_robots(
             (Some(_), Some(_)) => {}
             (None, Some(by_host)) => {
                 let mut entity = commands.entity(root);
-                entity.remove::<(GhostStyle, GhostedByHost)>();
+                entity.remove::<GhostedByHost>();
+                match by_host.style_before {
+                    Some(before) => entity.insert(before),
+                    None => entity.remove::<GhostStyle>(),
+                };
                 if by_host.made_it_a_ghost && !every_robot_a_ghost {
                     entity.remove::<Ghost>();
                 }
@@ -248,6 +257,37 @@ mod tests {
             app.world().get::<Ghost>(later).is_some(),
             "the option's ghost"
         );
+    }
+
+    /// A style a robot had before the host styled it comes back when the
+    /// host clears its own.
+    #[test]
+    fn clearing_a_hosts_ghost_gives_back_the_style_it_replaced() {
+        let mut app = App::new();
+        app.init_resource::<GhostedInstances>()
+            .add_systems(Update, ghost_robots);
+        let before = GhostStyle {
+            opacity: 0.3,
+            ..default()
+        };
+        let robot = app.world_mut().spawn((asset("a"), Ghost, before)).id();
+        app.world_mut()
+            .resource_mut::<GhostedInstances>()
+            .0
+            .insert("a".into(), GhostStyle::default());
+        app.update();
+        assert_eq!(
+            app.world().get::<GhostStyle>(robot),
+            Some(&GhostStyle::default())
+        );
+        app.world_mut().resource_mut::<GhostedInstances>().0.clear();
+        app.update();
+        assert_eq!(
+            app.world().get::<GhostStyle>(robot),
+            Some(&before),
+            "given back"
+        );
+        assert!(app.world().get::<Ghost>(robot).is_some(), "still a ghost");
     }
 
     /// The panel making a host's ghost solid holds while the host's style is

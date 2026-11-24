@@ -144,8 +144,10 @@ which backend a page would get.
   the page's ghost off again for `null`: the page's style always goes, and
   the ghost too unless the robot was a ghost before the page asked (the
   scene's own ghost option, say), which it stays. `ghost` sets its `color`, `wash`, `rim`, `opacity` and
-  `depth` (`"overEverything"`, the default, or `"tested"` to hide behind what
-  stands in front of it); what it leaves out is the scene's look. Kept across
+  `depth` (`"overEverything"`, the default, or `"tested"` to hide behind the
+  solid robots and scene in front of it; ghosts still show through one
+  another, being blended); what it leaves out is the scene's look. A robot
+  the page clears gets back any style it had before. Kept across
   a swap. Called again with a new style, the ghost changes from the next
   frame, so a page animates a ghost by calling it each frame. A robot's value
   writes reach it while it is a ghost, and it shows them once solid again.

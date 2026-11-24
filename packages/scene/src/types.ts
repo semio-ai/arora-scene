@@ -347,8 +347,9 @@ export interface GhostOptions {
   opacity?: number;
   /**
    * `"overEverything"`, as a ghost beside its own robot wants to be drawn, or
-   * `"tested"`, hidden by what stands in front of it, as the poses of a trace
-   * want to be.
+   * `"tested"`, hidden by the solid robots and scene in front of it, as the
+   * poses of a trace want to be. Ghosts do not hide one another: overlapping
+   * ghosts show through each other either way.
    */
   depth?: "overEverything" | "tested";
 }
