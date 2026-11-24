@@ -329,3 +329,26 @@ export interface Joint {
  * (a translation, an euler rotation, a linear RGB colour).
  */
 export type FeatureValue = number | [number, number, number];
+
+/**
+ * How a robot drawn as a ghost shows (`scene.setGhost`). What is left out
+ * comes from the scene's look: each element in its own colour washed toward
+ * white, nearly clear facing the camera and near-opaque at its outline, drawn
+ * over everything.
+ */
+export interface GhostOptions {
+  /** A CSS hex colour every element is drawn in, in place of its own. */
+  color?: string;
+  /** A CSS hex colour the ghost is washed toward. */
+  wash?: string;
+  /** How opaque the outline is, against the scene's: two is twice as opaque. */
+  rim?: number;
+  /** How opaque the whole ghost is, from 0 to 1: what a page fades it by. */
+  opacity?: number;
+  /**
+   * `"overEverything"`, as a ghost beside its own robot wants to be drawn, or
+   * `"tested"`, hidden by what stands in front of it, as the poses of a trace
+   * want to be.
+   */
+  depth?: "overEverything" | "tested";
+}

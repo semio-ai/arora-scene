@@ -21,6 +21,7 @@
 
 pub mod aurora;
 pub mod controls;
+pub mod ghosts;
 pub mod instance;
 pub mod joints;
 pub mod ready;
@@ -240,6 +241,7 @@ impl Plugin for ScenePlugin {
 /// Takes a host's robot requests and the framings it asks for.
 fn robot_requests(app: &mut App) {
     app.init_resource::<robots::RobotRequests>()
+        .init_resource::<ghosts::GhostedInstances>()
         .init_resource::<FrameOnly>()
         .init_resource::<robots::RobotOutcomes>()
         .init_resource::<arora_visuals::select::Selections>()
@@ -252,6 +254,7 @@ fn robot_requests(app: &mut App) {
             (
                 robots::take_requests.in_set(robots::RobotRequestSystems),
                 robots::finish_loads,
+                ghosts::ghost_robots,
                 frame_initial_robots,
             )
                 .chain(),
@@ -1817,6 +1820,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<robots::RobotRequests>()
+            .init_resource::<ghosts::GhostedInstances>()
             .init_resource::<Frames>()
             .init_resource::<Census>()
             .init_resource::<Framing>()
@@ -1949,6 +1953,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<robots::RobotRequests>()
+            .init_resource::<ghosts::GhostedInstances>()
             .init_resource::<Frames>()
             .init_resource::<Census>()
             .init_resource::<Framing>()

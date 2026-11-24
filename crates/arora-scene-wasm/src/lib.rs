@@ -182,6 +182,30 @@ pub fn set_selection(instance: String, elements: Vec<String>) {
     wake();
 }
 
+/// Draws the robot in the instance `instance` as a ghost, with `options` as
+/// JSON (`{ color, wash, rim, opacity, depth }`, all optional), or solid
+/// again for none. Kept, by the instance, across a swap; asked again with a
+/// new style, the ghost changes from the next frame, so a page fades one by
+/// asking for it with its opacity falling.
+#[wasm_bindgen]
+pub fn set_ghost(instance: String, options: String) -> Result<(), JsValue> {
+    let style = match options.as_str() {
+        "" => None,
+        json => Some(
+            serde_json::from_str::<arora_scene::ghosts::GhostOptions>(json)
+                .map_err(error)?
+                .style()
+                .map_err(error)?,
+        ),
+    };
+    REQUESTS
+        .lock()
+        .unwrap()
+        .push(Request::Robot(RobotRequest::Ghost(instance, style)));
+    wake();
+    Ok(())
+}
+
 /// Moves the camera to fit the robots in `instances`, or every robot for
 /// none, as it fits the robots present when the scene first has robots.
 #[wasm_bindgen]
