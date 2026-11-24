@@ -90,6 +90,12 @@ fn note_pipelines(cache: Res<PipelineCache>, pending: Res<PipelinesPending>) {
     );
 }
 
+/// A mesh given another material, either kind.
+type Swapped = Or<(
+    Changed<MeshMaterial3d<StandardMaterial>>,
+    Changed<MeshMaterial3d<arora_visuals::ghost::GhostMaterial>>,
+)>;
+
 /// What says another frame is owed.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Owed<'w, 's> {
@@ -119,6 +125,10 @@ struct Owed<'w, 's> {
     /// What each entity whose visibility was written was last set to.
     was: Local<'s, bevy::ecs::entity::EntityHashMap<Visibility>>,
     added: Query<'w, 's, (), Added<Mesh3d>>,
+    /// Meshes given another material: a ghost put on or taken off. The mesh
+    /// is drawn with its new material only once it has been specialized for
+    /// it, a frame after the swap, so the swap owes that frame.
+    swapped: Query<'w, 's, (), Swapped>,
     unspawned: Query<'w, 's, (), (With<WorldAssetRoot>, Without<Children>)>,
     stage: Res<'w, Stage>,
     palette: Res<'w, Palette>,
@@ -127,6 +137,7 @@ struct Owed<'w, 's> {
     meshes: MessageReader<'w, 's, AssetEvent<Mesh>>,
     materials: MessageReader<'w, 's, AssetEvent<StandardMaterial>>,
     images: MessageReader<'w, 's, AssetEvent<Image>>,
+    ghosts: MessageReader<'w, 's, AssetEvent<arora_visuals::ghost::GhostMaterial>>,
 }
 
 impl Owed<'_, '_> {
@@ -158,9 +169,11 @@ impl Owed<'_, '_> {
         let moved = self.moved_any();
         let shown = self.shown_any();
         // Every reader is drained, so a change is seen once.
-        let assets =
-            self.meshes.read().count() + self.materials.read().count() + self.images.read().count()
-                > 0;
+        let assets = self.meshes.read().count()
+            + self.materials.read().count()
+            + self.images.read().count()
+            + self.ghosts.read().count()
+            > 0;
         let easing = self
             .areas
             .iter()
@@ -177,6 +190,7 @@ impl Owed<'_, '_> {
             || moved
             || shown
             || !self.added.is_empty()
+            || !self.swapped.is_empty()
             || !self.unspawned.is_empty()
             || self.stage.is_changed()
             || self.palette.is_changed()
@@ -207,5 +221,59 @@ fn tick_for_aurora(
     if settings.focused_mode != mode {
         settings.focused_mode = mode;
         settings.unfocused_mode = mode;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Taking a ghost off a mesh, which swaps its material back, owes a
+    /// frame: the scene would otherwise idle on the ghost until something
+    /// else moved.
+    #[test]
+    fn a_material_swap_owes_a_frame() {
+        let opts = crate::SceneOptions::default();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<Image>()
+            .init_asset::<arora_visuals::ghost::GhostMaterial>()
+            .init_resource::<crate::Census>()
+            .init_resource::<arora_visuals::select::Selections>()
+            .init_resource::<PipelinesPending>()
+            .init_resource::<Palette>()
+            .init_resource::<BelowFloor>()
+            .insert_resource(Stage {
+                theme: opts.theme,
+                environment: opts.environment,
+                lighting: opts.lighting,
+            })
+            .add_message::<RequestRedraw>()
+            .add_systems(Last, request_redraw);
+        let mesh = app.world_mut().spawn_empty().id();
+        let owed = |app: &mut App| {
+            app.update();
+            let mut messages = app.world_mut().resource_mut::<Messages<RequestRedraw>>();
+            let owed = !messages.is_empty();
+            messages.clear();
+            owed
+        };
+        // Settle what the first frames owe.
+        for _ in 0..3 {
+            owed(&mut app);
+        }
+        assert!(!owed(&mut app), "nothing owed at rest");
+
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .reserve_handle();
+        app.world_mut()
+            .entity_mut(mesh)
+            .insert(MeshMaterial3d(material));
+        assert!(owed(&mut app), "the swap owes a frame");
+        assert!(!owed(&mut app), "and only one");
     }
 }
