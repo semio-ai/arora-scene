@@ -25,7 +25,7 @@ log = "0.4"
 #
 # Its Bevy minor and the one below must agree. Bevy's derives produce concrete
 # types, so a skew is a wall of trait errors rather than a version warning.
-arora-visuals = { git = "https://github.com/semio-ai/arora-visuals", branch = "main" }
+arora-visuals = { git = "https://github.com/semio-ai/arora-visuals", rev = "ba3222f" }
 
 bevy = { version = "0.20", default-features = false }
 
