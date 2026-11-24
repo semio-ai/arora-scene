@@ -140,8 +140,10 @@ which backend a page would get.
   `scene.frame(instances)` fits the robots named, or every robot for none.
 - **`scene.setSelection(instance, elementIds)` outlines elements**, in place of
   whatever that instance outlined; none clears it.
-- **`scene.setGhost(instance, ghost)` draws a robot as a ghost**, or solid
-  again for `null`. `ghost` sets its `color`, `wash`, `rim`, `opacity` and
+- **`scene.setGhost(instance, ghost)` draws a robot as a ghost**, or takes
+  the page's ghost off again for `null`: the page's style always goes, and
+  the ghost too unless the robot was a ghost before the page asked (the
+  scene's own ghost option, say), which it stays. `ghost` sets its `color`, `wash`, `rim`, `opacity` and
   `depth` (`"overEverything"`, the default, or `"tested"` to hide behind what
   stands in front of it); what it leaves out is the scene's look. Kept across
   a swap. Called again with a new style, the ghost changes from the next

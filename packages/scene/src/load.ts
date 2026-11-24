@@ -106,8 +106,9 @@ export interface SceneHandle {
    */
   setSelection(instance: string, elements: string[]): void;
   /**
-   * Draws the robot in `instance` as a ghost, styled by `ghost`, or solid
-   * again for `null`. Kept across a swap; called again with a new style, the
+   * Draws the robot in `instance` as a ghost, styled by `ghost`, or takes
+   * the page's ghost off for `null`: its style goes, and the ghost too unless
+   * the robot was one before the page asked. Kept across a swap; called again with a new style, the
    * ghost changes from the next frame, so a page fades one by calling it with
    * a falling `opacity`.
    */

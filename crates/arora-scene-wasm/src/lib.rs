@@ -214,8 +214,10 @@ pub fn set_selection(instance: String, elements: Vec<String>) {
 }
 
 /// Draws the robot in the instance `instance` as a ghost, with `options` as
-/// JSON (`{ color, wash, rim, opacity, depth }`, all optional), or solid
-/// again for none. Kept, by the instance, across a swap; asked again with a
+/// JSON (`{ color, wash, rim, opacity, depth }`, all optional), or takes
+/// the page's ghost off for none: its style goes, and the ghost too unless
+/// the robot was one before the page asked. Kept, by the instance, across a
+/// swap; asked again with a
 /// new style, the ghost changes from the next frame, so a page fades one by
 /// asking for it with its opacity falling.
 #[wasm_bindgen]
