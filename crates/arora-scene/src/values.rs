@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use arora_visuals::binding::SceneBinding;
-use arora_visuals::instance::EntityInstance;
+use arora_visuals::instance::{EntityInstance, InstanceIndex, InstanceSystems};
 use arora_visuals::joint_gizmo::JointGizmo;
 
 use crate::joints::JointRig;
@@ -63,6 +63,8 @@ impl Plugin for ValuesPlugin {
         app.init_resource::<ValueWrites>()
             .init_resource::<AppliedValues>()
             .init_resource::<Emission>()
+            .add_plugins(arora_visuals::instance::InstancePlugin)
+            .configure_sets(Update, ApplyValues.in_set(InstanceSystems::Apply))
             .add_systems(Update, apply_values.in_set(ApplyValues));
     }
 }
@@ -153,7 +155,6 @@ pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
     mut applied: ResMut<AppliedValues>,
     instances: Query<(Entity, &EntityInstance, Option<&JointRig>)>,
-    robots: Query<&crate::robots::RobotAsset>,
     mut transforms: Query<&mut Transform>,
     mut weights: Query<&mut MorphWeights>,
     mut material_handles: Query<&mut MeshMaterial3d<StandardMaterial>>,
@@ -164,6 +165,7 @@ pub fn apply_values(
     mut shared: Local<InstanceMaterials>,
     mut emission: ResMut<Emission>,
     mut redraw: MessageWriter<RequestRedraw>,
+    index: Res<InstanceIndex>,
 ) {
     applied.count = 0;
     applied.stamps.clear();
@@ -193,9 +195,10 @@ pub fn apply_values(
     // may well write as soon as it asks for the robot: keep it for the frame
     // the robot arrives in, rather than dropping it. A write for every
     // instance waits while there are none. A write for an instance nothing is
-    // loading is dropped, as nothing will ever take it.
-    let indexed = |id: &str| instances.iter().any(|(_, instance, _)| instance.id == id);
-    let coming = |id: &str| robots.iter().any(|robot| robot.instance == id);
+    // loading is dropped, as nothing will ever take it — a robot that loaded
+    // but will never be indexed included, as it is no longer loading.
+    let indexed = |id: &str| index.get(id).is_some();
+    let coming = |id: &str| index.is_loading(id);
     let mut later = Vec::new();
     let mut now = Vec::new();
     for write in writes.0.drain(..) {
@@ -211,10 +214,11 @@ pub fn apply_values(
     let mut count = 0;
     for write in now {
         let before = count;
-        for (root, instance, rig) in &instances {
-            if write.instance.as_ref().is_some_and(|id| *id != instance.id) {
-                continue;
-            }
+        let on: Vec<_> = match &write.instance {
+            Some(id) => instances.iter_many(index.all(id)).flatten().collect(),
+            None => instances.iter().collect(),
+        };
+        for (root, instance, rig) in on {
             // A joint's value poses the bodies it moves, and any joint gizmo
             // on them shows it, so a control and the robot never disagree.
             if let Some(joints) = rig.and_then(|rig| rig.0.get(&write.target)) {
@@ -1033,7 +1037,7 @@ mod tests {
 
     /// A write lands on the robot it names and no other; one for a robot
     /// still loading waits for it; one for an instance nothing is loading is
-    /// dropped.
+    /// dropped, a robot that loaded but will never be indexed included.
     #[test]
     fn a_write_reaches_the_instance_it_names() {
         let mut app = App::new();
@@ -1043,10 +1047,21 @@ mod tests {
             .add_plugins(ValuesPlugin);
         let a = showing(&mut app, "a");
         let b = showing(&mut app, "b");
-        app.world_mut().spawn((asset("c"), Incoming));
+        // As a load spawns it: incoming, and marked loading until indexed.
+        app.world_mut().spawn((
+            asset("c"),
+            Incoming,
+            arora_visuals::instance::Loading {
+                instance: "c".into(),
+            },
+        ));
+
+        // Loaded, never indexed, and so no longer loading.
+        app.world_mut().spawn(asset("d"));
 
         write(&mut app, "a", 0.5);
         write(&mut app, "c", 0.25);
+        write(&mut app, "d", 0.5);
         write(&mut app, "nobody", 0.75);
         app.update();
 

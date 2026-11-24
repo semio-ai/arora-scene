@@ -45,6 +45,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use arora_visuals::camera_input::{CameraBindings, CameraFloor, CameraInputPlugin};
 use arora_visuals::ghost::{Ghost, GhostLook};
+use arora_visuals::instance::InstanceSystems;
 use arora_visuals::joint_gizmo::{JointGizmo, JointMotion};
 use arora_visuals::outline::OutlineOverlay;
 use arora_visuals::overlay::{GizmoKind, Overlay, OverlayPlugin};
@@ -210,16 +211,14 @@ impl Plugin for ScenePlugin {
         .init_resource::<Capture>()
         .add_systems(Startup, setup)
         .add_plugins(robot_requests)
-        // Before the control commands, so a robot indexed this frame is there
-        // for both passes: one indexed between them would leave a change sent
-        // with an add a pass short, and the control showing a frame without
-        // it. And before values are applied, so a write sent in the frame a
-        // robot is indexed lands on it.
+        // In the shared Index stage: before the control commands, so a robot
+        // indexed this frame is there for both passes — one indexed between
+        // them would leave a change sent with an add a pass short, and the
+        // control showing a frame without it — and before values are
+        // applied, so a write sent in the frame a robot is indexed lands on it.
         .add_systems(
             Update,
-            instance::index_instances
-                .before(controls::ControlSystems::Commands)
-                .before(values::ApplyValues),
+            instance::index_instances.in_set(InstanceSystems::Index),
         )
         .add_systems(
             Update,
