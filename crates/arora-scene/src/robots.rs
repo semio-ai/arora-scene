@@ -628,6 +628,44 @@ mod tests {
         assert!(selections.0.contains_key("b"));
     }
 
+    /// A host's ghost is kept by its instance until the host asks for the
+    /// robot solid or unloads the instance.
+    #[test]
+    fn a_hosts_ghost_is_kept_until_cleared_or_unloaded() {
+        use arora_visuals::ghost::GhostStyle;
+        let mut app = app(take_requests);
+        let ghosted = |app: &App| {
+            let mut ids: Vec<String> = app
+                .world()
+                .resource::<crate::ghosts::GhostedInstances>()
+                .0
+                .keys()
+                .cloned()
+                .collect();
+            ids.sort();
+            ids
+        };
+        let style = GhostStyle::default();
+        ask(
+            &mut app,
+            [
+                RobotRequest::Ghost("a".into(), Some(style)),
+                RobotRequest::Ghost("b".into(), Some(style)),
+            ],
+        );
+        app.update();
+        assert_eq!(ghosted(&app), vec!["a".to_string(), "b".to_string()]);
+        ask(
+            &mut app,
+            [
+                RobotRequest::Ghost("a".into(), None),
+                RobotRequest::Unload("b".into()),
+            ],
+        );
+        app.update();
+        assert!(ghosted(&app).is_empty(), "cleared, and unloaded");
+    }
+
     fn ask(app: &mut App, requests: impl IntoIterator<Item = RobotRequest>) {
         app.world_mut()
             .resource_mut::<RobotRequests>()

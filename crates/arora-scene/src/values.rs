@@ -854,6 +854,106 @@ mod tests {
         assert!((red_b0 - 1.0).abs() > 1e-3, "b was not written");
     }
 
+    /// An element written directly gets a material of its own, so another
+    /// mesh sharing its GLB material is left alone — solid, and ghosted.
+    #[test]
+    fn an_element_write_leaves_a_sharer_of_its_material_alone() {
+        for ghosted in [false, true] {
+            use arora_visuals::ghost::{Ghost, GhostOf, GhostPlugin};
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+                .init_asset::<StandardMaterial>()
+                .init_asset::<bevy::shader::Shader>()
+                .add_message::<RequestRedraw>()
+                .add_plugins((ValuesPlugin, GhostPlugin));
+            let material = app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial {
+                    base_color: Color::BLACK,
+                    ..default()
+                });
+            let world = app.world_mut();
+            let root = world.spawn_empty().id();
+            let node = world.spawn(ChildOf(root)).id();
+            let mesh = world
+                .spawn((MeshMaterial3d(material.clone()), ChildOf(node)))
+                .id();
+            let sharer = world
+                .spawn((MeshMaterial3d(material.clone()), ChildOf(root)))
+                .id();
+            let mut bindings = SceneBindings::default();
+            bindings.elements.insert(
+                "lid".into(),
+                arora_visuals::binding::ElementTargets {
+                    node,
+                    mesh: Some(mesh),
+                    morph: None,
+                },
+            );
+            bindings.indexed = true;
+            let mut meta = arora_visuals::meta::AssetMeta::default();
+            meta.elements.push(arora_visuals::meta::Element {
+                id: "lid".into(),
+                name: String::new(),
+                node_name: "lid".into(),
+                kind: "shape".into(),
+                material: None,
+                morph_targets: Vec::new(),
+                primitive: None,
+            });
+            world.entity_mut(root).insert((
+                asset("a"),
+                EntityInstance {
+                    id: "a".into(),
+                    asset_path: String::new(),
+                    meta,
+                    bindings,
+                    camera: Entity::PLACEHOLDER,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ));
+            if ghosted {
+                app.world_mut().entity_mut(root).insert(Ghost);
+            }
+            app.update();
+            app.world_mut()
+                .resource_mut::<ValueWrites>()
+                .0
+                .push(ValueWrite {
+                    instance: Some("a".into()),
+                    target: "lid".into(),
+                    feature: Some("color".into()),
+                    value: Decoded::Triple([1.0, 0.0, 0.0]),
+                    stamp: None,
+                });
+            app.update();
+            assert_eq!(
+                app.world().resource::<AppliedValues>().count,
+                1,
+                "ghosted: {ghosted}"
+            );
+            let red = |app: &App, entity: Entity| {
+                let world = app.world();
+                let handle = world
+                    .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                    .map(|m| m.0.clone())
+                    .or_else(|| world.get::<GhostOf>(entity).map(|g| g.original.clone()))
+                    .unwrap();
+                world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(&handle)
+                    .unwrap()
+                    .base_color
+                    .to_linear()
+                    .red
+            };
+            assert_eq!(red(&app, mesh), 1.0, "ghosted: {ghosted}");
+            assert_eq!(red(&app, sharer), 0.0, "the sharer, ghosted: {ghosted}");
+        }
+    }
+
     /// An element write names its feature as `RobotData` does, resolved
     /// against the element: a per-axis name moves one component, a morph
     /// target's name its weight, `metalness` the material; a value of the

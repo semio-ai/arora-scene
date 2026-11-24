@@ -275,5 +275,26 @@ mod tests {
             .insert(MeshMaterial3d(material));
         assert!(owed(&mut app), "the swap owes a frame");
         assert!(!owed(&mut app), "and only one");
+
+        // A ghost put on swaps in its material, and a ghost's material
+        // changing — a ghost fading — changes what is drawn.
+        let ghost = app
+            .world_mut()
+            .resource_mut::<Assets<arora_visuals::ghost::GhostMaterial>>()
+            .add(arora_visuals::ghost::GhostMaterial::default());
+        owed(&mut app);
+        assert!(!owed(&mut app), "at rest again");
+        app.world_mut()
+            .entity_mut(mesh)
+            .insert(MeshMaterial3d(ghost.clone()));
+        assert!(owed(&mut app), "a ghost put on owes a frame");
+        assert!(!owed(&mut app));
+        app.world_mut()
+            .resource_mut::<Assets<arora_visuals::ghost::GhostMaterial>>()
+            .get_mut(&ghost)
+            .unwrap()
+            .ghost
+            .opacity = 0.5;
+        assert!(owed(&mut app), "a ghost fading owes a frame");
     }
 }
