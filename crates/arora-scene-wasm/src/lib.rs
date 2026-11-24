@@ -52,11 +52,10 @@ const SOURCE: &str = "memory";
 /// The memory robots are served from. A robot's bytes stay until its load has
 /// ended, either way: removed while the asset server is still reading them,
 /// they fail the load they were for. Once it has loaded, the asset server
-/// holds what it read.
+/// holds what it read. Each load puts its bytes back first, so a load of a
+/// robot whose bytes an earlier load let go of still finds them, should the
+/// asset server have dropped what it held.
 static ROBOTS: Mutex<Option<Dir>> = Mutex::new(None);
-/// How many robots have been loaded, which names each new one: a fresh path
-/// per load, so the asset server never answers with one it held before.
-static LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// What the page asked of the robots since the last frame, in order.
 static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
@@ -132,7 +131,7 @@ pub fn load(instance: String, glb: Vec<u8>, options: String) -> Result<(), JsVal
     let Some(dir) = robots.as_ref() else {
         return Err(error("the scene is not mounted yet"));
     };
-    let path = format!("robot-{}.glb", LOADED.fetch_add(1, Ordering::SeqCst) + 1);
+    let path = content_path(&glb);
     let mut load = RobotLoad::read(instance, options.key, asset_id(&path), &glb)
         .map_err(|e| error(format!("{e:#}")))?;
     load.pose = options.pose;
@@ -251,6 +250,20 @@ pub fn set_active_area(area: Vec<f32>) -> Result<(), JsValue> {
     REQUESTS.lock().unwrap().push(Request::Area(area));
     wake();
     Ok(())
+}
+
+/// Where a robot's bytes are served from, named by what they hold. A load of
+/// bytes another instance already shows is then answered with the robot the
+/// asset server holds, its meshes and materials shared rather than read and
+/// uploaded again; different bytes never share a path, so a robot edited
+/// under the same key is read afresh. The content decides rather than the
+/// host's key for that reason: a key names what a host means to show, not
+/// what the bytes are.
+fn content_path(glb: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    glb.hash(&mut hasher);
+    format!("robot-{:016x}-{}.glb", hasher.finish(), glb.len())
 }
 
 /// Lets go of the bytes a load no longer needs once it has ended.
@@ -863,5 +876,20 @@ fn emit_events(
             instance: &pick.instance_id,
             element: pick.element_id.as_deref(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Loads of the same bytes share one path, so the asset server answers
+    /// the second with the robot it holds; different bytes never share one.
+    #[test]
+    fn the_same_bytes_are_served_from_one_path() {
+        let robot = vec![1u8, 2, 3, 4];
+        assert_eq!(content_path(&robot), content_path(&robot.clone()));
+        assert_ne!(content_path(&robot), content_path(&[1, 2, 3, 5]));
+        assert_ne!(content_path(&robot), content_path(&[1, 2, 3]));
     }
 }
