@@ -86,26 +86,20 @@ interface JointControl {
 }
 
 /**
- * Where a drag's writes go, fixed when it starts: the control under its key
- * may be removed or replaced before the drag closes, and a rollback must
- * reach what the drag moved, not whatever the key names by then.
+ * A drag in hand, from its `start` until it closes, with what it moves as it
+ * stood when the drag started: a joint, a robot, or else the goal under its
+ * key. A joint's value and a robot's pose are written to the joint and the
+ * robot themselves, so where they go does not depend on which control holds
+ * the key by the time the drag closes.
  */
-interface DragTarget {
-  key: string;
-  /** Which add under `key` the drag started on (see `adds`). */
-  added: number;
-  joint?: JointControl;
-  /** The robot a robot control moves. */
-  robot?: string;
-}
-
-/** A drag in hand, from its `start` until it closes. */
 interface Drag {
-  target: DragTarget;
+  key: string;
+  joint?: JointControl;
+  robot?: string;
   start: ControlEvent;
   /**
-   * Whether the driver wrote any of its moves. A cancel puts back only what
-   * was written, whatever "write drags back" says by then.
+   * Whether the driver has written moves it has not put back. A cancel puts
+   * back only what was written, whatever "write drags back" says by then.
    */
   previewed: boolean;
 }
@@ -136,10 +130,8 @@ function Running({ robot: first }: { robot: Robot }) {
   // each robot, so the floor buttons below change only its height.
   const robotControls = useRef(new Map<string, string>());
   const stood = useRef(new Map<string, Pose>());
-  // Each drag in hand, by gesture, and how many adds and removes each key
-  // has seen, so a drag can tell whether its control still holds its key.
+  // Each drag in hand, by gesture.
   const drags = useRef(new Map<number, Drag>());
-  const adds = useRef(new Map<string, number>());
   const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
 
   const onEvent = useCallback((event: SceneEvent) => {
@@ -178,12 +170,9 @@ function Running({ robot: first }: { robot: Robot }) {
     }
     if (event.phase === "start")
       drags.current.set(event.gesture, {
-        target: {
-          key: event.key,
-          added: adds.current.get(event.key) ?? 0,
-          joint: jointControls.current.get(event.key),
-          robot: robotControls.current.get(event.key),
-        },
+        key: event.key,
+        joint: jointControls.current.get(event.key),
+        robot: robotControls.current.get(event.key),
         start: event,
         previewed: false,
       });
@@ -194,35 +183,45 @@ function Running({ robot: first }: { robot: Robot }) {
     // A cancelled drag keeps nothing, so the driver puts back what it
     // previewed: the drag's start.
     if (event.phase === "cancel") {
-      if (drag.previewed) writeDrag(scene, drag.target, drag.start);
+      if (drag.previewed) writeDrag(scene, drag, drag.start);
       return;
     }
     if (!writeBack.current) return;
-    writeDrag(scene, drag.target, event);
+    writeDrag(scene, drag, event);
     drag.previewed = true;
   }, []);
 
-  // Writes what a drag asks to the target it started on. A pose goes through
-  // the control while the add the drag started on still holds its key; a
-  // robot control's pose goes to its robot directly once that control is
-  // gone, and a goal's has nothing left to move.
-  const writeDrag = (
-    scene: SceneHandle,
-    target: DragTarget,
-    asked: ControlEvent,
-  ) => {
-    if (asked.value !== undefined && target.joint)
-      scene.setValue(target.joint.instance, target.joint.joint, asked.value);
+  // Writes what a drag asks to what it moves. A goal has no home but its
+  // control, so its pose goes through the key; `settle` keeps that safe.
+  const writeDrag = (scene: SceneHandle, drag: Drag, asked: ControlEvent) => {
+    if (asked.value !== undefined && drag.joint)
+      scene.setValue(drag.joint.instance, drag.joint.joint, asked.value);
     if (!asked.pose) return;
-    if (target.robot) stood.current.set(target.robot, asked.pose);
-    if ((adds.current.get(target.key) ?? 0) === target.added)
+    if (drag.robot) {
+      stood.current.set(drag.robot, asked.pose);
+      scene.setPose(drag.robot, asked.pose);
+    } else
       scene.control({
         op: "setPose",
-        key: target.key,
+        key: drag.key,
         pose: asked.pose,
         scale: asked.scale,
       });
-    else if (target.robot) scene.setPose(target.robot, asked.pose);
+  };
+
+  // Puts back what drags on `key` previewed, ahead of a command that may
+  // take their control away. Commands land in the order sent, so the goal a
+  // pose goes to is still the one the drag moved, and whether the add or
+  // remove then lands or is refused, nothing previewed is left behind: a
+  // drag whose control is taken away closes with a cancel that has nothing
+  // left to put back, and one whose control stays previews afresh as it
+  // moves on.
+  const settle = (scene: SceneHandle, key: string) => {
+    for (const drag of drags.current.values())
+      if (drag.key === key && drag.previewed) {
+        writeDrag(scene, drag, drag.start);
+        drag.previewed = false;
+      }
   };
 
   // What only the page sees: the modifier keys, which the canvas does not
@@ -343,12 +342,21 @@ function Running({ robot: first }: { robot: Robot }) {
     const key = String(form.get("key"));
     if (!scene || !key) return;
     const op = submitter?.value;
+    // A joint add the scene would refuse leaves the control under its key as
+    // it was, so it is refused here first, before what the driver keeps
+    // about that control is dropped. The robot in the current instance is
+    // showing or loading, so a robot add always lands.
+    if (
+      op === "joint" &&
+      !joints[current]?.some((j) => j.animatable === form.get("joint"))
+    )
+      return note(`no joint ${String(form.get("joint"))} on ${current}`);
     // An add replaces whatever control had the key, so what the driver kept
     // about that one goes with it.
     if (op === "joint" || op === "robot" || op === "goal" || op === "remove") {
+      settle(scene, key);
       jointControls.current.delete(key);
       robotControls.current.delete(key);
-      adds.current.set(key, (adds.current.get(key) ?? 0) + 1);
     }
     switch (op) {
       case "joint": {
@@ -368,6 +376,10 @@ function Running({ robot: first }: { robot: Robot }) {
           control: {
             kind: "transform",
             target: { kind: "instance", instance: current },
+            // No scale: the driver writes a robot's pose with `setPose`,
+            // which keeps the robot's scale, so a scale it could not write
+            // back it does not offer.
+            modes: ["translate", "rotate"],
           },
         });
       case "goal":
