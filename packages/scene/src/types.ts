@@ -125,11 +125,26 @@ export interface Pose {
  * of its elements names the robot by its instance; a goal stands on its own.
  */
 export type ControlTarget =
+  /** A robot as a whole, by its instance: the name every host's controls take. */
+  | { kind: "instance"; instance: string }
+  /**
+   * @deprecated The same target as `{ kind: "instance" }`, under the name it
+   * had before the scene's controls were shared with `@vizij/runtime`'s.
+   * Still read, and logged as deprecated; send `"instance"`.
+   */
   | { kind: "robot"; instance: string }
   /** One element of a robot, by the id its `RobotData` gives it. */
   | { kind: "element"; instance: string; id: string }
   /** A goal at `pose`, with nothing drawn but the control: an IK target. */
   | { kind: "goal"; pose: Pose };
+
+/**
+ * How big a control is: the same on screen however near or far, in CSS
+ * pixels, or fixed in the world, in metres, so it shrinks with distance as
+ * what it moves does. A transform control is 0.25 metres and a joint control
+ * 0.2 metres unless given a size.
+ */
+export type ControlSize = { pixels: number } | { metres: number };
 
 /** A control a driver adds. */
 export type Control =
@@ -142,10 +157,12 @@ export type Control =
       joint: string;
       /** A CSS hex colour (`"#22c55e"`); the joint's own when absent. */
       color?: string;
+      size?: ControlSize;
     }
   | {
       kind: "transform";
       target: ControlTarget;
+      size?: ControlSize;
       /** Every mode when absent. */
       modes?: ("translate" | "rotate" | "scale")[];
       /** Handles along the target's own axes rather than the world's. */
@@ -178,8 +195,8 @@ export type ControlCommand =
     }
   /**
    * Changes a control in place: a joint control's `color`, a transform
-   * control's `colors`, `local` and `faceViewer`, and for either `opacity` and
-   * `interactive`. What is absent stays as it is.
+   * control's `colors`, `local` and `faceViewer`, and for either `size`,
+   * `opacity` and `interactive`. What is absent stays as it is.
    */
   | {
       op: "configure";
@@ -188,6 +205,7 @@ export type ControlCommand =
       colors?: [string, string, string];
       local?: boolean;
       faceViewer?: boolean;
+      size?: ControlSize;
       /**
        * From 0 to 1, faded to evenly over a fifth of a second (longer while the
        * scene draws fewer than thirty frames a second), so send the value

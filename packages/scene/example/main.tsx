@@ -257,7 +257,7 @@ function Running({ robot: first }: { robot: Robot }) {
           key,
           control: {
             kind: "transform",
-            target: { kind: "robot", instance: current },
+            target: { kind: "instance", instance: current },
           },
         });
       case "goal":

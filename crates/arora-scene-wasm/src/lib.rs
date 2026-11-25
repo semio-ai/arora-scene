@@ -20,10 +20,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use arora_scene::controls::Pose;
 use arora_scene::controls::{
     ControlCommand, ControlCommands, ControlEvent, ControlEvents, ControlPress, ControlPresses,
 };
+use arora_scene::controls::{Pose, ScenePose};
 use arora_scene::redraw::RedrawOnChangePlugin;
 use arora_scene::robots::{Outcome, RobotLoad, RobotRequest, RobotRequests};
 use arora_scene::stage::{BelowFloor, Environment, Theme};
@@ -765,7 +765,7 @@ static CONTROLS: Mutex<Vec<ControlCommand>> = Mutex::new(Vec::new());
 /// for a control on a robot still loading, in the frame it arrives in.
 #[wasm_bindgen]
 pub fn control(command: String) -> Result<(), JsValue> {
-    let command: ControlCommand = serde_json::from_str(&command).map_err(error)?;
+    let command = arora_scene::controls::read_command(&command).map_err(error)?;
     CONTROLS.lock().unwrap().push(command);
     wake();
     Ok(())

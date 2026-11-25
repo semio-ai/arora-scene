@@ -1286,13 +1286,12 @@ fn wash_ghosts(
     }
 }
 
-/// Hides a joint control while the body it moves is ghosted, as Studio does:
-/// a ghost shows where the robot is, not something to take hold of.
 /// Every gizmo, of either kind, with its visibility.
 type Controls<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         Option<&'static JointGizmo>,
         Option<&'static TransformGizmo>,
         &'static mut Visibility,
@@ -1301,9 +1300,10 @@ type Controls<'w, 's> = Query<
     Or<(With<JointGizmo>, With<TransformGizmo>)>,
 >;
 
-/// Hides the controls on a ghosted robot: after the control commands, so a
-/// control added this frame is hidden in it, and before the fade reads
-/// whether a control shows.
+/// Hides a gizmo the scene put on a ghosted robot itself, as the shared
+/// layer hides a driver's controls there: a ghost shows where the robot is,
+/// not something to take hold of. After the control commands and before the
+/// fade, as the shared layer's own hiding runs.
 pub(crate) fn hide_ghosted_controls(app: &mut App) {
     app.add_systems(
         Update,
@@ -1315,10 +1315,16 @@ pub(crate) fn hide_ghosted_controls(app: &mut App) {
 
 fn hide_controls_on_ghosts(
     mut gizmos: Controls,
+    placed: Res<controls::Controls>,
     ghosts: Query<(), With<Ghost>>,
     parents: Query<&ChildOf>,
 ) {
-    for (joint, transform, mut visibility, hidden_by_driver) in &mut gizmos {
+    for (gizmo, joint, transform, mut visibility, hidden_by_driver) in &mut gizmos {
+        // A driver's control is hidden by the shared layer, under the same
+        // rule.
+        if placed.keys().any(|key| placed.gizmo(key) == Some(gizmo)) {
+            continue;
+        }
         let Some(target) = joint
             .map(|gizmo| gizmo.target)
             .or(transform.map(|gizmo| gizmo.target))
@@ -1591,6 +1597,7 @@ fn split_materials(
     frames: Res<Frames>,
     mut done: Local<bool>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut emission: Option<ResMut<values::Emission>>,
     meshes: Query<(Entity, &MeshMaterial3d<StandardMaterial>), With<Mesh3d>>,
     mut commands: Commands,
 ) {
@@ -1602,9 +1609,12 @@ fn split_materials(
         let Some(own) = materials.get(&material.0).cloned() else {
             continue;
         };
-        commands
-            .entity(entity)
-            .insert(MeshMaterial3d(materials.add(own)));
+        let copy = materials.add(own);
+        // The copy emits as the original does, intensity included.
+        if let Some(emission) = emission.as_mut() {
+            emission.copied(material.0.id(), copy.id());
+        }
+        commands.entity(entity).insert(MeshMaterial3d(copy));
         split += 1;
     }
     if split > 0 {
@@ -1746,7 +1756,58 @@ pub fn report(opts: &SceneOptions, frames: &Frames, census: &Census) {
 
 #[cfg(test)]
 mod tests {
+    /// Giving each mesh its own material carries what the original emitted
+    /// before its intensity scaled it: read afresh, a copy of a material
+    /// dimmed to nothing would take black for its colour, and stay black
+    /// whatever intensity it was given later.
+    #[test]
+    fn a_split_material_keeps_its_emission() {
+        use bevy::prelude::*;
+
+        let mut app = App::new();
+        app.insert_resource(super::SceneOptions {
+            unique_materials: true,
+            ..Default::default()
+        })
+        .insert_resource(super::Frames {
+            elapsed: 1.0,
+            ..Default::default()
+        })
+        .init_resource::<Assets<StandardMaterial>>()
+        .init_resource::<super::values::Emission>()
+        .add_systems(Update, super::split_materials);
+        let original = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                emissive: LinearRgba::BLACK,
+                ..default()
+            });
+        app.world_mut()
+            .resource_mut::<super::values::Emission>()
+            .set(original.id(), [1.0, 0.5, 0.0], 0.0);
+        let mesh = app
+            .world_mut()
+            .spawn((Mesh3d::default(), MeshMaterial3d(original.clone())))
+            .id();
+        app.update();
+        let copy = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+            .unwrap()
+            .0
+            .id();
+        assert_ne!(copy, original.id(), "split");
+        assert_eq!(
+            app.world()
+                .resource::<super::values::Emission>()
+                .state(copy),
+            Some(([1.0, 0.5, 0.0], 0.0)),
+        );
+    }
+
     use super::*;
+    use crate::controls::ScenePose;
 
     /// A host asking to frame some robots has the camera fit those alone; asked
     /// with none named, it fits every robot.

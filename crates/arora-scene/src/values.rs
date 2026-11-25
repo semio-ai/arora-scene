@@ -8,6 +8,8 @@
 //! scene is otherwise idle and not redrawing. Any feature added here is
 //! covered by that without a second thought.
 
+use std::collections::HashMap;
+
 use arora_visuals::binding::SceneBinding;
 use arora_visuals::instance::EntityInstance;
 use arora_visuals::joint_gizmo::JointGizmo;
@@ -60,6 +62,7 @@ impl Plugin for ValuesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ValueWrites>()
             .init_resource::<AppliedValues>()
+            .init_resource::<Emission>()
             .add_systems(Update, apply_values.in_set(ApplyValues));
     }
 }
@@ -92,6 +95,59 @@ pub struct InstanceMaterials {
     made: bevy::platform::collections::HashSet<AssetId<StandardMaterial>>,
 }
 
+/// What a material emits before its intensity scales it, and that intensity,
+/// for each material an emissive or intensity write has touched.
+///
+/// A material holds only the product, so writing the intensity onto it needs
+/// the colour kept beside it: the colour is the material's emissive when it is
+/// first touched, which is what its GLB gave it at that intensity, 1. Kept by
+/// material, as the material is what the two writes share, and dropped once
+/// the material is. A resource rather than the value system's own, because
+/// whatever else copies a material has to carry its state to the copy.
+#[derive(Resource, Default)]
+pub struct Emission(HashMap<AssetId<StandardMaterial>, Emitting>);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Emitting {
+    colour: [f32; 3],
+    intensity: f32,
+}
+
+impl Emission {
+    /// The material's state, taken from what it emits now the first time.
+    fn of(&mut self, id: AssetId<StandardMaterial>, material: &StandardMaterial) -> &mut Emitting {
+        self.0.entry(id).or_insert_with(|| Emitting {
+            colour: [
+                material.emissive.red,
+                material.emissive.green,
+                material.emissive.blue,
+            ],
+            intensity: 1.0,
+        })
+    }
+
+    /// A copy of `from` emits as it does, so its state goes with it: read
+    /// afresh, the copy's emissive would be taken as the colour with the
+    /// intensity already in it.
+    /// A material's colour and intensity, given one.
+    #[cfg(test)]
+    pub(crate) fn set(&mut self, id: AssetId<StandardMaterial>, colour: [f32; 3], intensity: f32) {
+        self.0.insert(id, Emitting { colour, intensity });
+    }
+
+    /// A material's colour and intensity, if it has been touched.
+    #[cfg(test)]
+    pub(crate) fn state(&self, id: AssetId<StandardMaterial>) -> Option<([f32; 3], f32)> {
+        self.0.get(&id).map(|e| (e.colour, e.intensity))
+    }
+
+    pub fn copied(&mut self, from: AssetId<StandardMaterial>, to: AssetId<StandardMaterial>) {
+        if let Some(state) = self.0.get(&from).copied() {
+            self.0.insert(to, state);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_values(
     mut writes: ResMut<ValueWrites>,
@@ -106,6 +162,7 @@ pub fn apply_values(
     children: Query<&Children>,
     mut own: Local<OwnMaterials>,
     mut shared: Local<InstanceMaterials>,
+    mut emission: ResMut<Emission>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
     applied.count = 0;
@@ -125,6 +182,9 @@ pub fn apply_values(
     }
     if !own.0.is_empty() {
         own.0.retain(|mesh| material_handles.contains(*mesh));
+    }
+    if !emission.0.is_empty() {
+        emission.0.retain(|id, _| materials.contains(*id));
     }
     if writes.0.is_empty() {
         return;
@@ -198,6 +258,7 @@ pub fn apply_values(
                                     continue;
                                 };
                                 let copy = materials.add(material);
+                                emission.copied(handle.0.id(), copy.id());
                                 shared.made.insert(copy.id());
                                 shared.copies.insert(key, copy.clone());
                                 copy
@@ -245,7 +306,9 @@ pub fn apply_values(
                                     if own.0.insert(mesh) {
                                         if let Ok(mut handle) = material_handles.get_mut(mesh) {
                                             if let Some(copy) = materials.get(&handle.0).cloned() {
-                                                handle.0 = materials.add(copy);
+                                                let copy = materials.add(copy);
+                                                emission.copied(handle.0.id(), copy.id());
+                                                handle.0 = copy;
                                             }
                                         }
                                     }
@@ -276,6 +339,7 @@ pub fn apply_values(
                     &mut weights,
                     &material_handles,
                     &mut materials,
+                    &mut emission,
                 ) {
                     count += 1;
                 }
@@ -380,6 +444,7 @@ fn apply(
     weights: &mut Query<&mut MorphWeights>,
     material_handles: &Query<&mut MeshMaterial3d<StandardMaterial>>,
     materials: &mut Assets<StandardMaterial>,
+    emission: &mut Emission,
 ) -> bool {
     let triple = |current: [f32; 3]| match value {
         Decoded::Triple(v) => match binding.axis {
@@ -439,11 +504,12 @@ fn apply(
         FeatureKind::Color
         | FeatureKind::Opacity
         | FeatureKind::Emissive
+        | FeatureKind::EmissiveIntensity
         | FeatureKind::Metalness => {
-            let Some(mut material) = material_handles
+            let Some((id, mut material)) = material_handles
                 .get(binding.entity)
                 .ok()
-                .and_then(|handle| materials.get_mut(&handle.0))
+                .and_then(|handle| Some((handle.0.id(), materials.get_mut(&handle.0)?)))
             else {
                 return false;
             };
@@ -463,9 +529,15 @@ fn apply(
                     };
                 }
                 _ => {
-                    let current = material.emissive;
-                    let [r, g, b] = triple([current.red, current.green, current.blue]);
-                    material.emissive = LinearRgba::new(r, g, b, current.alpha);
+                    let state = emission.of(id, &material);
+                    if binding.feature == FeatureKind::EmissiveIntensity {
+                        state.intensity = scalar;
+                    } else {
+                        state.colour = triple(state.colour);
+                    }
+                    let Emitting { colour, intensity } = *state;
+                    let [r, g, b] = colour.map(|channel| channel * intensity);
+                    material.emissive = LinearRgba::new(r, g, b, material.emissive.alpha);
                 }
             }
             true
@@ -754,6 +826,138 @@ mod tests {
         assert_eq!(
             app.world().get::<Transform>(node).unwrap().scale,
             Vec3::splat(2.0)
+        );
+    }
+
+    /// `emissiveIntensity` scales what the material emits, from the colour
+    /// its GLB gave it, without losing that colour: the intensity and the
+    /// colour are each written on their own and the material emits their
+    /// product, so a colour written after an intensity is still scaled by it
+    /// and an intensity of zero, raised again, brings the colour back. That
+    /// holds across the copy an element write makes of a material an
+    /// animatable has already scaled.
+    #[test]
+    fn emissive_intensity_scales_the_emissive_colour() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_message::<RequestRedraw>()
+            .add_plugins(ValuesPlugin);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                emissive: LinearRgba::rgb(0.5, 0.25, 0.0),
+                ..default()
+            });
+        let world = app.world_mut();
+        let node = world.spawn(Transform::default()).id();
+        let mesh = world.spawn(MeshMaterial3d(material)).id();
+        let mut bindings = SceneBindings::default();
+        bindings.elements.insert(
+            "eye".into(),
+            arora_visuals::binding::ElementTargets {
+                node,
+                mesh: Some(mesh),
+                morph: None,
+            },
+        );
+        bindings.by_id.insert(
+            "glow".into(),
+            vec![SceneBinding {
+                entity: mesh,
+                feature: FeatureKind::EmissiveIntensity,
+                axis: None,
+                morph_index: None,
+            }],
+        );
+        bindings.indexed = true;
+        let mut meta = arora_visuals::meta::AssetMeta::default();
+        meta.elements.push(arora_visuals::meta::Element {
+            id: "eye".into(),
+            name: String::new(),
+            node_name: "eye".into(),
+            kind: "shape".into(),
+            material: None,
+            morph_targets: Vec::new(),
+            primitive: None,
+        });
+        world.spawn((
+            asset("a"),
+            EntityInstance {
+                id: "a".into(),
+                asset_path: String::new(),
+                meta,
+                bindings,
+                camera: Entity::PLACEHOLDER,
+                draw_order: 0,
+                ready: true,
+            },
+        ));
+        let write = |app: &mut App, feature: &str, value: Decoded| {
+            // The animatable when named, else the element's feature.
+            let (target, feature) = match feature {
+                "glow" => ("glow", None),
+                feature => ("eye", Some(feature.to_string())),
+            };
+            app.world_mut()
+                .resource_mut::<ValueWrites>()
+                .0
+                .push(ValueWrite {
+                    instance: Some("a".into()),
+                    target: target.into(),
+                    feature,
+                    value,
+                    stamp: None,
+                });
+            app.update();
+            assert_eq!(app.world().resource::<AppliedValues>().count, 1, "{target}");
+            let handle = &app
+                .world()
+                .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+                .unwrap()
+                .0;
+            let emits = app
+                .world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .unwrap()
+                .emissive;
+            [emits.red, emits.green, emits.blue]
+        };
+
+        assert_eq!(
+            write(&mut app, "glow", Decoded::Scalar(4.0)),
+            [2.0, 1.0, 0.0],
+            "the GLB's colour, scaled"
+        );
+        assert_eq!(
+            write(&mut app, "emissive", Decoded::Triple([0.0, 0.5, 1.0])),
+            [0.0, 2.0, 4.0],
+            "a colour written after an intensity is scaled by it"
+        );
+        assert_eq!(
+            write(&mut app, "emissiveIntensity", Decoded::Scalar(0.0)),
+            [0.0; 3]
+        );
+        assert_eq!(
+            write(&mut app, "emissiveIntensity", Decoded::Scalar(1.0)),
+            [0.0, 0.5, 1.0],
+            "the colour comes back"
+        );
+        assert_eq!(
+            write(&mut app, "emissive.r", Decoded::Scalar(0.25)),
+            [0.25, 0.5, 1.0]
+        );
+        // The animatable again, onto a copy of the material the element
+        // writes made its own: the colour, not the scaled emission, is kept.
+        assert_eq!(
+            write(&mut app, "emissiveIntensity", Decoded::Scalar(3.0)),
+            [0.75, 1.5, 3.0]
+        );
+        assert_eq!(
+            write(&mut app, "glow", Decoded::Scalar(2.0)),
+            [0.5, 1.0, 2.0]
         );
     }
 

@@ -104,17 +104,28 @@ export interface SceneHandle {
    */
   setSelection(instance: string, elements: string[]): void;
   /**
-   * Writes a value to the robot in `instance`. `target` is an animatable's id
-   * as the robot's `RobotData` declares it, which carries its own feature (a
-   * joint's value among them), or an element's id together with the `feature`
+   * Writes a value to the robot in `instance`.
+   *
+   * With a `feature`, `target` is an element's id and `feature` the feature
    * to change, as `RobotData` names it: `translation`, `rotation` (an euler,
    * radians), `scale` (three, or one scaling evenly), `color`, `emissive`
-   * (linear RGB), `opacity`, `metalness` (one), one component of a triple by
-   * its per-axis name (`translation.x`, `rotation.r`, `color.g`: one), or one
-   * of the element's morph target names (a weight). A feature the element
-   * lacks, or a value of the wrong shape for it, changes nothing. The same
-   * names `@vizij/runtime`'s `setValue` takes for a face. Drawn in the next
-   * frame; for a robot still loading, in the frame it arrives in.
+   * (linear RGB), `opacity`, `metalness`, `emissiveIntensity` (one), one
+   * component of a triple by its per-axis name (`translation.x`,
+   * `rotation.r`, `color.g`: one), or one of the element's morph target
+   * names (a weight). These are the names, shapes and meaning
+   * `@vizij/runtime`'s `setValue` takes for a face's elements.
+   * `emissiveIntensity` scales the element's `emissive` colour, each kept on
+   * its own, so writing either leaves the other as it was.
+   *
+   * Without one, `target` is an animatable's id as the robot's `RobotData`
+   * declares it, which carries its own feature (a joint's value among them).
+   * A face has no such form: its animatables are its device's outputs, which
+   * the device writes. A robot's have no device behind them in the scene, so
+   * the page writes them here.
+   *
+   * A feature the element lacks, or a value of the wrong shape for it,
+   * changes nothing. Drawn in the next frame; for a robot still loading, in
+   * the frame it arrives in.
    */
   setValue(
     instance: string,
