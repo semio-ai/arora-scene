@@ -32,10 +32,10 @@
 pub use arora_visuals::control::{
     Control, ControlCamera, ControlCommand, ControlCommands, ControlEvent, ControlEvents,
     ControlPass, ControlPress, ControlPresses, ControlSize, ControlSystems, Controls, DriverFrame,
-    HiddenByDriver, JointRequest, Mode, Phase, Pose, PressButton, Target, FADE_SECS,
+    HiddenByDriver, JointRequest, Mode, Modifiers, Phase, Pose, PressButton, Target, FADE_SECS,
 };
 use arora_visuals::joint_gizmo::JointGizmo;
-pub use arora_visuals::transform_gizmo::GizmoSize;
+pub use arora_visuals::transform_gizmo::{GizmoDrags, GizmoSize};
 use bevy::prelude::*;
 
 use crate::joints::JointRig;
@@ -754,6 +754,7 @@ mod tests {
             entity: gizmo,
             target: body,
             phase: DragPhase::Move,
+            gesture: 0,
             value: 0.3,
         });
         let events = events(&mut app);
@@ -870,6 +871,7 @@ mod tests {
             target: goal,
             handle: GizmoHandle::Arrow(2),
             phase: DragPhase::End,
+            gesture: 0,
             transform: asked,
         });
         let events = events(&mut app);
