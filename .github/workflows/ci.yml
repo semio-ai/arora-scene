@@ -31,7 +31,9 @@ jobs:
         run: cargo clippy --locked -p arora-scene --all-targets -- -D warnings
 
       # The browser host's tests build natively too: they drive the handle's
-      # own queues and a real gizmo drag without a page.
+      # own queues and a real gizmo drag without a page. Built in the same
+      # run as the scene, whose default features choose winit's X11 backend,
+      # which winit needs on Linux and the browser host does not choose.
       - name: Test
         run: cargo test --locked -p arora-scene -p arora-scene-wasm
 
