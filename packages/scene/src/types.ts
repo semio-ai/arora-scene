@@ -230,18 +230,51 @@ export type ControlCommand =
   | { op: "highlight"; key: string; handle?: GizmoHandle; on: boolean };
 
 /**
+ * The modifier keys held, as the host has them. The scene cannot read them
+ * itself: its canvas sees keys only while it has focus. So the host passes
+ * them in (`scene.setModifiers`), from its own pointer and keyboard events.
+ * The scene gives them no meaning: it stamps them on each `control` event
+ * for the driver to act on.
+ */
+export interface Modifiers {
+  alt: boolean;
+  shift: boolean;
+  meta: boolean;
+  ctrl: boolean;
+}
+
+/**
  * A drag on a control: what it asks its target to become. **Nothing has
  * moved**: the driver writes the joint's value, or sets the pose, if it wants
  * the change.
+ *
+ * Each drag sends one `start`, a `move` for each frame its value changes,
+ * and exactly one closing event, after which nothing more is sent for it:
+ *
+ * - `end` when the pointer lets go: the drag is finished, at its last value;
+ * - `cancel` when it is abandoned instead: by the host (`scene.cancelDrag`),
+ *   or by its control being removed, replaced, hidden or made not
+ *   `interactive` while the button is down. A `cancel` carries no value,
+ *   pose or scale: the driver drops whatever the drag previewed.
  */
 export interface ControlEvent {
   key: string;
-  phase: "start" | "move" | "end";
-  /** A joint control's value. */
+  phase: "start" | "move" | "end" | "cancel";
+  /**
+   * The drag this belongs to: the same on every event of one drag, and
+   * different from every other drag's in the scene.
+   */
+  gesture: number;
+  /** The modifier keys the host said were held when it was sent. */
+  modifiers: Modifiers;
+  /** A joint control's value; absent on a `cancel`. */
   value?: number;
-  /** A transform control's target's pose, in the world. */
+  /** A transform control's target's pose, in the world; absent on a `cancel`. */
   pose?: Required<Pose>;
-  /** A transform control's target's scale, along its own axes. */
+  /**
+   * A transform control's target's scale, along its own axes; absent on a
+   * `cancel`.
+   */
   scale?: [number, number, number];
 }
 

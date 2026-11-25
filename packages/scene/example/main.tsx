@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client";
 import {
   Scene,
   type Backend,
+  type ControlEvent,
   type Joint,
   type OverlayFrame,
   type Pose,
@@ -84,6 +85,25 @@ interface JointControl {
   joint: string;
 }
 
+/**
+ * A drag in hand, from its `start` until it closes, with what it moves as it
+ * stood when the drag started: a joint, a robot, or else the goal under its
+ * key. A joint's value and a robot's pose are written to the joint and the
+ * robot themselves, so where they go does not depend on which control holds
+ * the key by the time the drag closes.
+ */
+interface Drag {
+  key: string;
+  joint?: JointControl;
+  robot?: string;
+  start: ControlEvent;
+  /**
+   * Whether the driver has written moves it has not put back. A cancel puts
+   * back only what was written, whatever "write drags back" says by then.
+   */
+  previewed: boolean;
+}
+
 function Running({ robot: first }: { robot: Robot }) {
   // The robots shown, by the page's own id for each instance. A robot under a
   // different key in an instance swaps it; an id gone unloads it.
@@ -110,6 +130,8 @@ function Running({ robot: first }: { robot: Robot }) {
   // each robot, so the floor buttons below change only its height.
   const robotControls = useRef(new Map<string, string>());
   const stood = useRef(new Map<string, Pose>());
+  // Each drag in hand, by gesture.
+  const drags = useRef(new Map<number, Drag>());
   const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
 
   const onEvent = useCallback((event: SceneEvent) => {
@@ -120,6 +142,15 @@ function Running({ robot: first }: { robot: Robot }) {
       // A robot loaded into the instance stands at its load pose, whatever
       // the one it replaced was moved to.
       stood.current.delete(event.instance);
+      // The robot a drag moved has gone with its controls, whose drags close
+      // with a cancel after this; nothing of the old robot is to be put back
+      // onto the new one.
+      for (const [gesture, drag] of drags.current)
+        if (
+          drag.robot === event.instance ||
+          drag.joint?.instance === event.instance
+        )
+          drags.current.delete(gesture);
       setJoints((j) => ({ ...j, [event.instance]: event.joints }));
       return note(`${event.instance} shows ${event.key ?? "a robot"}`);
     }
@@ -133,27 +164,113 @@ function Running({ robot: first }: { robot: Robot }) {
         )} at ${event.position.map((v) => Math.round(v)).join(",")}`,
       );
     const scene = sceneRef.current;
-    if (event.phase !== "move")
+    if (event.phase !== "move") {
+      const held = Object.entries(event.modifiers)
+        .filter(([, down]) => down)
+        .map(([key]) => `+${key}`)
+        .join("");
       note(
-        `${event.phase} ${event.key} ${
+        `${event.phase} ${event.key} #${event.gesture}${held} ${
           event.value?.toFixed(3) ??
-          event.pose?.position.map((v) => v.toFixed(2)).join(" ")
+          event.pose?.position.map((v) => v.toFixed(2)).join(" ") ??
+          ""
         }`,
       );
-    if (!scene || !writeBack.current) return;
-    const joint = jointControls.current.get(event.key);
-    if (event.value !== undefined && joint)
-      scene.setValue(joint.instance, joint.joint, event.value);
-    const robot = robotControls.current.get(event.key);
-    if (event.pose && robot) stood.current.set(robot, event.pose);
-    if (event.pose)
+    }
+    if (event.phase === "start")
+      drags.current.set(event.gesture, {
+        key: event.key,
+        joint: jointControls.current.get(event.key),
+        robot: robotControls.current.get(event.key),
+        start: event,
+        previewed: false,
+      });
+    const drag = drags.current.get(event.gesture);
+    if (event.phase === "end" || event.phase === "cancel")
+      drags.current.delete(event.gesture);
+    if (!scene || !drag || event.phase === "start") return;
+    // A cancelled drag keeps nothing, so the driver puts back what it
+    // previewed: the drag's start.
+    if (event.phase === "cancel") {
+      if (drag.previewed) writeDrag(scene, drag, drag.start);
+      return;
+    }
+    if (!writeBack.current) return;
+    writeDrag(scene, drag, event);
+    drag.previewed = true;
+  }, []);
+
+  // Writes what a drag asks to what it moves. A goal has no home but its
+  // control, so its pose goes through the key; `settle` keeps that safe.
+  const writeDrag = (scene: SceneHandle, drag: Drag, asked: ControlEvent) => {
+    if (asked.value !== undefined && drag.joint)
+      scene.setValue(drag.joint.instance, drag.joint.joint, asked.value);
+    if (!asked.pose) return;
+    if (drag.robot) {
+      stood.current.set(drag.robot, asked.pose);
+      scene.setPose(drag.robot, asked.pose);
+    } else
       scene.control({
         op: "setPose",
-        key: event.key,
-        pose: event.pose,
-        scale: event.scale,
+        key: drag.key,
+        pose: asked.pose,
+        scale: asked.scale,
       });
-  }, []);
+  };
+
+  // Puts back what drags on `key` previewed, ahead of a command that may
+  // take their control away. Commands land in the order sent, so the goal a
+  // pose goes to is still the one the drag moved, and whether the add or
+  // remove then lands or is refused, nothing previewed is left behind: a
+  // drag whose control is taken away closes with a cancel that has nothing
+  // left to put back, and one whose control stays previews afresh as it
+  // moves on.
+  const settle = (scene: SceneHandle, key: string) => {
+    for (const drag of drags.current.values())
+      if (drag.key === key && drag.previewed) {
+        writeDrag(scene, drag, drag.start);
+        drag.previewed = false;
+      }
+  };
+
+  // What only the page sees: the modifier keys, which the canvas does not
+  // hear while it lacks focus, and the ways a drag is abandoned without its
+  // button coming up.
+  useEffect(() => {
+    if (!scene) return;
+    const hold = (e: KeyboardEvent | PointerEvent) =>
+      scene.setModifiers({
+        alt: e.altKey,
+        shift: e.shiftKey,
+        meta: e.metaKey,
+        ctrl: e.ctrlKey,
+      });
+    const onKey = (e: KeyboardEvent) => {
+      hold(e);
+      if (e.type === "keydown" && e.key === "Escape") scene.cancelDrag();
+    };
+    const cancel = () => scene.cancelDrag();
+    const onVisibility = () => {
+      if (document.hidden) scene.cancelDrag();
+    };
+    const canvas = scene.canvas;
+    canvas.addEventListener("pointerdown", hold, { capture: true });
+    canvas.addEventListener("pointermove", hold, { capture: true });
+    canvas.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    window.addEventListener("blur", cancel);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      canvas.removeEventListener("pointerdown", hold, { capture: true });
+      canvas.removeEventListener("pointermove", hold, { capture: true });
+      canvas.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+      window.removeEventListener("blur", cancel);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [scene]);
 
   // Moves the current robot to `height` above the floor, keeping where it
   // stands across the floor and which way it faces.
@@ -234,9 +351,19 @@ function Running({ robot: first }: { robot: Robot }) {
     const key = String(form.get("key"));
     if (!scene || !key) return;
     const op = submitter?.value;
+    // A joint add the scene would refuse leaves the control under its key as
+    // it was, so it is refused here first, before what the driver keeps
+    // about that control is dropped. The robot in the current instance is
+    // showing or loading, so a robot add always lands.
+    if (
+      op === "joint" &&
+      !joints[current]?.some((j) => j.animatable === form.get("joint"))
+    )
+      return note(`no joint ${String(form.get("joint"))} on ${current}`);
     // An add replaces whatever control had the key, so what the driver kept
     // about that one goes with it.
-    if (op === "joint" || op === "robot" || op === "goal") {
+    if (op === "joint" || op === "robot" || op === "goal" || op === "remove") {
+      settle(scene, key);
       jointControls.current.delete(key);
       robotControls.current.delete(key);
     }
@@ -258,6 +385,10 @@ function Running({ robot: first }: { robot: Robot }) {
           control: {
             kind: "transform",
             target: { kind: "instance", instance: current },
+            // No scale: the driver writes a robot's pose with `setPose`,
+            // which keeps the robot's scale, so a scale it could not write
+            // back it does not offer.
+            modes: ["translate", "rotate"],
           },
         });
       case "goal":
@@ -270,8 +401,6 @@ function Running({ robot: first }: { robot: Robot }) {
           },
         });
       case "remove":
-        jointControls.current.delete(key);
-        robotControls.current.delete(key);
         return scene.control({ op: "remove", key });
       case "highlight":
       case "unhighlight":

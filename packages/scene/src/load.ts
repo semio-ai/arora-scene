@@ -4,6 +4,7 @@ import type {
   ControlCommand,
   FeatureValue,
   GhostOptions,
+  Modifiers,
   Pose,
   SceneEvent,
   SceneOptions,
@@ -31,6 +32,13 @@ interface Module {
     values: Float32Array,
   ) => void;
   control: (command: string) => void;
+  cancel_drag: () => void;
+  set_modifiers: (
+    alt: boolean,
+    shift: boolean,
+    meta: boolean,
+    ctrl: boolean,
+  ) => void;
   element_pose: (instance: string, element: string) => Pose | undefined;
   set_event_handler: (handler: (event: SceneEvent) => void) => void;
 }
@@ -149,6 +157,23 @@ export interface SceneHandle {
    * a `control` event, and the driver writes the change.
    */
   control(command: ControlCommand): void;
+  /**
+   * Abandons the drag in hand on a control, if there is one: it closes with a
+   * `cancel` event, and nothing more is sent for it, the button coming up
+   * included. Call it for what the scene cannot see itself: Escape, the
+   * window losing focus, a `pointercancel`, the page being hidden. Takes
+   * effect in the next frame, before anything else happens to the drag.
+   */
+  cancelDrag(): void;
+  /**
+   * Says which modifier keys are held, for the scene to stamp on each
+   * `control` event from the next frame on, until called again. Pass the
+   * state from the page's own pointer events (`altKey`, `shiftKey`,
+   * `metaKey`, `ctrlKey`), and its key events where a key changes mid-drag:
+   * the canvas sees no keys while it lacks focus. Every key not held is
+   * `false`; none is held until this is first called.
+   */
+  setModifiers(modifiers: Modifiers): void;
   /**
    * The robots showing, by instance, as their `loaded` events described
    * them. A robot's event can come before a page has set its handler, so
@@ -394,6 +419,12 @@ async function start(
     },
     control(command) {
       wasm.control(JSON.stringify(command));
+    },
+    cancelDrag() {
+      wasm.cancel_drag();
+    },
+    setModifiers({ alt, shift, meta, ctrl }) {
+      wasm.set_modifiers(alt, shift, meta, ctrl);
     },
     setPose(id, pose) {
       wasm.set_pose(id, JSON.stringify(pose));
