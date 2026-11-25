@@ -30,8 +30,10 @@ jobs:
       - name: Clippy, native
         run: cargo clippy --locked -p arora-scene --all-targets -- -D warnings
 
+      # The browser host's tests build natively too: they drive the handle's
+      # own queues and a real gizmo drag without a page.
       - name: Test
-        run: cargo test --locked -p arora-scene
+        run: cargo test --locked -p arora-scene -p arora-scene-wasm
 
       # Both backends, since each is its own build of the module the npm
       # package ships, and with the benchmark's hooks, which are only built
