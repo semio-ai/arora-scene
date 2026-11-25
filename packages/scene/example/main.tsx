@@ -142,6 +142,15 @@ function Running({ robot: first }: { robot: Robot }) {
       // A robot loaded into the instance stands at its load pose, whatever
       // the one it replaced was moved to.
       stood.current.delete(event.instance);
+      // The robot a drag moved has gone with its controls, whose drags close
+      // with a cancel after this; nothing of the old robot is to be put back
+      // onto the new one.
+      for (const [gesture, drag] of drags.current)
+        if (
+          drag.robot === event.instance ||
+          drag.joint?.instance === event.instance
+        )
+          drags.current.delete(gesture);
       setJoints((j) => ({ ...j, [event.instance]: event.joints }));
       return note(`${event.instance} shows ${event.key ?? "a robot"}`);
     }
