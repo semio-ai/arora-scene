@@ -884,10 +884,16 @@ pub fn cancel_drag() {
 ///
 /// Does not wake the scene: what is held changes nothing drawn and sends
 /// nothing by itself, and the pointer event a page reads them from wakes the
-/// scene on its own.
+/// scene on its own. So a page may call this many times while the scene is
+/// idle and takes no requests, and only the last state can reach an event:
+/// it replaces any state still waiting rather than queueing behind it.
+/// Moving it past the requests between is harmless, since none of them reads
+/// what is held; events read it only once the frame's requests are taken.
 #[wasm_bindgen]
 pub fn set_modifiers(alt: bool, shift: bool, meta: bool, ctrl: bool) {
-    REQUESTS.lock().unwrap().push(Request::Modifiers(Modifiers {
+    let mut requests = REQUESTS.lock().unwrap();
+    requests.retain(|request| !matches!(request, Request::Modifiers(_)));
+    requests.push(Request::Modifiers(Modifiers {
         alt,
         shift,
         meta,
@@ -1265,6 +1271,35 @@ mod tests {
 
         fn none_held() -> Value {
             json!({ "alt": false, "shift": false, "meta": false, "ctrl": false })
+        }
+
+        /// Modifiers set while the scene takes no requests wait as one, the
+        /// last set, however many times the page sets them.
+        #[test]
+        fn modifiers_set_between_frames_wait_as_the_last_set() {
+            let mut page = Page::new();
+            for shift in [true, false, true] {
+                set_modifiers(false, shift, false, false);
+                cancel_drag();
+            }
+            let waiting: Vec<Modifiers> = REQUESTS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|request| match request {
+                    Request::Modifiers(held) => Some(*held),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                waiting,
+                [Modifiers {
+                    shift: true,
+                    ..default()
+                }]
+            );
+            page.app.update();
+            assert!(page.app.world().resource::<Modifiers>().shift);
         }
 
         /// A drag let go of ends once, carrying the modifiers the page said
