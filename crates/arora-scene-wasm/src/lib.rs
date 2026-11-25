@@ -521,7 +521,12 @@ pub fn mount(canvas: String, options: String) -> Result<(), JsValue> {
     })
     .insert_resource(below)
     .add_systems(Startup, keep_waker)
-    .add_systems(Update, take_pushed.before(ApplyValues))
+    .add_systems(
+        Update,
+        take_pushed
+            .in_set(arora_visuals::instance::InstanceSystems::Intake)
+            .before(ApplyValues),
+    )
     // Before Update, where the scene carries control commands out, and after
     // the robot requests, so an unload drops only commands that were waiting
     // from earlier frames.
