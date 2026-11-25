@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use arora_scene::controls::{
     ControlCommand, ControlCommands, ControlEvent, ControlEvents, ControlPress, ControlPresses,
+    GizmoDrags, Modifiers,
 };
 use arora_scene::controls::{Pose, ScenePose};
 use arora_scene::redraw::RedrawOnChangePlugin;
@@ -98,6 +99,8 @@ enum Request {
     Environment(Environment),
     BelowFloor(BelowFloor),
     Area(Option<Rect>),
+    CancelDrag,
+    Modifiers(Modifiers),
 }
 
 /// What the floor shows of whatever has sunk below it, as JSON from the page.
@@ -339,10 +342,13 @@ fn asset_id(path: &str) -> String {
 }
 
 /// Hands what the page asked since the last frame to the scene, in order.
+#[allow(clippy::too_many_arguments)]
 fn take_requests(
     mut requests: ResMut<RobotRequests>,
     mut stage: ResMut<arora_scene::stage::Stage>,
     mut below: ResMut<BelowFloor>,
+    mut drags: ResMut<GizmoDrags>,
+    mut modifiers: ResMut<Modifiers>,
     cameras: Query<Entity, With<arora_scene::OrbitCamera>>,
     mut commands: Commands,
 ) {
@@ -365,6 +371,10 @@ fn take_requests(
                 }
             }
             Request::Robot(request) => requests.robots.push(request),
+            Request::CancelDrag => drags.cancel_drag(),
+            Request::Modifiers(held) => {
+                modifiers.set_if_neq(held);
+            }
         }
     }
 }
@@ -588,6 +598,11 @@ thread_local! {
 /// A timeout runs after the browser's animation frame callbacks, so winit's
 /// frame is drawn first and the wake asks for the next.
 fn wake() {
+    // Off the web there is no page loop to wake: only this crate's tests
+    // build it natively, and they run each frame themselves.
+    if cfg!(not(target_arch = "wasm32")) {
+        return;
+    }
     if WAKE_PENDING.with(|pending| pending.replace(true)) {
         return;
     }
@@ -695,7 +710,9 @@ enum SceneEvent<'a> {
         element: Option<&'a str>,
     },
     /// A drag on a control: what it asks for. Nothing has moved; the page
-    /// writes the change if it wants it.
+    /// writes the change if it wants it. Each drag closes exactly once, with
+    /// `end` or `cancel`, and every event of it carries its `gesture` and the
+    /// modifiers the page last said were held ([`set_modifiers`]).
     Control(&'a ControlEvent),
     /// A robot loaded whole and showing in its instance, with what it
     /// declares.
@@ -849,6 +866,35 @@ pub fn control(command: String) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Abandons the drag in hand on a control, if there is one: it closes with a
+/// `cancel` event, and nothing more is sent for it, the button coming up
+/// included. For what the scene cannot see itself — Escape, the window
+/// losing focus, a cancelled pointer, the page hidden. Takes effect in the
+/// next frame, which the call wakes the scene for, before the gizmos handle
+/// the pointer in it.
+#[wasm_bindgen]
+pub fn cancel_drag() {
+    REQUESTS.lock().unwrap().push(Request::CancelDrag);
+    wake();
+}
+
+/// Says which modifier keys are held, for the scene to stamp on each control
+/// event from the next frame on. The page reads them from its own pointer and
+/// key events, since the canvas sees no keys while it lacks focus.
+///
+/// Does not wake the scene: what is held changes nothing drawn and sends
+/// nothing by itself, and the pointer event a page reads them from wakes the
+/// scene on its own.
+#[wasm_bindgen]
+pub fn set_modifiers(alt: bool, shift: bool, meta: bool, ctrl: bool) {
+    REQUESTS.lock().unwrap().push(Request::Modifiers(Modifiers {
+        alt,
+        shift,
+        meta,
+        ctrl,
+    }));
+}
+
 /// Hands the page's control commands to the scene.
 fn take_controls(mut commands: ResMut<ControlCommands>) {
     commands.0.append(&mut CONTROLS.lock().unwrap());
@@ -979,5 +1025,323 @@ mod tests {
         assert_eq!(content_path(&robot), content_path(&robot.clone()));
         assert_ne!(content_path(&robot), content_path(&[1, 2, 3, 5]));
         assert_ne!(content_path(&robot), content_path(&[1, 2, 3]));
+    }
+
+    mod drags {
+        use std::sync::MutexGuard;
+
+        use arora_scene::OrbitCamera;
+        use arora_visuals::transform_gizmo::{
+            GizmoHandle, GizmoPointer, HandleMaterial, TransformGizmo, TransformGizmoPlugin,
+        };
+        use bevy::camera::visibility::VisibilityPlugin;
+        use bevy::camera::{
+            CameraProjection, ComputedCameraValues, NormalizedRenderTarget, RenderTarget,
+            RenderTargetInfo,
+        };
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Pointer, PointerPress};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        use bevy::window::{RequestRedraw, WindowRef};
+        use serde_json::{json, Value};
+
+        use super::super::*;
+
+        /// The page's queues are the module's, one each, so tests that go
+        /// through them take turns.
+        static PAGE: Mutex<()> = Mutex::new(());
+
+        const KEY: &str = "goal";
+
+        /// The page's side of a scene: the handle's own intake of requests
+        /// and control commands, the scene's controls and transform gizmos,
+        /// and a window and camera for a pointer to drag in. The camera
+        /// draws 400 pixels a side, looking at the origin, where the page's
+        /// goal control stands. The left button is pressed and let go by
+        /// hand, with nothing clearing it between frames but the test.
+        struct Page {
+            app: App,
+            window: Entity,
+            /// Where on the window a handle of the goal is, once found.
+            spot: Vec2,
+            _turn: MutexGuard<'static, ()>,
+        }
+
+        impl Page {
+            fn new() -> Self {
+                let turn = PAGE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                REQUESTS.lock().unwrap().clear();
+                CONTROLS.lock().unwrap().clear();
+                let mut app = App::new();
+                app.add_plugins((
+                    MinimalPlugins,
+                    AssetPlugin::default(),
+                    bevy::transform::TransformPlugin,
+                    VisibilityPlugin,
+                ))
+                // What the gizmos' handles are drawn with, and what visibility
+                // reads meshes' bounds from, which the render plugins would
+                // otherwise provide.
+                .init_asset::<Mesh>()
+                .init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()
+                .init_asset::<HandleMaterial>()
+                .init_asset::<StandardMaterial>()
+                .add_message::<RequestRedraw>()
+                .init_resource::<ButtonInput<MouseButton>>()
+                .init_resource::<RobotRequests>()
+                .init_resource::<BelowFloor>()
+                .insert_resource(arora_scene::stage::Stage {
+                    theme: default(),
+                    environment: default(),
+                    lighting: default(),
+                })
+                .add_plugins((arora_scene::controls::ControlsPlugin, TransformGizmoPlugin))
+                .add_systems(First, take_requests)
+                .add_systems(PreUpdate, take_controls);
+                let world = app.world_mut();
+                let window = world.spawn(Window::default()).id();
+                world.spawn((
+                    OrbitCamera,
+                    Camera {
+                        computed: ComputedCameraValues {
+                            clip_from_view: PerspectiveProjection {
+                                aspect_ratio: 1.0,
+                                ..default()
+                            }
+                            .get_clip_from_view(),
+                            target_info: Some(RenderTargetInfo {
+                                physical_size: UVec2::splat(400),
+                                scale_factor: 1.0,
+                            }),
+                            ..default()
+                        },
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.4, 1.5).looking_at(Vec3::ZERO, Vec3::Y),
+                    RenderTarget::Window(WindowRef::Entity(window)),
+                ));
+                let mut page = Self {
+                    app,
+                    window,
+                    spot: Vec2::ZERO,
+                    _turn: turn,
+                };
+                control(
+                    json!({
+                        "op": "add",
+                        "key": KEY,
+                        "control": {
+                            "kind": "transform",
+                            "target": { "kind": "goal", "pose": { "position": [0, 0, 0] } },
+                        },
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                page.app.update();
+                page.app.update();
+                // Along the row through the goal until a handle is under the
+                // cursor; not a ring, which is seen edge on there and so
+                // cannot be taken.
+                page.spot = (0..200)
+                    .map(|x| Vec2::new(200.0 + x as f32, 200.0))
+                    .find(|&at| {
+                        page.point_at(at);
+                        let pointer = page.app.world().resource::<GizmoPointer>();
+                        pointer
+                            .hovered
+                            .is_some_and(|(_, handle)| !matches!(handle, GizmoHandle::Ring(_)))
+                    })
+                    .expect("a handle of the goal on the row through it");
+                page.sent();
+                page
+            }
+
+            fn point_at(&mut self, at: Vec2) {
+                let mut window = self.app.world_mut().get_mut::<Window>(self.window).unwrap();
+                window.set_cursor_position(Some(at));
+                self.app.update();
+            }
+
+            fn buttons(&mut self) -> Mut<'_, ButtonInput<MouseButton>> {
+                self.app
+                    .world_mut()
+                    .resource_mut::<ButtonInput<MouseButton>>()
+            }
+
+            /// A left press on the scene where the cursor is, as winit and
+            /// Bevy's picking would report one on the window.
+            fn press(&mut self) {
+                let camera = self
+                    .app
+                    .world_mut()
+                    .query_filtered::<Entity, With<OrbitCamera>>()
+                    .single(self.app.world())
+                    .unwrap();
+                let at = self.spot;
+                self.app.world_mut().trigger(PointerPress {
+                    entity: self.window,
+                    pointer: Pointer::new(
+                        PointerId::Mouse,
+                        Location {
+                            target: NormalizedRenderTarget::Window(
+                                WindowRef::Entity(self.window).normalize(None).unwrap(),
+                            ),
+                            position: at,
+                        },
+                    ),
+                    button: PointerButton::Primary,
+                    hit: HitData::new(camera, 0.0, None, None),
+                    count: 1,
+                });
+                self.buttons().press(MouseButton::Left);
+                self.app.update();
+                // Still down, no longer just pressed.
+                self.buttons().clear();
+            }
+
+            fn release(&mut self) {
+                self.buttons().release(MouseButton::Left);
+                self.app.update();
+                self.buttons().clear();
+            }
+
+            /// Takes a drag on the goal and moves it, so the drag has
+            /// something to keep or drop.
+            fn drag(&mut self) {
+                self.press();
+                self.point_at(self.spot + Vec2::new(6.0, -4.0));
+            }
+
+            /// The control events since last asked, as the page's handler
+            /// receives them.
+            fn sent(&mut self) -> Vec<Value> {
+                std::mem::take(&mut self.app.world_mut().resource_mut::<ControlEvents>().0)
+                    .iter()
+                    .map(|event| serde_json::to_value(SceneEvent::Control(event)).unwrap())
+                    .collect()
+            }
+        }
+
+        /// The phases of `events`, in order.
+        fn phases(events: &[Value]) -> Vec<&str> {
+            events
+                .iter()
+                .map(|event| event["phase"].as_str().unwrap())
+                .collect()
+        }
+
+        /// Checks that `events` are one whole drag on the goal closed by
+        /// `closing`: a start, at least one move, then the one closing
+        /// event, every one under the same gesture with the modifiers
+        /// `held`. A `cancel` carries no pose; every other event does.
+        fn one_drag(events: &[Value], closing: &str, held: Value) {
+            let phases = phases(events);
+            assert_eq!(phases.first(), Some(&"start"), "{phases:?}");
+            assert!(phases.contains(&"move"), "{phases:?}");
+            assert_eq!(phases.last(), Some(&closing), "{phases:?}");
+            assert_eq!(
+                phases
+                    .iter()
+                    .filter(|phase| matches!(**phase, "end" | "cancel"))
+                    .count(),
+                1,
+                "closed once: {phases:?}"
+            );
+            let gesture = &events[0]["gesture"];
+            assert!(gesture.is_u64(), "{:?}", events[0]);
+            for event in events {
+                assert_eq!(event["type"], "control");
+                assert_eq!(event["key"], KEY);
+                assert_eq!(&event["gesture"], gesture, "one drag, one gesture");
+                assert_eq!(event["modifiers"], held);
+                let cancel = event["phase"] == "cancel";
+                for field in ["pose", "scale"] {
+                    assert_eq!(event.get(field).is_none(), cancel, "{field} on {event}");
+                }
+                assert!(event.get("value").is_none());
+            }
+        }
+
+        fn none_held() -> Value {
+            json!({ "alt": false, "shift": false, "meta": false, "ctrl": false })
+        }
+
+        /// A drag let go of ends once, carrying the modifiers the page said
+        /// were held, and sends nothing after it.
+        #[test]
+        fn a_drag_let_go_of_ends_once() {
+            let mut page = Page::new();
+            set_modifiers(true, false, true, false);
+            page.drag();
+            page.release();
+            let held = json!({ "alt": true, "shift": false, "meta": true, "ctrl": false });
+            one_drag(&page.sent(), "end", held);
+            page.point_at(page.spot);
+            assert!(page.sent().is_empty(), "nothing after the end");
+
+            // The next drag is a gesture of its own, under what is held now.
+            set_modifiers(false, false, false, false);
+            page.drag();
+            page.release();
+            one_drag(&page.sent(), "end", none_held());
+        }
+
+        /// A drag the page cancels closes with one `cancel`, carrying no
+        /// pose, and sends nothing more: not while the button stays down,
+        /// nor when it comes up.
+        #[test]
+        fn a_drag_the_page_cancels_closes_with_cancel() {
+            let mut page = Page::new();
+            page.drag();
+            let gesture = page.sent()[0]["gesture"].clone();
+            cancel_drag();
+            page.app.update();
+            let closed = page.sent();
+            assert_eq!(phases(&closed), ["cancel"]);
+            assert_eq!(closed[0]["gesture"], gesture);
+            assert_eq!(closed[0]["modifiers"], none_held());
+            assert!(closed[0].get("pose").is_none());
+
+            page.point_at(page.spot + Vec2::new(12.0, -9.0));
+            page.release();
+            assert!(page.sent().is_empty(), "nothing after the cancel");
+        }
+
+        /// A drag whose control the page hides while the button is down
+        /// closes with one `cancel`, and its release sends nothing.
+        #[test]
+        fn a_drag_on_a_control_hidden_mid_drag_is_cancelled() {
+            let mut page = Page::new();
+            page.drag();
+            control(json!({ "op": "show", "key": KEY, "visible": false }).to_string()).unwrap();
+            page.point_at(page.spot + Vec2::new(12.0, -9.0));
+            page.point_at(page.spot + Vec2::new(14.0, -10.0));
+            page.release();
+            one_drag(&page.sent(), "cancel", none_held());
+        }
+
+        /// A drag whose control the page removes while the button is down
+        /// closes with one `cancel`, though there is no gizmo left to report
+        /// it, and its release sends nothing.
+        #[test]
+        fn a_drag_on_a_control_removed_mid_drag_is_cancelled() {
+            let mut page = Page::new();
+            page.drag();
+            control(json!({ "op": "remove", "key": KEY }).to_string()).unwrap();
+            page.app.update();
+            assert!(
+                page.app
+                    .world_mut()
+                    .query::<&TransformGizmo>()
+                    .iter(page.app.world())
+                    .next()
+                    .is_none(),
+                "the control is gone"
+            );
+            page.point_at(page.spot + Vec2::new(12.0, -9.0));
+            page.release();
+            one_drag(&page.sent(), "cancel", none_held());
+        }
     }
 }

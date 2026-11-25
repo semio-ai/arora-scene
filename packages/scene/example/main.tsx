@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client";
 import {
   Scene,
   type Backend,
+  type ControlEvent,
   type Joint,
   type OverlayFrame,
   type Pose,
@@ -110,6 +111,9 @@ function Running({ robot: first }: { robot: Robot }) {
   // each robot, so the floor buttons below change only its height.
   const robotControls = useRef(new Map<string, string>());
   const stood = useRef(new Map<string, Pose>());
+  // Each drag's start, by gesture, until it closes: what a cancelled drag
+  // puts back, since the driver previewed its moves as it went.
+  const starts = useRef(new Map<number, ControlEvent>());
   const note = (line: string) => setLog((l) => [line, ...l].slice(0, 8));
 
   const onEvent = useCallback((event: SceneEvent) => {
@@ -133,27 +137,79 @@ function Running({ robot: first }: { robot: Robot }) {
         )} at ${event.position.map((v) => Math.round(v)).join(",")}`,
       );
     const scene = sceneRef.current;
-    if (event.phase !== "move")
+    if (event.phase !== "move") {
+      const held = Object.entries(event.modifiers)
+        .filter(([, down]) => down)
+        .map(([key]) => `+${key}`)
+        .join("");
       note(
-        `${event.phase} ${event.key} ${
+        `${event.phase} ${event.key} #${event.gesture}${held} ${
           event.value?.toFixed(3) ??
-          event.pose?.position.map((v) => v.toFixed(2)).join(" ")
+          event.pose?.position.map((v) => v.toFixed(2)).join(" ") ??
+          ""
         }`,
       );
-    if (!scene || !writeBack.current) return;
-    const joint = jointControls.current.get(event.key);
-    if (event.value !== undefined && joint)
-      scene.setValue(joint.instance, joint.joint, event.value);
-    const robot = robotControls.current.get(event.key);
-    if (event.pose && robot) stood.current.set(robot, event.pose);
-    if (event.pose)
+    }
+    if (event.phase === "start") starts.current.set(event.gesture, event);
+    // A cancelled drag keeps nothing, so the driver puts back what it
+    // previewed: the drag's start.
+    const asked =
+      event.phase === "cancel" ? starts.current.get(event.gesture) : event;
+    if (event.phase === "end" || event.phase === "cancel")
+      starts.current.delete(event.gesture);
+    if (!scene || !writeBack.current || !asked) return;
+    const joint = jointControls.current.get(asked.key);
+    if (asked.value !== undefined && joint)
+      scene.setValue(joint.instance, joint.joint, asked.value);
+    const robot = robotControls.current.get(asked.key);
+    if (asked.pose && robot) stood.current.set(robot, asked.pose);
+    if (asked.pose)
       scene.control({
         op: "setPose",
-        key: event.key,
-        pose: event.pose,
-        scale: event.scale,
+        key: asked.key,
+        pose: asked.pose,
+        scale: asked.scale,
       });
   }, []);
+
+  // What only the page sees: the modifier keys, which the canvas does not
+  // hear while it lacks focus, and the ways a drag is abandoned without its
+  // button coming up.
+  useEffect(() => {
+    if (!scene) return;
+    const hold = (e: KeyboardEvent | PointerEvent) =>
+      scene.setModifiers({
+        alt: e.altKey,
+        shift: e.shiftKey,
+        meta: e.metaKey,
+        ctrl: e.ctrlKey,
+      });
+    const onKey = (e: KeyboardEvent) => {
+      hold(e);
+      if (e.type === "keydown" && e.key === "Escape") scene.cancelDrag();
+    };
+    const cancel = () => scene.cancelDrag();
+    const onVisibility = () => {
+      if (document.hidden) scene.cancelDrag();
+    };
+    const canvas = scene.canvas;
+    canvas.addEventListener("pointerdown", hold, { capture: true });
+    canvas.addEventListener("pointermove", hold, { capture: true });
+    canvas.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    window.addEventListener("blur", cancel);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      canvas.removeEventListener("pointerdown", hold, { capture: true });
+      canvas.removeEventListener("pointermove", hold, { capture: true });
+      canvas.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+      window.removeEventListener("blur", cancel);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [scene]);
 
   // Moves the current robot to `height` above the floor, keeping where it
   // stands across the floor and which way it faces.
