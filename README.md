@@ -125,9 +125,10 @@ which backend a page would get.
   robot showing in it, and `scene.loading` names the instances with a load
   under way.
 - **Robot calls act in the order they were made**, within a frame too:
-  `load`, `unload`, `setPose` and `setSelection`. A load then an unload of one
-  instance leaves it empty, and a selection set after an unload and a load is
-  the new robot's. Unloading an instance takes its selection with it, and the
+  `load`, `unload`, `setPose`, `setSelection` and `setGhost`. A load then an
+  unload of one instance leaves it empty, and a selection set after an unload
+  and a load is the new robot's. Unloading an instance takes its selection and
+  its ghost with it, and the
   value writes and control adds still waiting for it. Control commands and
   value writes act after a frame's robot calls, whatever order they were made
   in.
@@ -139,6 +140,17 @@ which backend a page would get.
   `scene.frame(instances)` fits the robots named, or every robot for none.
 - **`scene.setSelection(instance, elementIds)` outlines elements**, in place of
   whatever that instance outlined; none clears it.
+- **`scene.setGhost(instance, ghost)` draws a robot as a ghost**, or takes
+  the page's ghost off again for `null`: the page's style always goes, and
+  the ghost too unless the robot was a ghost before the page asked (the
+  scene's own ghost option, say), which it stays. `ghost` sets its `color`, `wash`, `rim`, `opacity` and
+  `depth` (`"overEverything"`, the default, or `"tested"` to hide behind the
+  solid robots and scene in front of it; ghosts still show through one
+  another, being blended); what it leaves out is the scene's look. A robot
+  the page clears gets back any style it had before. Kept across
+  a swap. Called again with a new style, the ghost changes from the next
+  frame, so a page animates a ghost by calling it each frame. A robot's value
+  writes reach it while it is a ghost, and it shows them once solid again.
 - **The scene idles.** It draws a frame only when something changed, an empty
   scene included. WebGPU is used when the browser can give the page an
   adapter, WebGL2 otherwise; **WebGL2 draws shadows from one light only.**

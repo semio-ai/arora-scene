@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use arora_visuals::binding::SceneBinding;
+use arora_visuals::ghost::{HasSolidMaterial, SolidMaterial};
 use arora_visuals::instance::{EntityInstance, InstanceIndex, InstanceSystems};
 use arora_visuals::joint_gizmo::JointGizmo;
 
@@ -157,7 +158,9 @@ pub fn apply_values(
     instances: Query<(Entity, &EntityInstance, Option<&JointRig>)>,
     mut transforms: Query<&mut Transform>,
     mut weights: Query<&mut MorphWeights>,
-    mut material_handles: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    // A mesh drawn as a ghost keeps its own material aside; a write reaches
+    // that one, which the ghost follows and the mesh shows once solid.
+    mut material_handles: Query<SolidMaterial, HasSolidMaterial>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut joint_gizmos: Query<&mut JointGizmo>,
     children: Query<&Children>,
@@ -251,24 +254,27 @@ pub fn apply_values(
                         let Ok(mut handle) = material_handles.get_mut(binding.entity) else {
                             continue;
                         };
-                        if shared.made.contains(&handle.0.id()) {
+                        let Some(current) = handle.handle().cloned() else {
+                            continue;
+                        };
+                        if shared.made.contains(&current.id()) {
                             continue;
                         }
-                        let key = (root, handle.0.id());
+                        let key = (root, current.id());
                         let copy = match shared.copies.get(&key) {
                             Some(copy) => copy.clone(),
                             None => {
-                                let Some(material) = materials.get(&handle.0).cloned() else {
+                                let Some(material) = materials.get(&current).cloned() else {
                                     continue;
                                 };
                                 let copy = materials.add(material);
-                                emission.copied(handle.0.id(), copy.id());
+                                emission.copied(current.id(), copy.id());
                                 shared.made.insert(copy.id());
                                 shared.copies.insert(key, copy.clone());
                                 copy
                             }
                         };
-                        handle.0 = copy;
+                        handle.set(copy);
                     }
                     found.clone()
                 }
@@ -309,10 +315,13 @@ pub fn apply_values(
                                 for &mesh in &meshes {
                                     if own.0.insert(mesh) {
                                         if let Ok(mut handle) = material_handles.get_mut(mesh) {
-                                            if let Some(copy) = materials.get(&handle.0).cloned() {
+                                            let Some(current) = handle.handle().cloned() else {
+                                                continue;
+                                            };
+                                            if let Some(copy) = materials.get(&current).cloned() {
                                                 let copy = materials.add(copy);
-                                                emission.copied(handle.0.id(), copy.id());
-                                                handle.0 = copy;
+                                                emission.copied(current.id(), copy.id());
+                                                handle.set(copy);
                                             }
                                         }
                                     }
@@ -446,7 +455,7 @@ fn apply(
     value: Decoded,
     transforms: &mut Query<&mut Transform>,
     weights: &mut Query<&mut MorphWeights>,
-    material_handles: &Query<&mut MeshMaterial3d<StandardMaterial>>,
+    material_handles: &Query<SolidMaterial, HasSolidMaterial>,
     materials: &mut Assets<StandardMaterial>,
     emission: &mut Emission,
 ) -> bool {
@@ -513,7 +522,8 @@ fn apply(
             let Some((id, mut material)) = material_handles
                 .get(binding.entity)
                 .ok()
-                .and_then(|handle| Some((handle.0.id(), materials.get_mut(&handle.0)?)))
+                .and_then(|solid| solid.handle().cloned())
+                .and_then(|handle| Some((handle.id(), materials.get_mut(&handle)?)))
             else {
                 return false;
             };
@@ -558,6 +568,134 @@ mod tests {
     use crate::joints::{JointBinding, JointRig};
     use crate::robot::{Joint, JointKind};
     use crate::robots::{Incoming, RobotAsset};
+
+    /// Colour and opacity written to a ghosted robot land on its own
+    /// material, which its ghost follows and it shows again once solid, and
+    /// leave a robot sharing its GLB's material alone.
+    #[test]
+    fn a_write_to_a_ghosted_robot_reaches_its_ghost() {
+        use arora_visuals::ghost::{Ghost, GhostMaterial, GhostPlugin};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .init_asset::<bevy::shader::Shader>()
+            .add_message::<RequestRedraw>()
+            .add_plugins((ValuesPlugin, GhostPlugin));
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::BLACK,
+                ..default()
+            });
+        let mut robot = |instance: &str| {
+            let world = app.world_mut();
+            let root = world.spawn_empty().id();
+            let mesh = world
+                .spawn((MeshMaterial3d(material.clone()), ChildOf(root)))
+                .id();
+            let mut bindings = SceneBindings::default();
+            for (id, feature) in [
+                ("colour", FeatureKind::Color),
+                ("opacity", FeatureKind::Opacity),
+            ] {
+                bindings.by_id.insert(
+                    id.into(),
+                    vec![SceneBinding {
+                        entity: mesh,
+                        feature,
+                        axis: None,
+                        morph_index: None,
+                    }],
+                );
+            }
+            bindings.indexed = true;
+            world.entity_mut(root).insert((
+                asset(instance),
+                EntityInstance {
+                    id: instance.into(),
+                    asset_path: String::new(),
+                    meta: Default::default(),
+                    bindings,
+                    camera: Entity::PLACEHOLDER,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ));
+            (root, mesh)
+        };
+        let (ghosted, mesh) = robot("a");
+        let (_, other) = robot("b");
+        app.world_mut().entity_mut(ghosted).insert(Ghost);
+        app.update();
+
+        let write = |app: &mut App, target: &str, value: Decoded| {
+            app.world_mut()
+                .resource_mut::<ValueWrites>()
+                .0
+                .push(ValueWrite {
+                    instance: Some("a".into()),
+                    target: target.into(),
+                    feature: None,
+                    value,
+                    stamp: None,
+                });
+            app.update();
+            app.world().resource::<AppliedValues>().count
+        };
+        assert_eq!(
+            write(&mut app, "colour", Decoded::Triple([1.0, 0.0, 0.0])),
+            1
+        );
+        assert_eq!(write(&mut app, "opacity", Decoded::Scalar(0.25)), 1);
+        app.update();
+        let ghost = &app
+            .world()
+            .get::<MeshMaterial3d<GhostMaterial>>(mesh)
+            .expect("still a ghost")
+            .0;
+        assert_eq!(
+            app.world()
+                .resource::<Assets<GhostMaterial>>()
+                .get(ghost)
+                .unwrap()
+                .ghost
+                .colour,
+            Vec4::new(1.0, 0.0, 0.0, 0.25),
+            "the ghost shows what was written"
+        );
+        let other_colour = |app: &App| {
+            let handle = &app
+                .world()
+                .get::<MeshMaterial3d<StandardMaterial>>(other)
+                .unwrap()
+                .0;
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .unwrap()
+                .base_color
+        };
+        assert_eq!(other_colour(&app), Color::BLACK, "b is left alone");
+
+        app.world_mut().entity_mut(ghosted).remove::<Ghost>();
+        app.update();
+        let handle = &app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+            .expect("solid again")
+            .0;
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .unwrap()
+                .base_color
+                .to_linear(),
+            LinearRgba::new(1.0, 0.0, 0.0, 0.25),
+            "solid again, it shows what was written while it was a ghost"
+        );
+    }
 
     const TILT: &str = "tilt-value";
 
@@ -718,6 +856,106 @@ mod tests {
         assert_ne!(a0, b0, "each robot has its own");
         assert!((red_a0 - 1.0).abs() < 1e-5 && (red_a1 - 1.0).abs() < 1e-5);
         assert!((red_b0 - 1.0).abs() > 1e-3, "b was not written");
+    }
+
+    /// An element written directly gets a material of its own, so another
+    /// mesh sharing its GLB material is left alone — solid, and ghosted.
+    #[test]
+    fn an_element_write_leaves_a_sharer_of_its_material_alone() {
+        for ghosted in [false, true] {
+            use arora_visuals::ghost::{Ghost, GhostOf, GhostPlugin};
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+                .init_asset::<StandardMaterial>()
+                .init_asset::<bevy::shader::Shader>()
+                .add_message::<RequestRedraw>()
+                .add_plugins((ValuesPlugin, GhostPlugin));
+            let material = app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial {
+                    base_color: Color::BLACK,
+                    ..default()
+                });
+            let world = app.world_mut();
+            let root = world.spawn_empty().id();
+            let node = world.spawn(ChildOf(root)).id();
+            let mesh = world
+                .spawn((MeshMaterial3d(material.clone()), ChildOf(node)))
+                .id();
+            let sharer = world
+                .spawn((MeshMaterial3d(material.clone()), ChildOf(root)))
+                .id();
+            let mut bindings = SceneBindings::default();
+            bindings.elements.insert(
+                "lid".into(),
+                arora_visuals::binding::ElementTargets {
+                    node,
+                    mesh: Some(mesh),
+                    morph: None,
+                },
+            );
+            bindings.indexed = true;
+            let mut meta = arora_visuals::meta::AssetMeta::default();
+            meta.elements.push(arora_visuals::meta::Element {
+                id: "lid".into(),
+                name: String::new(),
+                node_name: "lid".into(),
+                kind: "shape".into(),
+                material: None,
+                morph_targets: Vec::new(),
+                primitive: None,
+            });
+            world.entity_mut(root).insert((
+                asset("a"),
+                EntityInstance {
+                    id: "a".into(),
+                    asset_path: String::new(),
+                    meta,
+                    bindings,
+                    camera: Entity::PLACEHOLDER,
+                    draw_order: 0,
+                    ready: true,
+                },
+            ));
+            if ghosted {
+                app.world_mut().entity_mut(root).insert(Ghost);
+            }
+            app.update();
+            app.world_mut()
+                .resource_mut::<ValueWrites>()
+                .0
+                .push(ValueWrite {
+                    instance: Some("a".into()),
+                    target: "lid".into(),
+                    feature: Some("color".into()),
+                    value: Decoded::Triple([1.0, 0.0, 0.0]),
+                    stamp: None,
+                });
+            app.update();
+            assert_eq!(
+                app.world().resource::<AppliedValues>().count,
+                1,
+                "ghosted: {ghosted}"
+            );
+            let red = |app: &App, entity: Entity| {
+                let world = app.world();
+                let handle = world
+                    .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                    .map(|m| m.0.clone())
+                    .or_else(|| world.get::<GhostOf>(entity).map(|g| g.original.clone()))
+                    .unwrap();
+                world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(&handle)
+                    .unwrap()
+                    .base_color
+                    .to_linear()
+                    .red
+            };
+            assert_eq!(red(&app, mesh), 1.0, "ghosted: {ghosted}");
+            assert_eq!(red(&app, sharer), 0.0, "the sharer, ghosted: {ghosted}");
+        }
     }
 
     /// An element write names its feature as `RobotData` does, resolved

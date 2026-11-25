@@ -3,6 +3,7 @@ import type {
   BelowFloorOptions,
   ControlCommand,
   FeatureValue,
+  GhostOptions,
   Pose,
   SceneEvent,
   SceneOptions,
@@ -17,6 +18,7 @@ interface Module {
   unload: (instance: string) => void;
   set_pose: (instance: string, pose: string) => void;
   set_selection: (instance: string, elements: string[]) => void;
+  set_ghost: (instance: string, options: string) => void;
   frame: (instances: string[]) => void;
   set_theme: (theme: string) => void;
   set_environment: (environment: string) => void;
@@ -103,6 +105,14 @@ export interface SceneHandle {
    * in place of whatever it outlined; none clears it. Kept across a swap.
    */
   setSelection(instance: string, elements: string[]): void;
+  /**
+   * Draws the robot in `instance` as a ghost, styled by `ghost`, or takes
+   * the page's ghost off for `null`: its style goes, and the ghost too unless
+   * the robot was one before the page asked. Kept across a swap; called again with a new style, the
+   * ghost changes from the next frame, so a page fades one by calling it with
+   * a falling `opacity`.
+   */
+  setGhost(instance: string, ghost: GhostOptions | null): void;
   /**
    * Writes a value to the robot in `instance`.
    *
@@ -390,6 +400,9 @@ async function start(
     },
     setSelection(id, elements) {
       wasm.set_selection(id, elements);
+    },
+    setGhost(id, ghost) {
+      wasm.set_ghost(id, ghost ? JSON.stringify(ghost) : "");
     },
     frame(ids = []) {
       wasm.frame(ids);
