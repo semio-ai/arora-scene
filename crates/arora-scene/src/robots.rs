@@ -109,6 +109,9 @@ pub enum RobotRequest {
     /// it outlined before; none clears it. Taken in order with the rest, so
     /// a selection asked for after an unload and a load is the new one's.
     Select(String, Vec<arora_visuals::select::Selection>),
+    /// Draw an instance's robot as a ghost in this style, or solid for none.
+    /// Kept, by the instance, across a swap; dropped with it on an unload.
+    Ghost(String, Option<arora_visuals::ghost::GhostStyle>),
 }
 
 /// What a host asks of the scene's robots, taken at the start of each frame.
@@ -216,6 +219,7 @@ pub(crate) fn take_requests(
     joint_gizmos: Query<(Entity, &JointGizmo)>,
     mut outcomes: ResMut<RobotOutcomes>,
     mut selections: ResMut<Selections>,
+    mut ghosted: ResMut<crate::ghosts::GhostedInstances>,
     mut writes: ResMut<ValueWrites>,
     mut controls: ResMut<ControlCommands>,
     placed: Res<crate::controls::Controls>,
@@ -236,6 +240,7 @@ pub(crate) fn take_requests(
     for request in std::mem::take(&mut requests.robots) {
         match request {
             RobotRequest::Unload(instance) => {
+                ghosted.0.remove(&instance);
                 if selections.0.contains_key(&instance) {
                     selections.0.remove(&instance);
                 }
@@ -297,6 +302,14 @@ pub(crate) fn take_requests(
                     .id();
                 at.incoming = Some((root, asset, transform.scale));
             }
+            RobotRequest::Ghost(instance, style) => match style {
+                Some(style) => {
+                    ghosted.0.insert(instance, style);
+                }
+                None => {
+                    ghosted.0.remove(&instance);
+                }
+            },
             RobotRequest::Select(instance, elements) => {
                 if elements.is_empty() {
                     selections.0.remove(&instance);
@@ -450,6 +463,7 @@ mod tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<WorldAsset>()
             .init_resource::<RobotRequests>()
+            .init_resource::<crate::ghosts::GhostedInstances>()
             .init_resource::<RobotOutcomes>()
             .init_resource::<Selections>()
             .init_resource::<ValueWrites>()
@@ -612,6 +626,44 @@ mod tests {
         let selections = app.world().resource::<Selections>();
         assert!(!selections.0.contains_key("a"), "its selection went");
         assert!(selections.0.contains_key("b"));
+    }
+
+    /// A host's ghost is kept by its instance until the host asks for the
+    /// robot solid or unloads the instance.
+    #[test]
+    fn a_hosts_ghost_is_kept_until_cleared_or_unloaded() {
+        use arora_visuals::ghost::GhostStyle;
+        let mut app = app(take_requests);
+        let ghosted = |app: &App| {
+            let mut ids: Vec<String> = app
+                .world()
+                .resource::<crate::ghosts::GhostedInstances>()
+                .0
+                .keys()
+                .cloned()
+                .collect();
+            ids.sort();
+            ids
+        };
+        let style = GhostStyle::default();
+        ask(
+            &mut app,
+            [
+                RobotRequest::Ghost("a".into(), Some(style)),
+                RobotRequest::Ghost("b".into(), Some(style)),
+            ],
+        );
+        app.update();
+        assert_eq!(ghosted(&app), vec!["a".to_string(), "b".to_string()]);
+        ask(
+            &mut app,
+            [
+                RobotRequest::Ghost("a".into(), None),
+                RobotRequest::Unload("b".into()),
+            ],
+        );
+        app.update();
+        assert!(ghosted(&app).is_empty(), "cleared, and unloaded");
     }
 
     fn ask(app: &mut App, requests: impl IntoIterator<Item = RobotRequest>) {
