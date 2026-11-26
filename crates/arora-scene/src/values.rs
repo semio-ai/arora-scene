@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use arora_visuals::binding::SceneBinding;
+use arora_visuals::euler::EulerWrites;
 use arora_visuals::ghost::{HasSolidMaterial, SolidMaterial};
 use arora_visuals::instance::{EntityInstance, InstanceIndex, InstanceSystems};
 use arora_visuals::joint_gizmo::JointGizmo;
@@ -166,6 +167,7 @@ pub fn apply_values(
     children: Query<&Children>,
     mut own: Local<OwnMaterials>,
     mut shared: Local<InstanceMaterials>,
+    mut euler: Local<EulerWrites>,
     mut emission: ResMut<Emission>,
     mut redraw: MessageWriter<RequestRedraw>,
     index: Res<InstanceIndex>,
@@ -190,6 +192,9 @@ pub fn apply_values(
     }
     if !emission.0.is_empty() {
         emission.0.retain(|id, _| materials.contains(*id));
+    }
+    if !euler.is_empty() {
+        euler.retain(|node| transforms.contains(node));
     }
     if writes.0.is_empty() {
         return;
@@ -353,6 +358,7 @@ pub fn apply_values(
                     &material_handles,
                     &mut materials,
                     &mut emission,
+                    &mut euler,
                 ) {
                     count += 1;
                 }
@@ -450,6 +456,7 @@ fn is_material(feature: &FeatureKind) -> bool {
 }
 
 /// One value onto one place; whether it landed.
+#[allow(clippy::too_many_arguments)]
 fn apply(
     binding: &SceneBinding,
     value: Decoded,
@@ -458,6 +465,7 @@ fn apply(
     material_handles: &Query<SolidMaterial, HasSolidMaterial>,
     materials: &mut Assets<StandardMaterial>,
     emission: &mut Emission,
+    euler: &mut EulerWrites,
 ) -> bool {
     let triple = |current: [f32; 3]| match value {
         Decoded::Triple(v) => match binding.axis {
@@ -490,12 +498,25 @@ fn apply(
                 FeatureKind::Translation => {
                     transform.translation = Vec3::from(triple(transform.translation.to_array()));
                 }
-                FeatureKind::Rotation => {
-                    // An euler in the web's ZYX order, as `FeatureKind` says.
-                    let (z, y, x) = transform.rotation.to_euler(EulerRot::ZYX);
-                    let [x, y, z] = triple([x, y, z]);
-                    transform.rotation = Quat::from_euler(EulerRot::ZYX, z, y, x);
-                }
+                // A per-axis write keeps the other two angles as last written,
+                // not as read back off the quaternion, which past ±π/2 of
+                // pitch is another triple for the same rotation.
+                FeatureKind::Rotation => match binding.axis {
+                    Some(axis) => {
+                        let component = match value {
+                            Decoded::Triple(v) => v[axis],
+                            Decoded::Scalar(s) => s,
+                        };
+                        euler.write_axis(binding.entity, &mut transform.rotation, axis, component);
+                    }
+                    None => {
+                        let angles = match value {
+                            Decoded::Triple(v) => v,
+                            Decoded::Scalar(s) => [s; 3],
+                        };
+                        euler.write(binding.entity, &mut transform.rotation, angles);
+                    }
+                },
                 _ => transform.scale = Vec3::from(triple(transform.scale.to_array())),
             }
             true
@@ -1068,6 +1089,141 @@ mod tests {
         assert_eq!(
             app.world().get::<Transform>(node).unwrap().scale,
             Vec3::splat(2.0)
+        );
+    }
+
+    /// A pitch past π/2, which a quaternion reads back as other angles.
+    const STEEP_PITCH: f32 = 2.0;
+
+    /// An app with robot `a` showing one element, `arm`, whose node it
+    /// returns.
+    fn an_arm() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_message::<RequestRedraw>()
+            .add_plugins(ValuesPlugin);
+        let world = app.world_mut();
+        let node = world.spawn(Transform::default()).id();
+        let mut bindings = SceneBindings::default();
+        bindings.elements.insert(
+            "arm".into(),
+            arora_visuals::binding::ElementTargets {
+                node,
+                mesh: None,
+                morph: None,
+            },
+        );
+        bindings.indexed = true;
+        let mut meta = arora_visuals::meta::AssetMeta::default();
+        meta.elements.push(arora_visuals::meta::Element {
+            id: "arm".into(),
+            name: String::new(),
+            node_name: "arm".into(),
+            kind: "shape".into(),
+            material: None,
+            morph_targets: Vec::new(),
+            primitive: None,
+        });
+        world.spawn((
+            asset("a"),
+            EntityInstance {
+                id: "a".into(),
+                asset_path: String::new(),
+                meta,
+                bindings,
+                camera: Entity::PLACEHOLDER,
+                draw_order: 0,
+                ready: true,
+            },
+        ));
+        (app, node)
+    }
+
+    /// Write `arm`'s named feature and run a frame; how many places took it.
+    fn write_arm(app: &mut App, feature: &str, value: Decoded) -> usize {
+        app.world_mut()
+            .resource_mut::<ValueWrites>()
+            .0
+            .push(ValueWrite {
+                instance: Some("a".into()),
+                target: "arm".into(),
+                feature: Some(feature.into()),
+                value,
+                stamp: None,
+            });
+        app.update();
+        app.world().resource::<AppliedValues>().count
+    }
+
+    fn rotation(app: &App, node: Entity) -> Quat {
+        app.world().get::<Transform>(node).unwrap().rotation
+    }
+
+    /// Whether two quaternions are one rotation, to within float rounding:
+    /// composing the same angles through different products differs in the
+    /// last bit, which is not what these tests are about.
+    fn same_rotation(a: Quat, b: Quat) -> bool {
+        a.abs_diff_eq(b, 1e-5) || a.abs_diff_eq(-b, 1e-5)
+    }
+
+    /// A per-axis rotation write changes that one angle and keeps the other
+    /// two as written, a pitch past π/2 included, which the quaternion alone
+    /// would read back as another triple and so change the roll and yaw too.
+    #[test]
+    fn per_axis_rotation_writes_keep_the_angles_written() {
+        use arora_visuals::euler::{angles_zyx, rotation_zyx};
+        let (mut app, node) = an_arm();
+        assert_eq!(
+            write_arm(&mut app, "rotation.p", Decoded::Scalar(STEEP_PITCH)),
+            1
+        );
+        assert_eq!(write_arm(&mut app, "rotation.r", Decoded::Scalar(0.1)), 1);
+        let written = rotation_zyx([0.1, STEEP_PITCH, 0.0]);
+        assert!(
+            same_rotation(rotation(&app, node), written),
+            "{:?} is not {written:?}",
+            rotation(&app, node)
+        );
+
+        // What starting from the angles read back would have written.
+        let mut read_back = angles_zyx(rotation_zyx([0.0, STEEP_PITCH, 0.0]));
+        read_back[0] = 0.1;
+        assert!(
+            !same_rotation(written, rotation_zyx(read_back)),
+            "the case is one reading the angles back gets wrong"
+        );
+    }
+
+    /// Once something else turns the node, a per-axis write starts from where
+    /// that left it, not from the angles last written, which would snap it
+    /// back.
+    #[test]
+    fn a_rotation_changed_elsewhere_is_not_overwritten_from_stale_angles() {
+        use arora_visuals::euler::{angles_zyx, rotation_zyx};
+        let (mut app, node) = an_arm();
+        assert_eq!(
+            write_arm(
+                &mut app,
+                "rotation",
+                Decoded::Triple([0.0, STEEP_PITCH, 0.0])
+            ),
+            1
+        );
+        let dragged = Quat::from_rotation_z(0.7) * rotation(&app, node);
+        app.world_mut().get_mut::<Transform>(node).unwrap().rotation = dragged;
+        assert_eq!(write_arm(&mut app, "rotation.r", Decoded::Scalar(0.1)), 1);
+        let mut expected = angles_zyx(dragged);
+        expected[0] = 0.1;
+        assert!(
+            same_rotation(rotation(&app, node), rotation_zyx(expected)),
+            "{:?} is not {:?}",
+            rotation(&app, node),
+            rotation_zyx(expected)
+        );
+        assert!(
+            !same_rotation(rotation(&app, node), rotation_zyx([0.1, STEEP_PITCH, 0.0])),
+            "the turn is not undone"
         );
     }
 
